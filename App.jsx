@@ -848,9 +848,17 @@ function parseBoxScoreFile(arrayBuffer, roster, teamName) {
   // on reconstruit un en-tête combiné "Group Subcategory".
   const row0 = rows[0] || [];
   const row1 = rows[1] || [];
+  // Les fichiers réels ne mettent pas toujours un sous-en-tête "propre" ("Réussi" tout seul) :
+  // certains répètent le nom du groupe et des tabulations dans la même cellule
+  // ("2pts\t\t\tRéussi", "Reb\t\tDef"...). On ne regarde donc que le DERNIER segment utile
+  // (après avoir découpé sur tabulations/espaces multiples), qui est le vrai sous-libellé.
   const subHeaderTokens = /^(r[ée]ussis?|manqu[ée]s?|tot\.?|%|def|off|made|missed|att|attempts?)$/i;
+  function lastSubToken(cell) {
+    const parts = String(cell ?? "").split(/\t+/).map(s => s.trim()).filter(Boolean);
+    return parts.length ? parts[parts.length - 1] : "";
+  }
   const row1LooksLikeSubHeader = row1.filter(c => c !== "" && c !== undefined && c !== null).length >= 3
-    && row1.filter(c => c !== "" && subHeaderTokens.test(String(c).trim())).length >= 2;
+    && row1.filter(c => c !== "" && subHeaderTokens.test(lastSubToken(c))).length >= 2;
 
   let header, dataStartRow;
   if (row1LooksLikeSubHeader) {
@@ -868,7 +876,7 @@ function parseBoxScoreFile(arrayBuffer, roster, teamName) {
     const NEVER_SPLIT = new Set(["+/-", "ct", "int", "ev", "bp", "pad", "pts", "mj", "gp", "min"]);
     header = filledGroup.map((g, i) => {
       if (NEVER_SPLIT.has(g.trim().toLowerCase())) return g;
-      const sub = String(row1[i] ?? "").trim();
+      const sub = lastSubToken(row1[i]);
       return sub ? `${g} ${sub}`.trim() : g;
     });
     dataStartRow = 2;
@@ -1277,13 +1285,13 @@ async function saveBoxColumnAliases(aliases) {
 // séparées "2Pts Mades" / "2Pts Misseds" plutôt qu'une colonne FGA/FGM unique — et
 // utilisent des abréviations comme "Bp" (Balles perdues = pertes de balle), "Ro" (Rebonds
 // offensifs), "LF" (Lancers Francs). On détecte chaque brique puis on recombine.
-const MADE = "(made)$";
-const MISSED = "(missed)$";
+const MADE = "(r[ée]ussis?|made)$";
+const MISSED = "(manqu[ée]s?|missed)$";
 const STAT_PATTERNS = {
   minutes: [/^Temps\s*de\s*jeu$/i, /^Min(ute)?s?$/i, /^MIN$/i],
-  made2: [new RegExp(`^2\\s*(pts?|points?)?\\s*${MADE}`, "i"), /^2PM$/i, /^2P\+$/i, /^FGM$/i, /^FG\s*Made$/i, /^2\s*pts?$/i],
+  made2: [new RegExp(`^2\\s*(pts?|points?)?\\s*${MADE}`, "i"), /^2PM$/i, /^2P\+$/i, /^FGM$/i, /^FG\s*Made$/i],
   missed2: [new RegExp(`^2\\s*(pts?|points?)?\\s*${MISSED}`, "i"), /^2P-$/i],
-  made3: [new RegExp(`^3\\s*(pts?|points?)?\\s*${MADE}`, "i"), /^3PM$/i, /^3P\+$/i, /^Threes?\s*Made$/i, /^3\s*pts?$/i],
+  made3: [new RegExp(`^3\\s*(pts?|points?)?\\s*${MADE}`, "i"), /^3PM$/i, /^3P\+$/i, /^Threes?\s*Made$/i],
   missed3: [new RegExp(`^3\\s*(pts?|points?)?\\s*${MISSED}`, "i"), /^3P-$/i],
   madeFT: [/^LF\s*R[ée]ussis?$/i, new RegExp(`^L\\.?F\\.?\\s*${MADE}`, "i"), new RegExp(`lancers?\\s*francs?\\s*${MADE}`, "i"), /^FTM$/i, /^FT\s*Made$/i],
   missedFT: [/^LF\s*Manqu[ée]s?$/i, new RegExp(`^L\\.?F\\.?\\s*${MISSED}`, "i"), new RegExp(`lancers?\\s*francs?\\s*${MISSED}`, "i"), /^FT-$/i],
@@ -1318,9 +1326,8 @@ const STAT_KEY_LABEL_FR = { pts: "Pts", ast: "Assists", tov: "Turnovers", ftPct:
 // le coach ajouter/modifier/supprimer les noms de colonnes reconnus pour chaque stat.
 const STAT_KEY_FRIENDLY_NAME = {
   minutes: "Minutes / Playing time", made2: "2PT Made", missed2: "2PT Missed", made3: "3PT Made", missed3: "3PT Missed",
-  madeFT: "FT Made", missedFT: "FT Missed", fgm: "FG Made (total)", fga: "FG Attempted (total)", tpm: "3PT Made (total)",
-  fta: "FT Attempted (total)", ftm: "FT Made (total)", tov: "Turnovers", oreb: "Offensive Rebounds", reb: "Rebounds (total)",
-  ast: "Assists", pts: "Points", ftPct: "% FT (if already provided)", tpmPct: "% 3PT (if already provided)", twoPct: "% 2PT (if already provided)",
+  madeFT: "FT Made", missedFT: "FT Missed", fga: "FG Attempted (total)", fta: "FT Attempted (total)",
+  tov: "Turnovers", oreb: "Offensive Rebounds", reb: "Rebounds (total)", ast: "Assists", pts: "Points",
 };
 
 // Pour un joueur donné, retrouve — parmi SES colonnes réellement présentes dans le fichier
