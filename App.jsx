@@ -1293,15 +1293,15 @@ const STAT_PATTERNS = {
   missed2: [new RegExp(`^2\\s*(pts?|points?)?\\s*${MISSED}`, "i"), /^2P-$/i],
   made3: [new RegExp(`^3\\s*(pts?|points?)?\\s*${MADE}`, "i"), /^3PM$/i, /^3P\+$/i, /^Threes?\s*Made$/i],
   missed3: [new RegExp(`^3\\s*(pts?|points?)?\\s*${MISSED}`, "i"), /^3P-$/i],
-  madeFT: [/^LF\s*R[ée]ussis?$/i, new RegExp(`^L\\.?F\\.?\\s*${MADE}`, "i"), new RegExp(`lancers?\\s*francs?\\s*${MADE}`, "i"), /^FTM$/i, /^FT\s*Made$/i],
-  missedFT: [/^LF\s*Manqu[ée]s?$/i, new RegExp(`^L\\.?F\\.?\\s*${MISSED}`, "i"), new RegExp(`lancers?\\s*francs?\\s*${MISSED}`, "i"), /^FT-$/i],
+  madeFT: [/^LF\s*R[ée]ussis?$/i, new RegExp(`^L\\.?F\\.?\\s*${MADE}`, "i"), new RegExp(`lancers?\\s*francs?\\s*${MADE}`, "i"), /^FTM$/i, /^FT\s*Made$/i, new RegExp(`^FT\\s*${MADE}`, "i")],
+  missedFT: [/^LF\s*Manqu[ée]s?$/i, new RegExp(`^L\\.?F\\.?\\s*${MISSED}`, "i"), new RegExp(`lancers?\\s*francs?\\s*${MISSED}`, "i"), /^FT-$/i, new RegExp(`^FT\\s*${MISSED}`, "i")],
   fgm: [/^FGM$/i, /^FG\s*Made$/i, /^Field\s*Goals?\s*Made$/i],
   // Priorité au sous-total "Tot." des groupes fusionnés (tentatives réelles) — sinon on
   // retomberait sur la sous-colonne "Made" (tirs marqués), ce qui a causé la sous-évaluation
   // massive des possessions.
-  fga: [/^Tirs\s*Tot\.?\s*Tot\.?$/i, /^FGA$/i, /^FG\s*Att(empts)?$/i, /^Field\s*Goals?\s*Att/i, /^Tirs?\s*tent[ée]s?$/i, /^Tirs\s*tot\.?$/i, /^Tirs?\s*totale?s?$/i],
+  fga: [/^Tirs\s*Tot\.?\s*Tot\.?$/i, /^FGA$/i, /^FG\s*Att(empt(s|ed)?)?$/i, /^Field\s*Goals?\s*Att/i, /^Tirs?\s*tent[ée]s?$/i, /^Tirs\s*tot\.?$/i, /^Tirs?\s*totale?s?$/i],
   tpm: [/^3PM$/i, /^3P\s*Made$/i, /^Threes?\s*Made$/i],
-  fta: [/^LF\s*Tot\.?$/i, /^FTA$/i, /^FT\s*Att(empts)?$/i, /^Free\s*Throws?\s*Att/i, /^LF\s*tent[ée]s?$/i, /^L\.?F\.?$/i, /^LF$/i],
+  fta: [/^LF\s*Tot\.?$/i, /^FT\s*Tot\.?$/i, /^FTA$/i, /^FT\s*Att(empt(s|ed)?)?$/i, /^Free\s*Throws?\s*Att/i, /^LF\s*tent[ée]s?$/i, /^L\.?F\.?$/i, /^LF$/i],
   ftm: [/^FTM$/i, /^FT\s*Made$/i, /^Free\s*Throws?\s*Made$/i],
   oreb: [/^Reb\s*Off\.?$/i, /^Ro$/i, /^R\.?O\.?$/i, /rebonds?\s*off/i, /^OREB$/i, /^ORB$/i, /^Off\.?$/i],
   reb: [/^Reb\s*Tot\.?$/i, /^Reb$/i, /^Rebonds?$/i, /^R\.?D\.?$/i], // rebonds TOTAUX (offensifs+défensifs) — informatif
@@ -1328,6 +1328,7 @@ const STAT_KEY_FRIENDLY_NAME = {
   minutes: "Minutes / Playing time", made2: "2PT Made", missed2: "2PT Missed", made3: "3PT Made", missed3: "3PT Missed",
   madeFT: "FT Made", missedFT: "FT Missed", fga: "FG Attempted (total)", fta: "FT Attempted (total)",
   tov: "Turnovers", oreb: "Offensive Rebounds", reb: "Rebounds (total)", ast: "Assists", pts: "Points",
+  twoPct: "% 2PT (if already in the file)", tpmPct: "% 3PT (if already in the file)", ftPct: "% FT (if already in the file)",
 };
 
 // Pour un joueur donné, retrouve — parmi SES colonnes réellement présentes dans le fichier
@@ -1358,12 +1359,16 @@ function derivedMatchStats(statsObj) {
   const made2 = get(STAT_PATTERNS.made2), missed2 = get(STAT_PATTERNS.missed2);
   const made3 = get(STAT_PATTERNS.made3), missed3 = get(STAT_PATTERNS.missed3);
   const madeFT = get(STAT_PATTERNS.madeFT), missedFT = get(STAT_PATTERNS.missedFT);
+  const directPct2 = get(STAT_PATTERNS.twoPct), directPct3 = get(STAT_PATTERNS.tpmPct), directPctFT = get(STAT_PATTERNS.ftPct);
   const derived = {};
-  if (made2 !== undefined && missed2 !== undefined && made2 + missed2 > 0)
+  if (directPct2 !== undefined) derived["% 2pts"] = directPct2;
+  else if (made2 !== undefined && missed2 !== undefined && made2 + missed2 > 0)
     derived["% 2pts (calculated)"] = (100 * made2) / (made2 + missed2);
-  if (made3 !== undefined && missed3 !== undefined && made3 + missed3 > 0)
+  if (directPct3 !== undefined) derived["% 3pts"] = directPct3;
+  else if (made3 !== undefined && missed3 !== undefined && made3 + missed3 > 0)
     derived["% 3pts (calculated)"] = (100 * made3) / (made3 + missed3);
-  if (madeFT !== undefined && missedFT !== undefined && madeFT + missedFT > 0)
+  if (directPctFT !== undefined) derived["% LF"] = directPctFT;
+  else if (madeFT !== undefined && missedFT !== undefined && madeFT + missedFT > 0)
     derived["% LF (calculated)"] = (100 * madeFT) / (madeFT + missedFT);
   const fgm = (made2 || 0) + (made3 || 0), fga = (made2 || 0) + (missed2 || 0) + (made3 || 0) + (missed3 || 0);
   if (fga > 0) derived["eFG% (calculated)"] = (100 * (fgm + 0.5 * (made3 || 0))) / fga;
@@ -1419,9 +1424,16 @@ function useTeamAdvancedStats(filterKeys) {
       const pts = s(columns.pts) ?? ((made2 !== null || made3 !== null || madeFT !== null)
         ? 2 * (made2 || 0) + 3 * (made3 || 0) + (madeFT || 0) : null);
       const dreb = (reb !== null && oreb !== null) ? reb - oreb : null; // rebonds défensifs déduits si on a le total ET l'offensif
-      const pct2 = (made2 !== null && missed2 !== null && made2 + missed2 > 0) ? (100 * made2) / (made2 + missed2) : null;
-      const pct3 = (made3 !== null && missed3 !== null && made3 + missed3 > 0) ? (100 * made3) / (made3 + missed3) : null;
-      const pctFT = (madeFT !== null && missedFT !== null && madeFT + missedFT > 0) ? (100 * madeFT) / (madeFT + missedFT) : null;
+      // Priorité à la colonne de pourcentage déjà présente dans le fichier (ex. "2PTS%") — mais
+      // uniquement si on lit une vraie ligne de totaux d'équipe : additionner des pourcentages
+      // joueur par joueur n'aurait aucun sens (ça peut dépasser 100%). Sans ligne de totaux, on
+      // recalcule toujours depuis les comptages réussis/manqués, qui eux s'additionnent correctement.
+      const directPct2 = m.teamRow ? s(columns.twoPct) : null;
+      const directPct3 = m.teamRow ? s(columns.tpmPct) : null;
+      const directPctFT = m.teamRow ? s(columns.ftPct) : null;
+      const pct2 = directPct2 ?? ((made2 !== null && missed2 !== null && made2 + missed2 > 0) ? (100 * made2) / (made2 + missed2) : null);
+      const pct3 = directPct3 ?? ((made3 !== null && missed3 !== null && made3 + missed3 > 0) ? (100 * made3) / (made3 + missed3) : null);
+      const pctFT = directPctFT ?? ((madeFT !== null && missedFT !== null && madeFT + missedFT > 0) ? (100 * madeFT) / (madeFT + missedFT) : null);
 
       // Estimation standard des possessions (Dean Oliver) : FGA - OREB + TOV + 0.44*FTA.
       // Si seul le total des rebonds est disponible (pas de split offensif/défensif), on
