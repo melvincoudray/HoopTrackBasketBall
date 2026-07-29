@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
-import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home } from "lucide-react";
+import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon } from "lucide-react";
 import {
   PieChart, Pie, Cell, ComposedChart, Bar as RBar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
   RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar,
@@ -1830,6 +1830,7 @@ export default function App() {
             goToPlayer={(subtab) => { setSelectedPlayer(session.name); setHomeNav({ playerSubtab: subtab }); setTab("players"); }}
             goToScouting={(subtab, teamName) => { setHomeNav({ scoutingSubtab: subtab, scoutingTeam: teamName }); setTab("scouting"); }}
             goToTeam={() => setTab("team")}
+            visibility={visibility}
           />
         )}
         {tab === "import" && session.role === "coach" && (
@@ -1919,9 +1920,9 @@ export default function App() {
             initialSubtab={homeNav?.playerSubtab}
           />
         )}
-        {tab === "team" && <TeamTab roster={roster} allPlays={allPlays} matchesIndex={matchesIndex} matchFilter={effectiveMatchFilter} isCoach={session.role === "coach"} team={team} />}
-        {tab === "scouting" && <ScoutingTab isCoach={session.role === "coach"} matchFilter={effectiveMatchFilter} initialSubtab={homeNav?.scoutingSubtab} initialReportTeam={homeNav?.scoutingTeam} />}
-        {tab === "backup" && session.role === "coach" && <BackupTab team={team} />}
+        {tab === "team" && (session.role === "coach" || visibility.tabs.team) && <TeamTab roster={roster} allPlays={allPlays} matchesIndex={matchesIndex} matchFilter={effectiveMatchFilter} isCoach={session.role === "coach"} team={team} visibility={visibility} />}
+        {tab === "scouting" && (session.role === "coach" || visibility.tabs.scouting) && <ScoutingTab isCoach={session.role === "coach"} matchFilter={effectiveMatchFilter} initialSubtab={homeNav?.scoutingSubtab} initialReportTeam={homeNav?.scoutingTeam} />}
+        {tab === "backup" && session.role === "coach" && <BackupTab team={team} roster={roster} />}
         {tab === "settings" && session.role === "coach" && (
           <div>
             <SectionTitle eyebrow="Settings" title="Current season" />
@@ -1944,7 +1945,7 @@ export default function App() {
           </div>
         )}
       </div>
-      <BottomTabBar tab={tab} setTab={setTab} isCoach={session.role === "coach"} visibility={visibility} />
+      <BottomTabBar tab={tab} setTab={(t) => { setHomeNav(null); setTab(t); }} isCoach={session.role === "coach"} visibility={visibility} />
     </div>
   );
 }
@@ -2131,6 +2132,10 @@ async function approveDeletion(req) {
     const key = p + "wellness:" + req.meta.playerName;
     const entries = (await rawGet(key)) || [];
     await rawSet(key, entries.filter(e => e.id !== req.meta.entryId));
+  } else if (req.type === "resource") {
+    const key = p + "team_resources";
+    const resources = (await rawGet(key)) || [];
+    await rawSet(key, resources.filter(r => r.id !== req.meta.id));
   }
   const pending = (await rawGet("pending_deletions")) || [];
   await rawSet("pending_deletions", pending.filter(r => r.id !== req.id));
@@ -2319,7 +2324,7 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
   useEffect(() => {
     if (expanded) {
       rawGet("team_" + team.id + ":app_users").then(u => setUsers(u || {}));
-      rawGet("team_" + team.id + ":visibility_config").then(v => setVisibility(v ? { ...DEFAULT_VISIBILITY, ...v, tabs: { ...DEFAULT_VISIBILITY.tabs, ...(v.tabs || {}) }, playerDetail: { ...DEFAULT_VISIBILITY.playerDetail, ...(v.playerDetail || {}) } } : DEFAULT_VISIBILITY));
+      rawGet("team_" + team.id + ":visibility_config").then(v => setVisibility(v ? { ...DEFAULT_VISIBILITY, ...v, tabs: { ...DEFAULT_VISIBILITY.tabs, ...(v.tabs || {}) }, playerDetail: { ...DEFAULT_VISIBILITY.playerDetail, ...(v.playerDetail || {}) }, team: { ...DEFAULT_VISIBILITY.team, ...(v.team || {}) } } : DEFAULT_VISIBILITY));
     }
   }, [expanded]);
 
@@ -2329,6 +2334,7 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
   }
   function toggleTab(key) { saveVisibility({ ...visibility, tabs: { ...visibility.tabs, [key]: !visibility.tabs[key] } }); }
   function togglePlayerDetail(key) { saveVisibility({ ...visibility, playerDetail: { ...visibility.playerDetail, [key]: !visibility.playerDetail[key] } }); }
+  function toggleTeamSection(key) { saveVisibility({ ...visibility, team: { ...visibility.team, [key]: !visibility.team[key] } }); }
   function toggleWellnessCharts() { saveVisibility({ ...visibility, wellnessCharts: !visibility.wellnessCharts }); }
 
   async function handleLogoChange(e) {
@@ -2392,7 +2398,13 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
                 </label>
               ))}
               <div style={{ height: 1, background: LINE, margin: "4px 0" }} />
-              {[["stats", "Match Stats sub-tab"], ["objectives", "Objectives sub-tab"], ["training", "Training sub-tab"], ["mental", "Mental evaluation sub-tab"], ["wellness", "Wellness sub-tab"], ["role", "Role sub-tab"]].map(([key, label]) => (
+              {[["standings", "Team — Standings"], ["teamPlay", "Team — Team Play"], ["advanced", "Team — Advanced"], ["resources", "Team — Resources"]].map(([key, label]) => (
+                <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
+                  <input type="checkbox" checked={visibility.team[key]} onChange={() => toggleTeamSection(key)} /> {label}
+                </label>
+              ))}
+              <div style={{ height: 1, background: LINE, margin: "4px 0" }} />
+              {[["stats", "Match Stats sub-tab"], ["objectives", "Objectives sub-tab"], ["training", "Training sub-tab"], ["mental", "Mental evaluation sub-tab"], ["wellness", "Wellness sub-tab"], ["role", "Role sub-tab"], ["meetings", "Meetings sub-tab"]].map(([key, label]) => (
                 <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
                   <input type="checkbox" checked={visibility.playerDetail[key]} onChange={() => togglePlayerDetail(key)} /> {label}
                 </label>
@@ -2573,7 +2585,7 @@ function HomeSectionLink({ eyebrow, title, onClick }) {
   );
 }
 
-function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, team, goToPlayer, goToScouting, goToTeam }) {
+function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, team, goToPlayer, goToScouting, goToTeam, visibility }) {
   const box = useBoxScore(playerName, matchFilter);
   const advanced = useTeamAdvancedStats(matchFilter);
   const objectives = useObjectives(playerName || "");
@@ -2588,6 +2600,9 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   const scouting = useScoutingTeams();
   const [nextGame, setNextGame] = useState("");
   const [role, setRole] = useState(null);
+  const [resources, setResources] = useState([]);
+
+  useEffect(() => { storeGet("team_resources").then(r => setResources(((r || []).sort((a, b) => b.addedAt.localeCompare(a.addedAt))).slice(0, 2))); }, []);
 
   useEffect(() => {
     if (playerName) {
@@ -2643,7 +2658,7 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
         <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>{session.name}</h1>
       </div>
 
-      {(isCoach || nextGame) && (
+      {(isCoach || (nextGame && (visibility || DEFAULT_VISIBILITY).tabs.scouting)) && (
         <div style={{ marginBottom: 26 }}>
           <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 8 }}>Next game</div>
           {isCoach && (
@@ -2677,6 +2692,20 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
             <div style={{ fontWeight: 700, fontSize: 15, flex: 1 }}>{role.name || "Role"}</div>
             <ChevronRight size={16} color="#5C6470" />
           </button>
+        </div>
+      )}
+
+      {resources.length > 0 && (
+        <div style={{ marginBottom: 26 }}>
+          <HomeSectionLink eyebrow="Latest" title="Resources" onClick={goToTeam} />
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {resources.map(r => (
+              <a key={r.id} href={r.url} target="_blank" rel="noopener noreferrer" style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 14px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, color: PAPER, textDecoration: "none" }}>
+                {r.type === "video" ? <Video size={16} color={AMBER} /> : <LinkIcon size={16} color={TEAL} />}
+                <span style={{ fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title}</span>
+              </a>
+            ))}
+          </div>
         </div>
       )}
 
@@ -2755,25 +2784,37 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
         </>
       )}
 
-      <HomeSectionLink eyebrow="Team" title="Four Factors" onClick={goToTeam} />
-      {advanced.loading ? <EmptyState text="Loading…" /> : !advanced.perMatch.length ? (
-        <EmptyState text="No box score found in memory. Import a file from the 'Full Stats' tab (top menu)." />
-      ) : (
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 26 }}>
-          <StatPill label="ORTG" value={ortg !== null ? ortg.toFixed(1) : "–"} tone="teal" />
-          <StatPill label="DRTG" value={drtg !== null ? drtg.toFixed(1) : "–"} tone="red" />
-          <StatPill label="eFG%" value={efg !== null ? (efg * 100).toFixed(1) + "%" : "–"} />
-          <StatPill label="TOV%" value={tovPct !== null ? (tovPct * 100).toFixed(1) + "%" : "–"} tone="red" />
-          <StatPill label="FTA/FGA" value={ftRate !== null ? ftRate.toFixed(2) : "–"} />
-          <StatPill label="Off. rebounds / game" value={oreb !== null ? oreb.toFixed(1) : "–"} />
-        </div>
-      )}
+      {(isCoach || (visibility || DEFAULT_VISIBILITY).tabs.team) && (
+        <>
+          {(isCoach || (visibility || DEFAULT_VISIBILITY).team.advanced) && (
+            <>
+              <HomeSectionLink eyebrow="Team" title="Four Factors" onClick={goToTeam} />
+              {advanced.loading ? <EmptyState text="Loading…" /> : !advanced.perMatch.length ? (
+                <EmptyState text="No box score found in memory. Import a file from the 'Full Stats' tab (top menu)." />
+              ) : (
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 26 }}>
+                  <StatPill label="ORTG" value={ortg !== null ? ortg.toFixed(1) : "–"} tone="teal" />
+                  <StatPill label="DRTG" value={drtg !== null ? drtg.toFixed(1) : "–"} tone="red" />
+                  <StatPill label="eFG%" value={efg !== null ? (efg * 100).toFixed(1) + "%" : "–"} />
+                  <StatPill label="TOV%" value={tovPct !== null ? (tovPct * 100).toFixed(1) + "%" : "–"} tone="red" />
+                  <StatPill label="FTA/FGA" value={ftRate !== null ? ftRate.toFixed(2) : "–"} />
+                  <StatPill label="Off. rebounds / game" value={oreb !== null ? oreb.toFixed(1) : "–"} />
+                </div>
+              )}
+            </>
+          )}
 
-      <HomeSectionLink eyebrow="Coding file" title="Team playtypes & shooting selection" onClick={goToTeam} />
-      {teamOff.length === 0 && teamDef.length === 0 ? (
-        <EmptyState text="No action coded yet (Import Match tab)." />
-      ) : (
-        <OffenseDefenseBreakdown off={teamOff} def={teamDef} detailTables={false} />
+          {(isCoach || (visibility || DEFAULT_VISIBILITY).team.teamPlay) && (
+            <>
+              <HomeSectionLink eyebrow="Coding file" title="Team playtypes & shooting selection" onClick={goToTeam} />
+              {teamOff.length === 0 && teamDef.length === 0 ? (
+                <EmptyState text="No action coded yet (Import Match tab)." />
+              ) : (
+                <OffenseDefenseBreakdown off={teamOff} def={teamDef} detailTables={false} />
+              )}
+            </>
+          )}
+        </>
       )}
     </div>
   );
@@ -3082,6 +3123,7 @@ function PlayersList({ roster, allPlays, onSelect, isCoach, onlyOwn, matchFilter
     const plays = allPlays.filter(pl => pl.player === p.name);
     const codedGames = new Set(plays.map(pl => pl.matchId)).size;
     const b = box.byPlayer[p.name];
+    const ppg = b && b.ptsLabel && b.averages[b.ptsLabel] !== null ? b.averages[b.ptsLabel].toFixed(1) : "–";
     return { ...p, playCount: plays.length, codedGames, boxGames: b ? b.games : 0, ppg };
   });
 
@@ -3388,7 +3430,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
       </div>
 
       <div className="screen-only" style={{ display: "flex", gap: 8, marginBottom: 20, borderBottom: `1px solid ${LINE}`, paddingBottom: 10, flexWrap: "wrap" }}>
-        {[["stats", "Match Stats", "stats"], ["objectifs", "Objectives", "objectives"], ["training", "Training", "training"], ["mental", "Mental evaluation", "mental"], ["wellness", "Wellness", "wellness"], ["role", "Role", "role"]]
+        {[["stats", "Match Stats", "stats"], ["objectifs", "Objectives", "objectives"], ["training", "Training", "training"], ["mental", "Mental evaluation", "mental"], ["wellness", "Wellness", "wellness"], ["role", "Role", "role"], ["meetings", "Meetings", "meetings"]]
           .filter(([, , key]) => isCoach || pd[key])
           .map(([id, label]) => (
           <button key={id} onClick={() => setSubtab(id)} style={{
@@ -3522,6 +3564,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
         {subtab === "mental" && <MentalLog playerName={playerName} isCoach={isCoach} />}
         {subtab === "wellness" && <WellnessTab playerName={playerName} isCoach={isCoach} canSeeCharts={isCoach || v.wellnessCharts} teamId={teamId} teamName={teamName} />}
         {subtab === "role" && <RoleTab playerName={playerName} isCoach={isCoach} />}
+        {subtab === "meetings" && <MeetingsTab playerName={playerName} isCoach={isCoach} />}
       </div>
 
       <div className="print-only" id="player-print-content">
@@ -4197,7 +4240,8 @@ const MENTAL_CRITERIA = [
 
 const DEFAULT_VISIBILITY = {
   tabs: { players: true, team: true, scouting: true },
-  playerDetail: { stats: true, objectives: true, training: true, mental: true, wellness: true, role: true },
+  playerDetail: { stats: true, objectives: true, training: true, mental: true, wellness: true, role: true, meetings: true },
+  team: { standings: true, teamPlay: true, advanced: true, resources: true },
   wellnessCharts: false, // les graphiques Wellness sont cachés aux joueurs par défaut
 };
 
@@ -4206,7 +4250,7 @@ function useVisibilityConfig() {
   const [loading, setLoading] = useState(true);
   useEffect(() => {
     storeGet("visibility_config").then(v => {
-      setConfig(v ? { ...DEFAULT_VISIBILITY, ...v, tabs: { ...DEFAULT_VISIBILITY.tabs, ...(v.tabs || {}) }, playerDetail: { ...DEFAULT_VISIBILITY.playerDetail, ...(v.playerDetail || {}) } } : DEFAULT_VISIBILITY);
+      setConfig(v ? { ...DEFAULT_VISIBILITY, ...v, tabs: { ...DEFAULT_VISIBILITY.tabs, ...(v.tabs || {}) }, playerDetail: { ...DEFAULT_VISIBILITY.playerDetail, ...(v.playerDetail || {}) }, team: { ...DEFAULT_VISIBILITY.team, ...(v.team || {}) } } : DEFAULT_VISIBILITY);
       setLoading(false);
     });
   }, []);
@@ -4229,6 +4273,99 @@ const WELLNESS_SLOTS = [
 // qui est attendu concrètement, et une image le représentant. Le joueur peut la consulter
 // mais pas la modifier.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Meeting — journal des entretiens avec un joueur : date, titre, description. Ajouté
+// par le coach, consultable par le joueur.
+// ---------------------------------------------------------------------------
+
+function MeetingsTab({ playerName, isCoach }) {
+  const [meetings, setMeetings] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [title, setTitle] = useState("");
+  const [description, setDescription] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+
+  useEffect(() => { load(); }, [playerName]);
+  async function load() {
+    setLoading(true);
+    setMeetings(((await storeGet("meetings:" + playerName)) || []).sort((a, b) => b.date.localeCompare(a.date)));
+    setLoading(false);
+  }
+
+  async function addMeeting() {
+    if (!title.trim()) return;
+    setBusy(true);
+    const entry = { id: uid(), date, title: title.trim(), description: description.trim() };
+    const next = [entry, ...meetings];
+    await storeSet("meetings:" + playerName, next);
+    setMeetings(next);
+    setTitle(""); setDescription("");
+    setBusy(false);
+  }
+
+  async function removeMeeting(id) {
+    const next = meetings.filter(m => m.id !== id);
+    await storeSet("meetings:" + playerName, next);
+    setMeetings(next);
+    setConfirmDeleteId(null);
+  }
+
+  if (loading) return <EmptyState text="Loading…" />;
+
+  return (
+    <div>
+      {isCoach && (
+        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 20 }}>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+            <div style={{ width: 160 }}>
+              <label style={labelStyle}>Date</label>
+              <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+            </div>
+            <div style={{ flex: 1, minWidth: 200 }}>
+              <label style={labelStyle}>Title</label>
+              <input value={title} onChange={e => setTitle(e.target.value)} placeholder="e.g. Mid-season check-in" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+            </div>
+          </div>
+          <div style={{ marginBottom: 12 }}>
+            <label style={labelStyle}>Description</label>
+            <textarea value={description} onChange={e => setDescription(e.target.value)} rows={4} placeholder="What was discussed, agreed, or decided..."
+              style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", resize: "vertical" }} />
+          </div>
+          <button disabled={busy || !title.trim()} onClick={addMeeting} style={{ ...btnPrimary, width: "auto", padding: "9px 18px" }}>{busy ? "…" : "Add meeting"}</button>
+        </div>
+      )}
+
+      {meetings.length === 0 ? <EmptyState text="No meeting recorded yet." /> : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {meetings.map(m => (
+            <div key={m.id} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 16 }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 10, marginBottom: 6 }}>
+                <div>
+                  <div style={{ fontSize: 11, color: "#5C6470" }}>{m.date}</div>
+                  <div style={{ fontSize: 14.5, fontWeight: 700 }}>{m.title}</div>
+                </div>
+                {isCoach && (
+                  confirmDeleteId === m.id ? (
+                    <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                      <button onClick={() => removeMeeting(m.id)} style={{ background: RED, border: "none", borderRadius: 6, color: "#fff", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Yes</button>
+                      <button onClick={() => setConfirmDeleteId(null)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Cancel</button>
+                    </div>
+                  ) : (
+                    <button onClick={() => setConfirmDeleteId(m.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex", flexShrink: 0 }}><Trash2 size={14} /></button>
+                  )
+                )}
+              </div>
+              {m.description && <div style={{ fontSize: 13, color: "#8B93A1", lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{m.description}</div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 function RoleTab({ playerName, isCoach }) {
   const [role, setRole] = useState(null);
@@ -5954,14 +6091,89 @@ function TagCategoriesSettings({ roster, title = "Column categories (coding file
   );
 }
 
-function BackupTab({ team }) {
+// ---------------------------------------------------------------------------
+// Migration prénom → nom complet — les données déjà enregistrées avant le passage à
+// l'identité par nom complet restent accessibles sous l'ancienne clé (prénom seul) tant
+// qu'on ne les recopie pas explicitement. Cette fonction copie tout ce qui existe déjà
+// (entraînement, objectifs, Wellness, évaluation mentale, photo, rôle, identifiants de
+// connexion) vers la nouvelle clé, et corrige aussi les joueurs déjà référencés à
+// l'intérieur des matchs codés et box scores déjà importés.
+// ---------------------------------------------------------------------------
+
+async function migrateToFullNameIdentity(roster) {
+  let migrated = 0;
+  const perPlayerKeys = ["training", "objectives", "mental", "wellness", "photo", "role"];
+  for (const p of roster) {
+    if (!p.first || !p.name || p.first === p.name) continue;
+    for (const prefix of perPlayerKeys) {
+      const oldData = await storeGet(prefix + ":" + p.first);
+      const newData = await storeGet(prefix + ":" + p.name);
+      if (oldData && !newData) { await storeSet(prefix + ":" + p.name, oldData); migrated++; }
+    }
+  }
+  // Identifiants de connexion (même code PIN conservé, juste rattaché au nom complet).
+  const users = (await storeGet("app_users")) || {};
+  let usersChanged = false;
+  for (const p of roster) {
+    if (p.first && p.name && p.first !== p.name && users[p.first] && !users[p.name]) {
+      users[p.name] = users[p.first];
+      usersChanged = true;
+      migrated++;
+    }
+  }
+  if (usersChanged) await storeSet("app_users", users);
+
+  // Matchs déjà codés : chaque action porte le prénom tel qu'il apparaissait dans l'ancien
+  // fichier — on le remplace par le nom complet du joueur correspondant du roster actuel.
+  const matchIdx = (await storeGet("match_index")) || [];
+  for (const m of matchIdx) {
+    const data = await storeGet("match:" + m.id);
+    if (!data || !data.plays) continue;
+    let changed = false;
+    const plays = data.plays.map(play => {
+      const p = roster.find(pl => pl.first === play.player && pl.first !== pl.name);
+      if (p) { changed = true; return { ...play, player: p.name }; }
+      return play;
+    });
+    if (changed) { await storeSet("match:" + m.id, { ...data, plays }); migrated++; }
+  }
+
+  // Box scores déjà importés : idem pour chaque ligne joueur.
+  const boxIdx = (await storeGet("boxscore_index")) || [];
+  for (const b of boxIdx) {
+    const data = await storeGet("boxscore:" + b.id);
+    if (!data || !data.rows) continue;
+    let changed = false;
+    const rows = data.rows.map(row => {
+      const p = roster.find(pl => pl.first === row.player && pl.first !== pl.name);
+      if (p) { changed = true; return { ...row, player: p.name, playerFull: p.name }; }
+      return row;
+    });
+    if (changed) { await storeSet("boxscore:" + b.id, { ...data, rows }); migrated++; }
+  }
+
+  return migrated;
+}
+
+function BackupTab({ team, roster }) {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [pendingImport, setPendingImport] = useState(null); // backup lu, en attente de confirmation
   const [error, setError] = useState("");
   const [backupText, setBackupText] = useState(""); // solution de secours : texte copiable si le téléchargement ne fonctionne pas
+  const [migrateBusy, setMigrateBusy] = useState(false);
+  const [migrateStatus, setMigrateStatus] = useState("");
   const fileRef = useRef();
   const textRef = useRef();
+
+  async function runMigration() {
+    setMigrateBusy(true); setMigrateStatus("");
+    const count = await migrateToFullNameIdentity(roster);
+    setMigrateStatus(count > 0
+      ? `Done — ${count} item(s) migrated to the full-name identity.`
+      : "Nothing to migrate — everything is already using the full name.");
+    setMigrateBusy(false);
+  }
   const pasteRef = useRef();
 
   async function handleExport() {
@@ -6026,6 +6238,20 @@ function BackupTab({ team }) {
   return (
     <div>
       <SectionTitle eyebrow="Data protection" title="Backup" />
+
+      <div style={{ background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 12, padding: 22, marginBottom: 20 }}>
+        <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>Migrate to full-name identity</div>
+        <p style={{ color: "#8B93A1", fontSize: 13, lineHeight: 1.6, margin: "0 0 16px" }}>
+          Players are now identified by their full name everywhere (to avoid mixing up two players
+          who share a first name). If you entered training, objectives, Wellness, mental evaluations,
+          or imported matches/box scores before this change, run this once to carry everything over —
+          nothing already there gets lost.
+        </p>
+        <button disabled={migrateBusy} onClick={runMigration} style={{ ...btnPrimary, width: "auto", padding: "10px 20px" }}>
+          {migrateBusy ? "Migrating…" : "Run migration"}
+        </button>
+        {migrateStatus && <div style={{ fontSize: 13, color: TEAL, marginTop: 10 }}>{migrateStatus}</div>}
+      </div>
 
       <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 22, marginBottom: 20 }}>
         <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>Export</div>
@@ -6234,7 +6460,108 @@ function TeamPrintReport({ team, rows, otherLabels, advanced, teamOff, teamDef }
   );
 }
 
-function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team }) {
+// ---------------------------------------------------------------------------
+// Resources — liens vidéo ou documents partagés à toute l'équipe, importés par le coach.
+// Les deux plus récents apparaissent sur l'écran d'accueil de chaque joueur, juste sous Role.
+// ---------------------------------------------------------------------------
+
+function detectResourceType(url) {
+  return /youtube\.com|youtu\.be|vimeo\.com|\.mp4($|\?)/i.test(url) ? "video" : "document";
+}
+
+function TeamResourcesTab({ isCoach, team }) {
+  const [resources, setResources] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [title, setTitle] = useState("");
+  const [url, setUrl] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [requestedIds, setRequestedIds] = useState(new Set());
+
+  useEffect(() => { load(); }, []);
+  async function load() {
+    setLoading(true);
+    setResources(((await storeGet("team_resources")) || []).sort((a, b) => b.addedAt.localeCompare(a.addedAt)));
+    setLoading(false);
+  }
+
+  async function addResource() {
+    setError("");
+    if (!title.trim() || !url.trim()) { setError("Add a title and a link."); return; }
+    let parsed;
+    try { parsed = new URL(url.trim()); } catch { setError("That doesn't look like a valid link."); return; }
+    setBusy(true);
+    const entry = { id: uid(), title: title.trim(), url: parsed.href, type: detectResourceType(parsed.href), addedAt: new Date().toISOString() };
+    const next = [entry, ...resources];
+    await storeSet("team_resources", next);
+    setResources(next);
+    setTitle(""); setUrl("");
+    setBusy(false);
+  }
+
+  async function handleDelete(r) {
+    await requestDeletion(team.id, team.name, "resource", r.title, { id: r.id });
+    setRequestedIds(s => new Set([...s, r.id]));
+    setConfirmDeleteId(null);
+  }
+
+  if (loading) return <EmptyState text="Loading…" />;
+
+  return (
+    <div>
+      {isCoach && (
+        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 20 }}>
+          <p style={{ color: "#8B93A1", fontSize: 13, lineHeight: 1.6, margin: "0 0 14px" }}>
+            Share a video link (YouTube, Vimeo...) or a document link (PDF, Google Drive...) with the whole team.
+            The two most recent show up on every player's Home screen.
+          </p>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+            <div style={{ flex: 1, minWidth: 180 }}>
+              <label style={labelStyle}>Title</label>
+              <input value={title} onChange={e => setTitle(e.target.value)} placeholder="e.g. Zone offense breakdown" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+            </div>
+            <div style={{ flex: 2, minWidth: 220 }}>
+              <label style={labelStyle}>Link</label>
+              <input value={url} onChange={e => setUrl(e.target.value)} placeholder="https://…" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+            </div>
+          </div>
+          {error && <div style={{ color: RED, fontSize: 12.5, marginBottom: 10 }}>{error}</div>}
+          <button disabled={busy} onClick={addResource} style={{ ...btnPrimary, width: "auto", padding: "9px 18px" }}>{busy ? "…" : "Add"}</button>
+        </div>
+      )}
+
+      {resources.length === 0 ? <EmptyState text="No resource shared yet." /> : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {resources.map(r => (
+            <div key={r.id} style={{ ...btnRow, cursor: "default" }}>
+              <a href={r.url} target="_blank" rel="noopener noreferrer" style={{ display: "flex", alignItems: "center", gap: 10, color: "inherit", textDecoration: "none", flex: 1, minWidth: 0 }}>
+                {r.type === "video" ? <Video size={16} color={AMBER} /> : <LinkIcon size={16} color={TEAL} />}
+                <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title}</span>
+              </a>
+              {isCoach && (
+                requestedIds.has(r.id) ? (
+                  <span style={{ fontSize: 11.5, color: AMBER, flexShrink: 0 }}>Pending admin approval</span>
+                ) : confirmDeleteId === r.id ? (
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                    <button onClick={() => handleDelete(r)} style={{ background: RED, border: "none", borderRadius: 6, color: "#fff", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Yes</button>
+                    <button onClick={() => setConfirmDeleteId(null)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Cancel</button>
+                  </div>
+                ) : (
+                  <button onClick={() => setConfirmDeleteId(r.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex", flexShrink: 0 }}><Trash2 size={14} /></button>
+                )
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+
+function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, visibility }) {
+  const v = (visibility || DEFAULT_VISIBILITY).team;
   const box = useAllBoxScores(matchFilter);
   const advanced = useTeamAdvancedStats(matchFilter);
   const [subtab, setSubtab] = useState("classement");
@@ -6291,7 +6618,10 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team })
       </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 20, borderBottom: `1px solid ${LINE}`, paddingBottom: 10, flexWrap: "wrap" }}>
-        {[["classement", "Standings"], ["collectif", "Team Play"], ["avance", "Advanced"], ...(isCoach ? [["entrainement", "Team Training"]] : [])].map(([id, label]) => (
+        {[["classement", "Standings", "standings"], ["collectif", "Team Play", "teamPlay"], ["avance", "Advanced", "advanced"], ["resources", "Resources", "resources"]]
+          .filter(([, , key]) => isCoach || v[key])
+          .concat(isCoach ? [["entrainement", "Team Training"]] : [])
+          .map(([id, label]) => (
           <button key={id} onClick={() => setSubtab(id)} style={{
             padding: "7px 12px", borderRadius: 7, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit",
             background: subtab === id ? PANEL2 : "transparent", color: subtab === id ? AMBER : "#8B93A1"
@@ -6299,7 +6629,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team })
         ))}
       </div>
 
-      {subtab === "classement" && (
+      {subtab === "classement" && (isCoach || v.standings) && (
         rows.length === 0 ? (
           <EmptyState text="Import box scores ('Full Stats' tab) to display the team standings — this is the source of truth for totals." />
         ) : (
@@ -6321,9 +6651,10 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team })
         )
       )}
 
-      {subtab === "collectif" && <OffenseDefenseBreakdown off={teamOff} def={teamDef} detailTables={false} />}
+      {subtab === "collectif" && (isCoach || v.teamPlay) && <OffenseDefenseBreakdown off={teamOff} def={teamDef} detailTables={false} />}
 
-      {subtab === "avance" && <TeamAdvancedStats advanced={advanced} />}
+      {subtab === "avance" && (isCoach || v.advanced) && <TeamAdvancedStats advanced={advanced} />}
+      {subtab === "resources" && (isCoach || v.resources) && <TeamResourcesTab isCoach={isCoach} team={team} />}
       {subtab === "entrainement" && isCoach && <CollectiveTraining roster={roster} />}
 
       {rows.length > 0 && (
