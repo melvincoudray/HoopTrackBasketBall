@@ -35,7 +35,7 @@ const FLAG_CH_DATA_URI = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAA8AAAAPA
 const AURORE_LOGO_DATA_URI = "data:image/jpeg;base64,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";
 
 const DEFAULT_TEAMS = [
-  { id: "u16-sui", name: "U16 Swiss National Team", tagline: "Equipe nationale suisse U16", logo: FLAG_CH_DATA_URI, logoBg: "#FF0000" },
+  { id: "u16-sui", name: "U16 Swiss National Team", tagline: "Swiss U16 National Team", logo: FLAG_CH_DATA_URI, logoBg: "#FF0000" },
   { id: "aurore-vitre", name: "Aurore Vitré Basket Ball NM1", tagline: "Aurore Vitré Basket Ball · NM1", logo: AURORE_LOGO_DATA_URI, logoBg: "#F3F1EA" },
 ];
 
@@ -396,35 +396,35 @@ const SCOUT_STAT_SCHEMA = [
   { key: "ptse", label: "Points allowed", lowerBetter: true, group: "General" },
   { key: "plusminus", label: "+/-", group: "General" },
   { key: "eff", label: "Evaluation", group: "General" },
-  { key: "r2", label: "2pt made", group: "Tirs" },
-  { key: "t2", label: "2pt attempted", group: "Tirs" },
-  { key: "pct2", label: "% 2pts", pct: true, group: "Tirs" },
-  { key: "r3", label: "3pt made", group: "Tirs" },
-  { key: "t3", label: "3pt attempted", group: "Tirs" },
-  { key: "pct3", label: "% 3pts", pct: true, group: "Tirs" },
-  { key: "lfr", label: "FT made", group: "Tirs" },
-  { key: "lft", label: "FT attempted", group: "Tirs" },
-  { key: "pctlf", label: "% LF", pct: true, group: "Tirs" },
-  { key: "efg", label: "eFG%", pct: true, group: "Tirs" },
-  { key: "ts", label: "TS%", pct: true, group: "Tirs" },
-  { key: "ftafga", label: "FTA/FGA", pct: true, group: "Tirs" },
-  { key: "ro", label: "Rebonds off.", group: "Rebonds & Ballon" },
-  { key: "rd", label: "Def. rebounds", group: "Rebonds & Ballon" },
-  { key: "rt", label: "Rebonds tot.", group: "Rebonds & Ballon" },
-  { key: "pctro", label: "% Reb. off.", pct: true, group: "Rebonds & Ballon" },
-  { key: "pd", label: "Assists", group: "Rebonds & Ballon" },
-  { key: "bp", label: "Pertes de balle", lowerBetter: true, group: "Rebonds & Ballon" },
-  { key: "padbp", label: "Passes/Pertes", group: "Rebonds & Ballon" },
-  { key: "pctbp", label: "% Pertes", pct: true, lowerBetter: true, group: "Rebonds & Ballon" },
-  { key: "pctpad", label: "% Assists", pct: true, group: "Rebonds & Ballon" },
-  { key: "ct", label: "Contres", group: "Defense" },
-  { key: "int", label: "Interceptions", group: "Defense" },
-  { key: "fte", label: "Fautes", lowerBetter: true, group: "Defense" },
-  { key: "fo", label: "Fautes offensives", lowerBetter: true, group: "Defense" },
+  { key: "r2", label: "2pt made", group: "Shooting" },
+  { key: "t2", label: "2pt attempted", group: "Shooting" },
+  { key: "pct2", label: "% 2pts", pct: true, group: "Shooting" },
+  { key: "r3", label: "3pt made", group: "Shooting" },
+  { key: "t3", label: "3pt attempted", group: "Shooting" },
+  { key: "pct3", label: "% 3pts", pct: true, group: "Shooting" },
+  { key: "lfr", label: "FT made", group: "Shooting" },
+  { key: "lft", label: "FT attempted", group: "Shooting" },
+  { key: "pctlf", label: "% LF", pct: true, group: "Shooting" },
+  { key: "efg", label: "eFG%", pct: true, group: "Shooting" },
+  { key: "ts", label: "TS%", pct: true, group: "Shooting" },
+  { key: "ftafga", label: "FTA/FGA", pct: true, group: "Shooting" },
+  { key: "ro", label: "Off. rebounds", group: "Rebounds & Ball" },
+  { key: "rd", label: "Def. rebounds", group: "Rebounds & Ball" },
+  { key: "rt", label: "Total rebounds", group: "Rebounds & Ball" },
+  { key: "pctro", label: "% Off. rebounds", pct: true, group: "Rebounds & Ball" },
+  { key: "pd", label: "Assists", group: "Rebounds & Ball" },
+  { key: "bp", label: "Turnovers", lowerBetter: true, group: "Rebounds & Ball" },
+  { key: "padbp", label: "Assists/Turnovers", group: "Rebounds & Ball" },
+  { key: "pctbp", label: "% TOV", pct: true, lowerBetter: true, group: "Rebounds & Ball" },
+  { key: "pctpad", label: "% Assists", pct: true, group: "Rebounds & Ball" },
+  { key: "ct", label: "Blocks", group: "Defense" },
+  { key: "int", label: "Steals", group: "Defense" },
+  { key: "fte", label: "Fouls", lowerBetter: true, group: "Defense" },
+  { key: "fo", label: "Offensive fouls", lowerBetter: true, group: "Defense" },
   { key: "poss", label: "Possessions", group: "Ratings" },
   { key: "ortg", label: "ORTG", group: "Ratings" },
   { key: "drtg", label: "DRTG", lowerBetter: true, group: "Ratings" },
-  { key: "pct3tst", label: "3pt shot frequency (share of shots attempted)", pct: true, group: "Tirs" },
+  { key: "pct3tst", label: "3pt shot frequency (share of shots attempted)", pct: true, group: "Shooting" },
   // Métriques propres aux exports FIBA — gardées sous leur nom d'origine (pas retraduites)
   // pour éviter de leur donner un sens que je ne suis pas sûr de connaître avec certitude.
   { key: "fgAtt", label: "FG Att (FIBA)", group: "FIBA (advanced)" },
@@ -2682,15 +2682,21 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
         </div>
       )}
 
-      {playerName && role && (role.name || role.image) && (
+      {playerName && (() => { const pd = (visibility || DEFAULT_VISIBILITY).playerDetail || DEFAULT_VISIBILITY.playerDetail; return pd.role; })() && role && (role.name || role.image) && (
         <div style={{ marginBottom: 26 }}>
           <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 8 }}>Role</div>
-          <button onClick={() => goToPlayer("role")} style={{ display: "flex", alignItems: "center", gap: 14, width: "100%", maxWidth: 320, padding: "14px 16px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, color: PAPER, cursor: "pointer", textAlign: "left", fontFamily: "inherit" }}>
-            <div style={{ width: 44, height: 44, borderRadius: 8, background: PANEL2, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
-              {role.image ? <img src={role.image} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <ShieldCheck size={18} color={AMBER} />}
+          <button onClick={() => goToPlayer("role")} style={{ display: "block", width: "100%", maxWidth: 320, padding: 0, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, color: PAPER, cursor: "pointer", textAlign: "left", fontFamily: "inherit", overflow: "hidden" }}>
+            {role.image ? (
+              <img src={role.image} alt="" style={{ width: "100%", maxHeight: 120, objectFit: "contain", background: PANEL2, display: "block" }} />
+            ) : (
+              <div style={{ width: "100%", height: 80, background: PANEL2, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                <ShieldCheck size={28} color={AMBER} />
+              </div>
+            )}
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px" }}>
+              <div style={{ fontWeight: 700, fontSize: 15 }}>{role.name || "Role"}</div>
+              <ChevronRight size={16} color="#5C6470" />
             </div>
-            <div style={{ fontWeight: 700, fontSize: 15, flex: 1 }}>{role.name || "Role"}</div>
-            <ChevronRight size={16} color="#5C6470" />
           </button>
         </div>
       )}
@@ -2709,80 +2715,103 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
         </div>
       )}
 
-      {playerName && (
+      {playerName && (() => {
+        const pd = (visibility || DEFAULT_VISIBILITY).playerDetail || DEFAULT_VISIBILITY.playerDetail;
+        return (
         <>
-          <HomeSectionLink eyebrow="3x a day" title="Wellness" onClick={() => goToPlayer("wellness")} />
-          <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 26 }}>
-            <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 12 }}>
-              Today: {WELLNESS_SLOTS.map(s => answeredToday.has(s.key) ? `✓ ${s.label}` : s.label).join(" · ")}
-            </div>
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 12 }}>
-              <div style={{ width: 170 }}>
-                <label style={labelStyle}>When</label>
-                <select value={wSlot} onChange={e => setWSlot(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }}>
-                  {WELLNESS_SLOTS.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
-                </select>
-              </div>
-              <div style={{ width: 130 }}>
-                <label style={labelStyle}>Physical</label>
-                <select value={wPhysical} onChange={e => setWPhysical(Number(e.target.value))} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", color: ratingColor(wPhysical), fontWeight: 700 }}>
-                  {[1, 2, 3, 4, 5].map(v => <option key={v} value={v}>{v}</option>)}
-                </select>
-              </div>
-              <div style={{ width: 130 }}>
-                <label style={labelStyle}>Mental</label>
-                <select value={wMental} onChange={e => setWMental(Number(e.target.value))} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", color: ratingColor(wMental), fontWeight: 700 }}>
-                  {[1, 2, 3, 4, 5].map(v => <option key={v} value={v}>{v}</option>)}
-                </select>
-              </div>
-              <button disabled={wBusy} onClick={submitWellness} style={{ ...btnPrimary, width: "auto", padding: "10px 18px" }}>{wBusy ? "…" : "Submit"}</button>
-            </div>
-            {wStatus && <div style={{ fontSize: 12, color: TEAL }}>{wStatus}</div>}
-          </div>
-
-          <HomeSectionLink eyebrow="Box score" title="Your totals" onClick={() => goToPlayer("stats")} />
-          {box.loading ? <EmptyState text="Loading…" /> : box.entries.length === 0 ? (
-            <EmptyState text="No box score imported yet." />
-          ) : (
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 26 }}>
-              {box.statLabels.slice(0, 6).map(l => (
-                <StatPill key={l} label={friendlyStatLabel(l)} value={formatStatValue(l, box.averages[l])} />
-              ))}
-            </div>
-          )}
-
-          <HomeSectionLink eyebrow="Coding file" title="Playtypes & shooting selection" onClick={() => goToPlayer("stats")} />
-          {off.length === 0 && def.length === 0 ? (
-            <EmptyState text="No action coded yet (Import Match tab)." />
-          ) : (
-            <OffenseDefenseBreakdown off={off} def={def} detailTables={false} />
-          )}
-
-          <HomeSectionLink eyebrow="Training" title="Last 3 sessions" onClick={() => goToPlayer("training")} />
-          {trainings.length === 0 ? <EmptyState text="No session recorded." /> : (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 26 }}>
-              {trainings.map(t => (
-                <div key={t.id} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                  <span style={{ fontSize: 13 }}>{t.date} <span style={{ color: "#5C6470" }}>· {t.thematique}</span> — {t.theme || t.objectif}</span>
-                  <b style={{ color: ratingColor(t.eval) }}>{t.eval}/5</b>
+          {pd.wellness && (
+            <>
+              <HomeSectionLink eyebrow="3x a day" title="Wellness" onClick={() => goToPlayer("wellness")} />
+              <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 26 }}>
+                <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 12 }}>
+                  Today: {WELLNESS_SLOTS.map(s => answeredToday.has(s.key) ? `✓ ${s.label}` : s.label).join(" · ")}
                 </div>
-              ))}
-            </div>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 12 }}>
+                  <div style={{ width: 170 }}>
+                    <label style={labelStyle}>When</label>
+                    <select value={wSlot} onChange={e => setWSlot(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }}>
+                      {WELLNESS_SLOTS.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+                    </select>
+                  </div>
+                  <div style={{ width: 130 }}>
+                    <label style={labelStyle}>Physical</label>
+                    <select value={wPhysical} onChange={e => setWPhysical(Number(e.target.value))} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", color: ratingColor(wPhysical), fontWeight: 700 }}>
+                      {[1, 2, 3, 4, 5].map(v => <option key={v} value={v}>{v}</option>)}
+                    </select>
+                  </div>
+                  <div style={{ width: 130 }}>
+                    <label style={labelStyle}>Mental</label>
+                    <select value={wMental} onChange={e => setWMental(Number(e.target.value))} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", color: ratingColor(wMental), fontWeight: 700 }}>
+                      {[1, 2, 3, 4, 5].map(v => <option key={v} value={v}>{v}</option>)}
+                    </select>
+                  </div>
+                  <button disabled={wBusy} onClick={submitWellness} style={{ ...btnPrimary, width: "auto", padding: "10px 18px" }}>{wBusy ? "…" : "Submit"}</button>
+                </div>
+                {wStatus && <div style={{ fontSize: 12, color: TEAL }}>{wStatus}</div>}
+              </div>
+            </>
           )}
 
-          <HomeSectionLink eyebrow="Goals" title="Objectives" onClick={() => goToPlayer("objectifs")} />
-          {objectives.loading ? <EmptyState text="Loading…" /> : objectives.objectives.length === 0 ? (
-            <EmptyState text="No objective defined yet." />
-          ) : (
-            <div style={{ fontSize: 13, color: "#8B93A1", marginBottom: 26 }}>{objectives.objectives.length} active objective{objectives.objectives.length !== 1 ? "s" : ""} — tap to see progress.</div>
+          {pd.stats && (
+            <>
+              <HomeSectionLink eyebrow="Box score" title="Your totals" onClick={() => goToPlayer("stats")} />
+              {box.loading ? <EmptyState text="Loading…" /> : box.entries.length === 0 ? (
+                <EmptyState text="No box score imported yet." />
+              ) : (
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 26 }}>
+                  {box.statLabels.slice(0, 6).map(l => (
+                    <StatPill key={l} label={friendlyStatLabel(l)} value={formatStatValue(l, box.averages[l])} />
+                  ))}
+                </div>
+              )}
+
+              <HomeSectionLink eyebrow="Coding file" title="Playtypes & shooting selection" onClick={() => goToPlayer("stats")} />
+              {off.length === 0 && def.length === 0 ? (
+                <EmptyState text="No action coded yet (Import Match tab)." />
+              ) : (
+                <OffenseDefenseBreakdown off={off} def={def} detailTables={false} />
+              )}
+            </>
           )}
 
-          <HomeSectionLink eyebrow="Self-assessment" title="Mental evaluation" onClick={() => goToPlayer("mental")} />
-          <div style={{ fontSize: 13, color: "#8B93A1", marginBottom: 26 }}>
-            {mentalEntries.length === 0 ? "No evaluation recorded yet." : `Average score: ${mentalAvg.toFixed(1)}/5 over ${mentalEntries.length} evaluation${mentalEntries.length !== 1 ? "s" : ""}.`}
-          </div>
+          {pd.training && (
+            <>
+              <HomeSectionLink eyebrow="Training" title="Last 3 sessions" onClick={() => goToPlayer("training")} />
+              {trainings.length === 0 ? <EmptyState text="No session recorded." /> : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 26 }}>
+                  {trainings.map(t => (
+                    <div key={t.id} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: "10px 14px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <span style={{ fontSize: 13 }}>{t.date} <span style={{ color: "#5C6470" }}>· {t.thematique}</span> — {t.theme || t.objectif}</span>
+                      <b style={{ color: ratingColor(t.eval) }}>{t.eval}/5</b>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
+          {pd.objectives && (
+            <>
+              <HomeSectionLink eyebrow="Goals" title="Objectives" onClick={() => goToPlayer("objectifs")} />
+              {objectives.loading ? <EmptyState text="Loading…" /> : objectives.objectives.length === 0 ? (
+                <EmptyState text="No objective defined yet." />
+              ) : (
+                <div style={{ fontSize: 13, color: "#8B93A1", marginBottom: 26 }}>{objectives.objectives.length} active objective{objectives.objectives.length !== 1 ? "s" : ""} — tap to see progress.</div>
+              )}
+            </>
+          )}
+
+          {pd.mental && (
+            <>
+              <HomeSectionLink eyebrow="Self-assessment" title="Mental evaluation" onClick={() => goToPlayer("mental")} />
+              <div style={{ fontSize: 13, color: "#8B93A1", marginBottom: 26 }}>
+                {mentalEntries.length === 0 ? "No evaluation recorded yet." : `Average score: ${mentalAvg.toFixed(1)}/5 over ${mentalEntries.length} evaluation${mentalEntries.length !== 1 ? "s" : ""}.`}
+              </div>
+            </>
+          )}
         </>
-      )}
+        );
+      })()}
 
       {(isCoach || (visibility || DEFAULT_VISIBILITY).tabs.team) && (
         <>
@@ -3015,7 +3044,22 @@ function PlayerVsPlayer({ roster, onClose }) {
   const [playerB, setPlayerB] = useState("");
   const [seasonA, setSeasonA] = useState("all");
   const [seasonB, setSeasonB] = useState("all");
+  const [extraA, setExtraA] = useState({ training: null, mental: null });
+  const [extraB, setExtraB] = useState({ training: null, mental: null });
   const names = roster.filter(p => fullBox.byPlayer[p.name]);
+
+  // Note moyenne d'entraînement et d'évaluation mentale — en plus des stats de box score.
+  async function loadExtras(playerName) {
+    const training = (await storeGet("training:" + playerName)) || [];
+    const trainingAvg = training.length ? training.reduce((s, e) => s + (Number(e.eval) || 0), 0) / training.length : null;
+    const mental = (await storeGet("mental:" + playerName)) || [];
+    const mentalAvg = mental.length
+      ? mental.reduce((s, e) => s + (Object.values(e.ratings || {}).reduce((a, b) => a + b, 0) / (Object.values(e.ratings || {}).length || 1)), 0) / mental.length
+      : null;
+    return { training: trainingAvg, mental: mentalAvg };
+  }
+  useEffect(() => { if (playerA) loadExtras(playerA).then(setExtraA); else setExtraA({ training: null, mental: null }); }, [playerA]);
+  useEffect(() => { if (playerB) loadExtras(playerB).then(setExtraB); else setExtraB({ training: null, mental: null }); }, [playerB]);
 
   function seasonsFor(first) {
     const entries = fullBox.byPlayer[first]?.entries || [];
@@ -3044,7 +3088,7 @@ function PlayerVsPlayer({ roster, onClose }) {
           <label style={labelStyle}>Player A</label>
           <select value={playerA} onChange={e => { setPlayerA(e.target.value); setSeasonA("all"); }} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }}>
             <option value="">— Choose —</option>
-            {names.map(p => <option key={p.id} value={p.first}>{p.name}</option>)}
+            {names.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
           </select>
           {seasonsA.length > 0 && (
             <select value={seasonA} onChange={e => setSeasonA(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", marginTop: 6, fontSize: 12.5 }}>
@@ -3057,7 +3101,7 @@ function PlayerVsPlayer({ roster, onClose }) {
           <label style={labelStyle}>Player B</label>
           <select value={playerB} onChange={e => { setPlayerB(e.target.value); setSeasonB("all"); }} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }}>
             <option value="">— Choose —</option>
-            {names.map(p => <option key={p.id} value={p.first}>{p.name}</option>)}
+            {names.map(p => <option key={p.id} value={p.name}>{p.name}</option>)}
           </select>
           {seasonsB.length > 0 && (
             <select value={seasonB} onChange={e => setSeasonB(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", marginTop: 6, fontSize: 12.5 }}>
@@ -3070,15 +3114,28 @@ function PlayerVsPlayer({ roster, onClose }) {
 
       {!playerA || !playerB ? (
         <EmptyState text="Choose two players to compare (any players, even different positions, even different seasons)." />
-      ) : labels.length === 0 ? (
-        <EmptyState text="No box score for one of these two players in the selected season." />
+      ) : labels.length === 0 && extraA.training === null && extraA.mental === null && extraB.training === null && extraB.mental === null ? (
+        <EmptyState text="No box score, training, or mental evaluation for one of these two players in the selected season." />
       ) : (
         <div style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, overflow: "hidden" }}>
           <div style={{ display: "grid", gridTemplateColumns: "0.6fr 1fr 0.6fr", padding: "10px 16px", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: "#5C6470", borderBottom: `1px solid ${LINE}` }}>
-            <div style={{ textAlign: "right", color: AMBER }}>{roster.find(p => p.first === playerA)?.name} <span style={{ color: "#5C6470" }}>({seasonA === "all" ? "all seasons" : seasonA}, {a.games} matchs)</span></div>
+            <div style={{ textAlign: "right", color: AMBER }}>{roster.find(p => p.name === playerA)?.name} <span style={{ color: "#5C6470" }}>({seasonA === "all" ? "all seasons" : seasonA}, {a.games} games)</span></div>
             <div style={{ textAlign: "center" }}>Stat</div>
-            <div style={{ color: TEAL }}>{roster.find(p => p.first === playerB)?.name} <span style={{ color: "#5C6470" }}>({seasonB === "all" ? "all seasons" : seasonB}, {b.games} matchs)</span></div>
+            <div style={{ color: TEAL }}>{roster.find(p => p.name === playerB)?.name} <span style={{ color: "#5C6470" }}>({seasonB === "all" ? "all seasons" : seasonB}, {b.games} games)</span></div>
           </div>
+          {[["Training rating (avg.)", extraA.training, extraB.training, v => v !== null ? v.toFixed(1) + "/5" : "–"],
+            ["Mental evaluation (avg.)", extraA.mental, extraB.mental, v => v !== null ? v.toFixed(1) + "/5" : "–"]].map(([label, va, vb, fmt]) => {
+            if (va === null && vb === null) return null;
+            const aWins = va !== null && vb !== null && va !== vb && va > vb;
+            const bWins = va !== null && vb !== null && va !== vb && vb > va;
+            return (
+              <div key={label} style={{ display: "grid", gridTemplateColumns: "0.6fr 1fr 0.6fr", padding: "8px 16px", alignItems: "center", borderBottom: `1px solid ${LINE}`, fontSize: 13, background: PANEL }}>
+                <div style={{ textAlign: "right", fontFamily: "ui-monospace, monospace", fontWeight: 700, color: aWins ? TEAL : PAPER }}>{fmt(va)}</div>
+                <div style={{ textAlign: "center", color: "#8B93A1", fontSize: 12 }}>{label}</div>
+                <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, color: bWins ? TEAL : PAPER }}>{fmt(vb)}</div>
+              </div>
+            );
+          })}
           {labels.map(l => {
             const va = a?.averages[l], vb = b?.averages[l];
             if (va === undefined && vb === undefined) return null;
@@ -3289,15 +3346,15 @@ function PositionComparisonTable({ position, roster, byPlayer, playerFirst }) {
   return (
     <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
       <div style={{ display: "grid", gridTemplateColumns: `1.4fr ${columns.map(() => "0.8fr").join(" ")}`, padding: "10px 16px", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: "#5C6470", borderBottom: `1px solid ${LINE}` }}>
-        <div>Joueur ({position})</div>
+        <div>Player ({position})</div>
         {columns.map(c => <div key={c.key}>{c.label || c.fallbackLabel}</div>)}
       </div>
       {rows.map(r => (
         <div key={r.first} style={{
           display: "grid", gridTemplateColumns: `1.4fr ${columns.map(() => "0.8fr").join(" ")}`, padding: "10px 16px", alignItems: "center",
-          borderBottom: `1px solid ${LINE}`, fontSize: 13.5, background: r.first === playerFirst ? PANEL2 : "transparent",
+          borderBottom: `1px solid ${LINE}`, fontSize: 13.5, background: r.name === playerFirst ? PANEL2 : "transparent",
         }}>
-          <div style={{ fontWeight: r.first === playerFirst ? 700 : 500, color: r.first === playerFirst ? AMBER : PAPER }}>{r.name}</div>
+          <div style={{ fontWeight: r.name === playerFirst ? 700 : 500, color: r.name === playerFirst ? AMBER : PAPER }}>{r.name}</div>
           {r.values.map((v, i) => (
             <div key={i} style={{ fontFamily: "ui-monospace, monospace", color: "#8B93A1" }}>{v !== null ? formatStatValue(columns[i].label || columns[i].key, v) : "–"}</div>
           ))}
@@ -3340,6 +3397,9 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Offense / Defense</h2>
       <OffenseDefenseBreakdown off={off} def={def} />
 
+      <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Objectives</h2>
+      <ObjectivesPanel playerName={playerName} isCoach={false} box={box} off={off} def={def} />
+
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Training</h2>
       <TrainingLog playerName={playerName} isCoach={false} />
 
@@ -3375,6 +3435,12 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
           </div>
         </div>
       )}
+
+      <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Role</h2>
+      <RoleTab playerName={playerName} isCoach={false} />
+
+      <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Meetings</h2>
+      <MeetingsTab playerName={playerName} isCoach={false} />
     </div>
   );
 }
@@ -3392,7 +3458,10 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
   const me = roster.find(p => p.name === playerName);
   const position = me ? me.position : "";
 
-  const [subtab, setSubtab] = useState(initialSubtab || "stats");
+  const SUBTAB_ORDER = ["stats", "objectifs", "training", "mental", "wellness", "role", "meetings"];
+  const SUBTAB_KEY = { stats: "stats", objectifs: "objectives", training: "training", mental: "mental", wellness: "wellness", role: "role", meetings: "meetings" };
+  const defaultSubtab = isCoach ? "stats" : (SUBTAB_ORDER.find(id => pd[SUBTAB_KEY[id]]) || "stats");
+  const [subtab, setSubtab] = useState(initialSubtab || defaultSubtab);
   const [exportReport, setExportReport] = useState(null);
   const [trendStats, setTrendStats] = useState([]);
   const [trendMenuOpen, setTrendMenuOpen] = useState(false);
@@ -3441,7 +3510,12 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
       </div>
 
       <div className="screen-only">
-        {subtab === "stats" && (
+        {!isCoach && !pd[SUBTAB_KEY[subtab]] && (
+          <div style={{ padding: 30, textAlign: "center", color: "#5C6470", border: `1px dashed ${LINE}`, borderRadius: 12, fontSize: 13.5, marginBottom: 26 }}>
+            The admin doesn't give you access to this.
+          </div>
+        )}
+        {subtab === "stats" && (isCoach || pd.stats) && (
           <>
             <SectionTitle eyebrow="Source: Box Score" title="Official totals" />
             {box.loading ? null : box.entries.length === 0 ? (
@@ -3559,12 +3633,12 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
           </>
         )}
 
-        {subtab === "objectifs" && <ObjectivesPanel playerName={playerName} isCoach={isCoach} box={box} off={off} def={def} />}
-        {subtab === "training" && <TrainingLog playerName={playerName} isCoach={isCoach} />}
-        {subtab === "mental" && <MentalLog playerName={playerName} isCoach={isCoach} />}
-        {subtab === "wellness" && <WellnessTab playerName={playerName} isCoach={isCoach} canSeeCharts={isCoach || v.wellnessCharts} teamId={teamId} teamName={teamName} />}
-        {subtab === "role" && <RoleTab playerName={playerName} isCoach={isCoach} />}
-        {subtab === "meetings" && <MeetingsTab playerName={playerName} isCoach={isCoach} />}
+        {subtab === "objectifs" && (isCoach || pd.objectives) && <ObjectivesPanel playerName={playerName} isCoach={isCoach} box={box} off={off} def={def} />}
+        {subtab === "training" && (isCoach || pd.training) && <TrainingLog playerName={playerName} isCoach={isCoach} />}
+        {subtab === "mental" && (isCoach || pd.mental) && <MentalLog playerName={playerName} isCoach={isCoach} />}
+        {subtab === "wellness" && (isCoach || pd.wellness) && <WellnessTab playerName={playerName} isCoach={isCoach} canSeeCharts={isCoach || v.wellnessCharts} teamId={teamId} teamName={teamName} />}
+        {subtab === "role" && (isCoach || pd.role) && <RoleTab playerName={playerName} isCoach={isCoach} />}
+        {subtab === "meetings" && (isCoach || pd.meetings) && <MeetingsTab playerName={playerName} isCoach={isCoach} />}
       </div>
 
       <div className="print-only" id="player-print-content">
@@ -4114,6 +4188,7 @@ function TrainingLog({ playerName, isCoach }) {
 
   return (
     <div>
+      <div style={{ fontSize: 11, color: "#5C6470", marginBottom: 12 }}>Looking up sessions saved under: "{playerName}"</div>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 20 }}>
         <StatPill label="Sessions completed" value={total} />
         <StatPill label="Average rating" value={avgEval !== null ? avgEval.toFixed(1) + "/5" : "–"} sub={avgEval !== null ? undefined : "no session rated"} tone={avgEval !== null ? undefined : "teal"} />
@@ -4406,7 +4481,7 @@ function RoleTab({ playerName, isCoach }) {
     // Lecture seule pour le joueur.
     return (
       <div>
-        {image && <img src={image} alt="" style={{ width: "100%", maxWidth: 320, borderRadius: 12, marginBottom: 16, display: "block" }} />}
+        {image && <img src={image} alt="" style={{ width: "100%", maxWidth: 460, borderRadius: 14, marginBottom: 18, display: "block" }} />}
         <h2 style={{ fontSize: 18, fontWeight: 700, margin: "0 0 10px" }}>{name || "No role defined yet."}</h2>
         {description && <p style={{ color: "#8B93A1", fontSize: 14, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{description}</p>}
       </div>
@@ -4427,13 +4502,23 @@ function RoleTab({ playerName, isCoach }) {
         </div>
         <div style={{ marginBottom: 16 }}>
           <label style={labelStyle}>Image representing this role</label>
-          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-            <button type="button" onClick={() => imgRef.current && imgRef.current.click()} style={{ width: 80, height: 80, borderRadius: 10, background: PANEL2, border: `1px solid ${LINE}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, cursor: "pointer", padding: 0 }}>
-              {image ? <img src={image} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <Camera size={20} color="#5C6470" />}
-            </button>
-            <input ref={imgRef} type="file" accept="image/*" onChange={handleImage} style={{ display: "none" }} />
-            <span style={{ fontSize: 12, color: "#5C6470" }}>Click to choose an image</span>
-          </div>
+          {image ? (
+            <div>
+              <img src={image} alt="" style={{ width: "100%", maxWidth: 460, borderRadius: 14, marginBottom: 10, display: "block" }} />
+              <div style={{ display: "flex", gap: 10 }}>
+                <button type="button" onClick={() => imgRef.current && imgRef.current.click()} style={btnSecondary}>Change image</button>
+                <button type="button" onClick={() => setImage("")} style={{ ...btnSecondary, color: RED, borderColor: RED }}>Remove image</button>
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+              <button type="button" onClick={() => imgRef.current && imgRef.current.click()} style={{ width: 100, height: 100, borderRadius: 12, background: PANEL2, border: `1px solid ${LINE}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, cursor: "pointer", padding: 0 }}>
+                <Camera size={22} color="#5C6470" />
+              </button>
+              <span style={{ fontSize: 12, color: "#5C6470" }}>Click to choose an image</span>
+            </div>
+          )}
+          <input ref={imgRef} type="file" accept="image/*" onChange={handleImage} style={{ display: "none" }} />
         </div>
         <button disabled={busy} onClick={save} style={{ ...btnPrimary, width: "auto", padding: "10px 20px" }}>{busy ? "…" : "Save"}</button>
         {status && <div style={{ fontSize: 12, color: TEAL, marginTop: 10 }}>{status}</div>}
@@ -6357,11 +6442,11 @@ function CollectiveTraining({ roster }) {
       for (const id of selected) {
         const player = roster.find(p => p.id === id);
         if (!player) continue;
-        const existing = (await storeGet("training:" + player.first)) || [];
+        const existing = (await storeGet("training:" + player.name)) || [];
         const entry = { id: uid(), date, thematique, theme, objectif, duree, commentaire, eval: notes[id] ?? 3 };
-        await storeSet("training:" + player.first, [entry, ...existing]);
+        await storeSet("training:" + player.name, [entry, ...existing]);
       }
-      setStatus(`Séance ajoutée à ${selected.length} joueur${selected.length !== 1 ? "s" : ""}.`);
+      setStatus(`Session added to ${selected.length} player${selected.length !== 1 ? "s" : ""} — saved under: ${selected.map(id => { const p = roster.find(pl => pl.id === id); return p ? `"${p.name}"` : "?"; }).join(", ")}.`);
       setTheme(""); setObjective(""); setCommentaire("");
     } catch (err) {
       setError("Save failed: " + (err.message || "erreur inconnue"));
@@ -6392,8 +6477,8 @@ function CollectiveTraining({ roster }) {
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
           <div style={{ fontSize: 13, fontWeight: 700 }}>Players involved — individual rating per player</div>
           <div style={{ display: "flex", gap: 10 }}>
-            <button onClick={selectAll} style={{ fontSize: 11.5, color: AMBER, background: "none", border: "none", cursor: "pointer" }}>Tous</button>
-            <button onClick={selectNone} style={{ fontSize: 11.5, color: "#5C6470", background: "none", border: "none", cursor: "pointer" }}>Aucun</button>
+            <button onClick={selectAll} style={{ fontSize: 11.5, color: AMBER, background: "none", border: "none", cursor: "pointer" }}>All</button>
+            <button onClick={selectNone} style={{ fontSize: 11.5, color: "#5C6470", background: "none", border: "none", cursor: "pointer" }}>None</button>
           </div>
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -6423,18 +6508,34 @@ function CollectiveTraining({ roster }) {
   );
 }
 
-function TeamPrintReport({ team, rows, otherLabels, advanced, teamOff, teamDef }) {
+function TeamPrintReport({ team, rows, otherLabels, advanced, teamOff, teamDef, roster }) {
+  const [resources, setResources] = useState([]);
+  const [trainingSummary, setTrainingSummary] = useState([]);
+
+  useEffect(() => {
+    storeGet("team_resources").then(r => setResources(((r || []).sort((a, b) => b.addedAt.localeCompare(a.addedAt)))));
+    (async () => {
+      const summary = [];
+      for (const p of roster || []) {
+        const entries = (await storeGet("training:" + p.name)) || [];
+        const avg = entries.length ? entries.reduce((s, e) => s + (Number(e.eval) || 0), 0) / entries.length : null;
+        summary.push({ name: p.name, sessions: entries.length, avg });
+      }
+      setTrainingSummary(summary);
+    })();
+  }, [roster]);
+
   return (
     <div style={{ padding: 24, background: INK, color: PAPER }}>
       <h1 style={{ fontSize: 22, marginBottom: 4 }}>{team?.name || "Team"}</h1>
       <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 20 }}>Report generated on {new Date().toLocaleDateString("en-US")}</div>
 
-      <h2 style={{ fontSize: 16, marginBottom: 8 }}>Classement</h2>
+      <h2 style={{ fontSize: 16, marginBottom: 8 }}>Standings</h2>
       <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 12, marginBottom: 20 }}>
         <thead><tr>
           <th style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>#</th>
-          <th style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>Joueur</th>
-          <th style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>Matchs</th>
+          <th style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>Player</th>
+          <th style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>Games</th>
           <th style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>Pts/game</th>
           {otherLabels.map(l => <th key={l} style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>{l}</th>)}
         </tr></thead>
@@ -6451,11 +6552,38 @@ function TeamPrintReport({ team, rows, otherLabels, advanced, teamOff, teamDef }
         </tbody>
       </table>
 
-      <h2 style={{ fontSize: 16, marginBottom: 8 }}>Four Factors & Ratings</h2>
+      <h2 style={{ fontSize: 16, marginBottom: 8 }}>Advanced — Four Factors & Ratings</h2>
       <TeamAdvancedStats advanced={advanced} />
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Team Play — Offense / Defense</h2>
       <OffenseDefenseBreakdown off={teamOff} def={teamDef} />
+
+      <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Resources</h2>
+      {resources.length === 0 ? <p>No resource shared.</p> : (
+        <ul style={{ fontSize: 12.5, paddingLeft: 18 }}>
+          {resources.map(r => <li key={r.id} style={{ marginBottom: 4 }}>{r.title} — {r.type} — {r.url}</li>)}
+        </ul>
+      )}
+
+      <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Team Training</h2>
+      {trainingSummary.length === 0 ? <p>No player recorded.</p> : (
+        <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 12 }}>
+          <thead><tr>
+            <th style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>Player</th>
+            <th style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>Sessions</th>
+            <th style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>Average rating</th>
+          </tr></thead>
+          <tbody>
+            {trainingSummary.map(t => (
+              <tr key={t.name}>
+                <td style={{ border: `1px solid ${LINE}`, padding: 4 }}>{t.name}</td>
+                <td style={{ border: `1px solid ${LINE}`, padding: 4 }}>{t.sessions}</td>
+                <td style={{ border: `1px solid ${LINE}`, padding: 4 }}>{t.avg !== null ? t.avg.toFixed(1) + "/5" : "–"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }
@@ -6564,7 +6692,9 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
   const v = (visibility || DEFAULT_VISIBILITY).team;
   const box = useAllBoxScores(matchFilter);
   const advanced = useTeamAdvancedStats(matchFilter);
-  const [subtab, setSubtab] = useState("classement");
+  const TEAM_SUBTAB_ORDER = [["classement", "standings"], ["collectif", "teamPlay"], ["avance", "advanced"], ["resources", "resources"]];
+  const defaultTeamSubtab = isCoach ? "classement" : ((TEAM_SUBTAB_ORDER.find(([, key]) => v[key]) || ["classement"])[0]);
+  const [subtab, setSubtab] = useState(defaultTeamSubtab);
   const [exportReport, setExportReport] = useState(null);
 
   // Colonnes de stats communes à afficher (hors points, déjà en tête) : les 3 plus fréquentes
@@ -6629,6 +6759,12 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
         ))}
       </div>
 
+      {!isCoach && !v[{ classement: "standings", collectif: "teamPlay", avance: "advanced", resources: "resources" }[subtab]] && (
+        <div style={{ padding: 30, textAlign: "center", color: "#5C6470", border: `1px dashed ${LINE}`, borderRadius: 12, fontSize: 13.5, marginBottom: 26 }}>
+          The admin doesn't give you access to this.
+        </div>
+      )}
+
       {subtab === "classement" && (isCoach || v.standings) && (
         rows.length === 0 ? (
           <EmptyState text="Import box scores ('Full Stats' tab) to display the team standings — this is the source of truth for totals." />
@@ -6659,7 +6795,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
 
       {rows.length > 0 && (
         <div className="print-only" id="team-print-content">
-          <TeamPrintReport team={team} rows={rows} otherLabels={otherLabels} advanced={advanced} teamOff={teamOff} teamDef={teamDef} />
+          <TeamPrintReport team={team} rows={rows} otherLabels={otherLabels} advanced={advanced} teamOff={teamOff} teamDef={teamDef} roster={roster} />
         </div>
       )}
       <ExportModal report={exportReport} onClose={() => setExportReport(null)} />
