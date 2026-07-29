@@ -373,6 +373,38 @@ async function storeList(prefix) {
   return Object.keys(memoryStore).filter(k => k.startsWith(p));
 }
 
+// La session (qui est connecté) doit rester STRICTEMENT LOCALE à cet appareil/navigateur —
+// jamais passer par le stockage partagé de l'équipe (Supabase), sinon un coach connecté sur
+// un appareil se retrouve automatiquement connecté sur TOUS les autres appareils qui ouvrent
+// le site, puisque ce stockage est synchronisé en temps réel entre tout le monde.
+function sessionStorageKey() { return "hooptrack_session_" + TEAM_PREFIX; }
+async function saveLocalSession(session) {
+  try {
+    if (typeof localStorage !== "undefined") { localStorage.setItem(sessionStorageKey(), JSON.stringify(session)); return; }
+  } catch (e) {}
+  // Repli pour l'artifact Claude, où localStorage est volontairement indisponible —
+  // stockage "personnel" (shared=false), déjà scindé par utilisateur Claude.ai.
+  try { if (window.storage) await window.storage.set(sessionStorageKey(), JSON.stringify(session), false); } catch (e) {}
+}
+async function loadLocalSession() {
+  try {
+    if (typeof localStorage !== "undefined") {
+      const raw = localStorage.getItem(sessionStorageKey());
+      return raw ? JSON.parse(raw) : null;
+    }
+  } catch (e) {}
+  try {
+    if (window.storage) { const r = await window.storage.get(sessionStorageKey(), false); return r ? JSON.parse(r.value) : null; }
+  } catch (e) {}
+  return null;
+}
+async function clearLocalSession() {
+  try {
+    if (typeof localStorage !== "undefined") { localStorage.removeItem(sessionStorageKey()); return; }
+  } catch (e) {}
+  try { if (window.storage) await window.storage.delete(sessionStorageKey(), false); } catch (e) {}
+}
+
 // ---------------------------------------------------------------------------
 // Parsing du fichier "Database"
 // ---------------------------------------------------------------------------
@@ -1686,7 +1718,7 @@ export default function App() {
       effectiveRoster = seed;
       await storeSet("roster", seed);
     }
-    const savedSession = await storeGet("active_session");
+    const savedSession = await loadLocalSession();
     if (savedSession) {
       // Migration : une session pouvait avoir été enregistrée sous le seul prénom du joueur
       // ("Aiden") avant qu'on passe à l'identité par nom complet ("Aiden Martinez") — ce qui
@@ -1697,7 +1729,7 @@ export default function App() {
           const byFirstNameOnly = effectiveRoster.find(p => p.first === savedSession.name);
           if (byFirstNameOnly) {
             const fixed = { ...savedSession, name: byFirstNameOnly.name };
-            await storeSet("active_session", fixed);
+            await saveLocalSession(fixed);
             setSession(fixed);
           } else {
             setSession(savedSession);
@@ -1783,7 +1815,7 @@ export default function App() {
   }
 
   if (!session) {
-    return <LoginScreen roster={roster} onLogin={async (s) => { await storeSet("active_session", s); setSession(s); }} />;
+    return <LoginScreen roster={roster} onLogin={async (s) => { await saveLocalSession(s); setSession(s); }} />;
   }
 
   return (
@@ -1806,10 +1838,10 @@ export default function App() {
       <TopBar
         session={session}
         team={team}
-        onSwitchAccount={async () => { await storeDelete("active_session"); setSession(null); }}
+        onSwitchAccount={async () => { await clearLocalSession(); setSession(null); }}
         onSwitchTeam={async () => {
           await rawDelete("active_team_id");
-          await storeDelete("active_session");
+          await clearLocalSession();
           setActiveTeam(null);
           setTeam(null); setSession(null); setRoster(DEFAULT_ROSTER);
           setMatchesIndex([]); setMatches({}); setBoxScoreIndex([]);
