@@ -942,29 +942,43 @@ const CHART_COLORS = [AMBER, TEAL, "#7C9CF2", "#C97BE0", "#E15A4E", "#5CC98A", "
 
 function DonutChart({ data, size = 150, unit = "actions" }) {
   const total = data.reduce((s, d) => s + d.value, 0);
+  const cx = size / 2, cy = size / 2;
+  const outerR = size * 0.48, innerR = size * 0.32;
 
-  // Donut en pur CSS (conic-gradient) plutôt qu'en SVG — évite entièrement le SVG, qui
-  // pose problème dans certains navigateurs pour ce fichier exporté. N'utilise que la
-  // propriété "background", déjà confirmée fonctionner (voir carré de diagnostic).
-  let gradient = "#1B2028";
-  if (total > 0) {
-    let cursor = 0;
-    const stops = [];
-    data.forEach((d, i) => {
-      if (!d.value) return;
-      const color = d.color || CHART_COLORS[i % CHART_COLORS.length];
-      const pct = (d.value / total) * 100;
-      stops.push(`${color} ${cursor}% ${cursor + pct}%`);
-      cursor += pct;
-    });
-    gradient = `conic-gradient(${stops.join(", ")})`;
+  // SVG avec attribut "fill" explicite sur chaque tranche — mieux supporté à la fois par
+  // les navigateurs ET par html2canvas (utilisé pour l'export PDF) qu'un dégradé CSS
+  // conic-gradient, qui n'est pas fidèlement restitué par la capture PDF.
+  function arcPath(startAngle, endAngle, r) {
+    const x0 = cx + r * Math.cos(startAngle), y0 = cy + r * Math.sin(startAngle);
+    const x1 = cx + r * Math.cos(endAngle), y1 = cy + r * Math.sin(endAngle);
+    const large = endAngle - startAngle > Math.PI ? 1 : 0;
+    return { x0, y0, x1, y1, large };
   }
-  const holeInset = size * 0.18;
+  function donutSlicePath(startAngle, endAngle) {
+    const o0 = arcPath(startAngle, endAngle, outerR), i0 = arcPath(startAngle, endAngle, innerR);
+    return [
+      `M ${o0.x0} ${o0.y0}`,
+      `A ${outerR} ${outerR} 0 ${o0.large} 1 ${o0.x1} ${o0.y1}`,
+      `L ${i0.x1} ${i0.y1}`,
+      `A ${innerR} ${innerR} 0 ${i0.large} 0 ${i0.x0} ${i0.y0}`,
+      "Z",
+    ].join(" ");
+  }
+
+  let cursor = -Math.PI / 2;
+  const gapRad = total > 0 ? 0.02 : 0;
+  const slices = total > 0 ? data.filter(d => d.value > 0).map((d, i) => {
+    const angle = (d.value / total) * (2 * Math.PI);
+    const start = cursor + gapRad / 2, end = cursor + angle - gapRad / 2;
+    cursor += angle;
+    return { path: end > start ? donutSlicePath(start, end) : null, color: d.color || CHART_COLORS[i % CHART_COLORS.length], key: i };
+  }) : [];
 
   return (
     <div style={{ position: "relative", width: size, height: size }}>
-      <div className="keep-color" style={{ position: "absolute", inset: 0, borderRadius: "50%", background: gradient }} />
-      <div className="keep-color" style={{ position: "absolute", inset: holeInset, borderRadius: "50%", background: "#0C0F14" }} />
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+        {slices.map(s => s.path && <path key={s.key} d={s.path} fill={s.color} className="keep-color" />)}
+      </svg>
       <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", pointerEvents: "none" }}>
         <div className="keep-color" style={{ fontFamily: "ui-monospace, monospace", fontSize: 20, fontWeight: 700, color: PAPER }}>{total}</div>
         <div style={{ fontSize: 9, color: "#5C6470", textTransform: "uppercase" }}>{unit}</div>
@@ -1657,21 +1671,41 @@ export default function App() {
     await loadTagCategories();
     await loadObservationTagCategories();
     await loadBoxColumnAliases();
-    const savedSession = await storeGet("active_session");
-    if (savedSession) setSession(savedSession);
     const savedSeason = await storeGet("current_season");
     if (savedSeason) setCurrentSeason(savedSeason); else await storeSet("current_season", currentSeason);
     const r = await storeGet("roster");
+    let effectiveRoster = [];
     if (r) {
       const cleaned = r.filter(p => !/^\d+$/.test(String(p.first).trim()));
       setRoster(cleaned);
+      effectiveRoster = cleaned;
       if (cleaned.length !== r.length) await storeSet("roster", cleaned); // purge un ancien "joueur" numérique (ligne d'équipe)
     } else {
       // Seule l'équipe nationale suisse démarre avec le roster pré-rempli — les autres
       // équipes (ex. Aurore Vitré) démarrent vides, à construire via "Add a player".
       const seed = team.id === "u16-sui" ? DEFAULT_ROSTER : [];
       setRoster(seed);
+      effectiveRoster = seed;
       await storeSet("roster", seed);
+    }
+    const savedSession = await storeGet("active_session");
+    if (savedSession) {
+      // Migration : une ancienne session pouvait être enregistrée sous le nom complet du
+      // joueur ("Aiden Martinez") au lieu de son prénom ("Aiden") — ce qui l'empêchait de
+      // retrouver ses propres données (entraînement, Wellness...) partout ailleurs dans
+      // l'appli, puisqu'elles sont toutes indexées par prénom. On corrige silencieusement.
+      if (savedSession.role === "player") {
+        const byFullName = effectiveRoster.find(p => p.name === savedSession.name);
+        if (byFullName && byFullName.first !== savedSession.name) {
+          const fixed = { ...savedSession, name: byFullName.first };
+          await storeSet("active_session", fixed);
+          setSession(fixed);
+        } else {
+          setSession(savedSession);
+        }
+      } else {
+        setSession(savedSession);
+      }
     }
     const idx = (await storeGet("match_index")) || [];
     setMatchesIndex(idx);
@@ -1793,6 +1827,7 @@ export default function App() {
             team={team}
             goToPlayer={(subtab) => { setSelectedPlayer(session.name); setHomeNav({ playerSubtab: subtab }); setTab("players"); }}
             goToScouting={(subtab, teamName) => { setHomeNav({ scoutingSubtab: subtab, scoutingTeam: teamName }); setTab("scouting"); }}
+            goToTeam={() => setTab("team")}
           />
         )}
         {tab === "import" && session.role === "coach" && (
@@ -2401,34 +2436,44 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
 
 function LoginScreen({ roster, onLogin }) {
   const [step, setStep] = useState("pick"); // pick | pin | newpin
-  const [name, setName] = useState("");
+  const [name, setName] = useState(""); // identité de stockage (prénom pour un joueur, libellé pour le staff)
+  const [displayName, setDisplayName] = useState(""); // ce qui s'affiche à l'écran
   const [pin, setPin] = useState("");
   const [confirmPin, setConfirmPin] = useState("");
   const [error, setError] = useState("");
   const [existingUser, setExistingUser] = useState(null);
 
-  const staffOptions = ["Coach principal", "Assistant coach", "Analyste"];
-  const allNames = [...staffOptions, ...roster.map(p => p.name)];
+  const staffOptions = ["Head coach", "Assistant coach", "Analyst"];
+  // Le nom AFFICHÉ (complet, pour distinguer deux joueurs qui partagent un prénom) est
+  // différent de l'IDENTITÉ utilisée pour le stockage (le prénom seul) — c'est ce même
+  // prénom qui identifie ce joueur partout ailleurs dans l'appli (entraînement, objectifs,
+  // Wellness, évaluation mentale...). Les confondre faisait que la page d'accueil d'un
+  // joueur ne retrouvait jamais ses propres données.
+  const nameOptions = [
+    ...staffOptions.map(s => ({ key: s, label: s })),
+    ...roster.map(p => ({ key: p.first, label: p.name })),
+  ];
 
-  async function chooseName(n) {
-    setName(n);
+  async function chooseName(opt) {
+    setName(opt.key);
+    setDisplayName(opt.label);
     setError("");
     const users = (await storeGet("app_users")) || {};
-    if (users[n]) { setExistingUser(users[n]); setStep("pin"); }
+    if (users[opt.key]) { setExistingUser(users[opt.key]); setStep("pin"); }
     else { setStep("newpin"); }
   }
 
   async function submitPin() {
-    if (pin.length !== 4) { setError("Le code fait 4 chiffres."); return; }
+    if (pin.length !== 4) { setError("The code must be 4 digits."); return; }
     const users = (await storeGet("app_users")) || {};
     const u = users[name];
-    if (simpleHash(pin) !== u.pin) { setError("Code incorrect."); return; }
+    if (simpleHash(pin) !== u.pin) { setError("Incorrect code."); return; }
     onLogin({ name, role: u.role });
   }
 
   async function submitNewPin() {
     if (pin.length !== 4) { setError("Choose a 4-digit code."); return; }
-    if (pin !== confirmPin) { setError("Les deux codes ne correspondent pas."); return; }
+    if (pin !== confirmPin) { setError("The two codes don't match."); return; }
     const users = (await storeGet("app_users")) || {};
     const role = staffOptions.includes(name) ? "coach" : "player";
     users[name] = { pin: simpleHash(pin), role };
@@ -2444,14 +2489,14 @@ function LoginScreen({ roster, onLogin }) {
           <div style={{ fontFamily: "ui-monospace, monospace", color: AMBER, fontSize: 12, fontWeight: 700, letterSpacing: "0.14em" }}>HOOPTRACK BASKETBALL</div>
         </div>
         <h1 style={{ fontSize: 26, fontWeight: 800, margin: "0 0 22px", letterSpacing: "-0.01em", textAlign: "center" }}>
-          {step === "pick" ? "Who are you?" : step === "pin" ? `${name}'s code` : `New code — ${name}`}
+          {step === "pick" ? "Who are you?" : step === "pin" ? `${displayName}'s code` : `New code — ${displayName}`}
         </h1>
 
         {step === "pick" && (
           <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 420, overflowY: "auto" }}>
-            {allNames.map(n => (
-              <button key={n} onClick={() => chooseName(n)} style={btnRow}>
-                <span>{n}</span><ChevronRight size={16} color="#5C6470" />
+            {nameOptions.map(opt => (
+              <button key={opt.key} onClick={() => chooseName(opt)} style={btnRow}>
+                <span>{opt.label}</span><ChevronRight size={16} color="#5C6470" />
               </button>
             ))}
           </div>
@@ -2520,14 +2565,14 @@ function TopBar({ session, onSwitchAccount, onSwitchTeam, team, isCoach }) {
 // directement vers la page complète correspondante quand on clique dessus.
 function HomeSectionLink({ eyebrow, title, onClick }) {
   return (
-    <button onClick={onClick} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: 0, marginBottom: 12, cursor: "pointer", fontFamily: "inherit", textAlign: "left" }}>
+    <button onClick={onClick} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%", background: "none", border: "none", padding: 0, marginBottom: 12, cursor: "pointer", fontFamily: "inherit", textAlign: "left", color: PAPER }}>
       <SectionTitle eyebrow={eyebrow} title={title} />
       <ChevronRight size={16} color="#5C6470" />
     </button>
   );
 }
 
-function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, team, goToPlayer, goToScouting }) {
+function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, team, goToPlayer, goToScouting, goToTeam }) {
   const box = useBoxScore(playerName, matchFilter);
   const advanced = useTeamAdvancedStats(matchFilter);
   const objectives = useObjectives(playerName || "");
@@ -2573,11 +2618,14 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   const off = plays.filter(isOffense);
   const def = plays.filter(isDefense);
 
+  const teamOff = allPlays.filter(isOffense);
+  const teamDef = allPlays.filter(isDefense);
+
   const avg = (key) => {
     const vals = advanced.perMatch.map(m => m[key]).filter(v => v !== null && v !== undefined);
     return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
   };
-  const ortg = avg("ortg"), drtg = avg("drtg"), efg = avg("efg"), tovPct = avg("tovPct"), ftRate = avg("ftRate");
+  const ortg = avg("ortg"), drtg = avg("drtg"), efg = avg("efg"), tovPct = avg("tovPct"), ftRate = avg("ftRate"), oreb = avg("oreb");
 
   const today = new Date().toISOString().slice(0, 10);
   const answeredToday = new Set(wellnessEntries.filter(e => e.date === today).map(e => e.slot));
@@ -2592,13 +2640,15 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
         <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>{session.name}</h1>
       </div>
 
-      {isCoach && (
+      {(isCoach || nextGame) && (
         <div style={{ marginBottom: 26 }}>
           <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 8 }}>Next game</div>
-          <select value={nextGame} onChange={e => saveNextGame(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", maxWidth: 320, marginBottom: nextGame ? 10 : 0 }}>
-            <option value="">— Select the scouted opponent —</option>
-            {Object.keys(scouting.teams).map(n => <option key={n} value={n}>{n}</option>)}
-          </select>
+          {isCoach && (
+            <select value={nextGame} onChange={e => saveNextGame(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", maxWidth: 320, marginBottom: nextGame ? 10 : 0 }}>
+              <option value="">— Select the scouted opponent —</option>
+              {Object.keys(scouting.teams).map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+          )}
           {nextGame && scouting.teams[nextGame] && (
             <button onClick={() => goToScouting("collectif", nextGame)} style={{ display: "flex", alignItems: "center", gap: 14, width: "100%", maxWidth: 320, padding: "14px 16px", background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 10, color: PAPER, cursor: "pointer", textAlign: "left", fontFamily: "inherit" }}>
               <div style={{ width: 44, height: 44, borderRadius: 8, background: PANEL2, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
@@ -2616,6 +2666,35 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
 
       {playerName && (
         <>
+          <HomeSectionLink eyebrow="3x a day" title="Wellness" onClick={() => goToPlayer("wellness")} />
+          <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 26 }}>
+            <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 12 }}>
+              Today: {WELLNESS_SLOTS.map(s => answeredToday.has(s.key) ? `✓ ${s.label}` : s.label).join(" · ")}
+            </div>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 12 }}>
+              <div style={{ width: 170 }}>
+                <label style={labelStyle}>When</label>
+                <select value={wSlot} onChange={e => setWSlot(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }}>
+                  {WELLNESS_SLOTS.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+                </select>
+              </div>
+              <div style={{ width: 130 }}>
+                <label style={labelStyle}>Physical</label>
+                <select value={wPhysical} onChange={e => setWPhysical(Number(e.target.value))} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", color: ratingColor(wPhysical), fontWeight: 700 }}>
+                  {[1, 2, 3, 4, 5].map(v => <option key={v} value={v}>{v}</option>)}
+                </select>
+              </div>
+              <div style={{ width: 130 }}>
+                <label style={labelStyle}>Mental</label>
+                <select value={wMental} onChange={e => setWMental(Number(e.target.value))} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", color: ratingColor(wMental), fontWeight: 700 }}>
+                  {[1, 2, 3, 4, 5].map(v => <option key={v} value={v}>{v}</option>)}
+                </select>
+              </div>
+              <button disabled={wBusy} onClick={submitWellness} style={{ ...btnPrimary, width: "auto", padding: "10px 18px" }}>{wBusy ? "…" : "Submit"}</button>
+            </div>
+            {wStatus && <div style={{ fontSize: 12, color: TEAL }}>{wStatus}</div>}
+          </div>
+
           <HomeSectionLink eyebrow="Box score" title="Your totals" onClick={() => goToPlayer("stats")} />
           {box.loading ? <EmptyState text="Loading…" /> : box.entries.length === 0 ? (
             <EmptyState text="No box score imported yet." />
@@ -2657,49 +2736,28 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
           <div style={{ fontSize: 13, color: "#8B93A1", marginBottom: 26 }}>
             {mentalEntries.length === 0 ? "No evaluation recorded yet." : `Average score: ${mentalAvg.toFixed(1)}/5 over ${mentalEntries.length} evaluation${mentalEntries.length !== 1 ? "s" : ""}.`}
           </div>
-
-          <HomeSectionLink eyebrow="3x a day" title="Wellness" onClick={() => goToPlayer("wellness")} />
-          <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 26 }}>
-            <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 12 }}>
-              Today: {WELLNESS_SLOTS.map(s => answeredToday.has(s.key) ? `✓ ${s.label}` : s.label).join(" · ")}
-            </div>
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 12 }}>
-              <div style={{ width: 170 }}>
-                <label style={labelStyle}>When</label>
-                <select value={wSlot} onChange={e => setWSlot(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }}>
-                  {WELLNESS_SLOTS.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
-                </select>
-              </div>
-              <div style={{ width: 130 }}>
-                <label style={labelStyle}>Physical</label>
-                <select value={wPhysical} onChange={e => setWPhysical(Number(e.target.value))} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", color: ratingColor(wPhysical), fontWeight: 700 }}>
-                  {[1, 2, 3, 4, 5].map(v => <option key={v} value={v}>{v}</option>)}
-                </select>
-              </div>
-              <div style={{ width: 130 }}>
-                <label style={labelStyle}>Mental</label>
-                <select value={wMental} onChange={e => setWMental(Number(e.target.value))} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", color: ratingColor(wMental), fontWeight: 700 }}>
-                  {[1, 2, 3, 4, 5].map(v => <option key={v} value={v}>{v}</option>)}
-                </select>
-              </div>
-              <button disabled={wBusy} onClick={submitWellness} style={{ ...btnPrimary, width: "auto", padding: "10px 18px" }}>{wBusy ? "…" : "Submit"}</button>
-            </div>
-            {wStatus && <div style={{ fontSize: 12, color: TEAL }}>{wStatus}</div>}
-          </div>
         </>
       )}
 
-      <SectionTitle eyebrow="Team" title="Four Factors" />
+      <HomeSectionLink eyebrow="Team" title="Four Factors" onClick={goToTeam} />
       {advanced.loading ? <EmptyState text="Loading…" /> : !advanced.perMatch.length ? (
         <EmptyState text="No box score found in memory. Import a file from the 'Full Stats' tab (top menu)." />
       ) : (
-        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 26 }}>
           <StatPill label="ORTG" value={ortg !== null ? ortg.toFixed(1) : "–"} tone="teal" />
           <StatPill label="DRTG" value={drtg !== null ? drtg.toFixed(1) : "–"} tone="red" />
           <StatPill label="eFG%" value={efg !== null ? (efg * 100).toFixed(1) + "%" : "–"} />
           <StatPill label="TOV%" value={tovPct !== null ? (tovPct * 100).toFixed(1) + "%" : "–"} tone="red" />
           <StatPill label="FTA/FGA" value={ftRate !== null ? ftRate.toFixed(2) : "–"} />
+          <StatPill label="Off. rebounds / game" value={oreb !== null ? oreb.toFixed(1) : "–"} />
         </div>
+      )}
+
+      <HomeSectionLink eyebrow="Coding file" title="Team playtypes & shooting selection" onClick={goToTeam} />
+      {teamOff.length === 0 && teamDef.length === 0 ? (
+        <EmptyState text="No action coded yet (Import Match tab)." />
+      ) : (
+        <OffenseDefenseBreakdown off={teamOff} def={teamDef} detailTables={false} />
       )}
     </div>
   );
