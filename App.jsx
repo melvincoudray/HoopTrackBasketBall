@@ -562,7 +562,7 @@ function parseFibaLeaderboardFile(arrayBuffer, side = "offense") {
 // Settings) sans toucher au code, pour absorber les évolutions du logiciel de coding.
 // Ces valeurs par défaut reproduisent exactement la catégorisation d'origine.
 const DEFAULT_TAG_CATEGORIES = {
-  "Player": DEFAULT_ROSTER.map(p => p.first),
+  "Player": DEFAULT_ROSTER.map(p => p.name),
   "Playtypes": ["1v1", "Backdoor", "Backpick", "Cut", "Fastbreak", "Flarescreen", "Hand Off", "Offscreen", "PnP", "PnR", "Postup", "Rebound", "Spain", "StepUp", "StepUp PnP", "Transition", "Zone"],
   "Plays": ["In", "Thumb", "Away", "Chase", "Play A", "Play B", "Play C", "Play D", "Play E", "BOB", "SOB", "S"],
   "Shot selection": ["Contested", "Open"],
@@ -913,7 +913,7 @@ function parseBoxScoreFile(arrayBuffer, roster, teamName) {
       const v = row[c.idx];
       if (v !== "" && v !== undefined && v !== null && !isNaN(Number(v))) stats[c.label] = Number(v);
     });
-    if (Object.keys(stats).length) parsedRows.push({ player: match.first, playerFull: match.name, stats });
+    if (Object.keys(stats).length) parsedRows.push({ player: match.name, playerFull: match.name, stats });
   }
 
   // On identifie LA ligne de totaux d'équipe par son nom exact (renseigné par le coach),
@@ -1655,10 +1655,8 @@ export default function App() {
     setRoster(newRoster);
   }
 
-  async function removePlayer(id) {
-    const newRoster = roster.filter(p => p.id !== id);
-    await storeSet("roster", newRoster);
-    setRoster(newRoster);
+  async function removePlayer(id, label) {
+    await requestDeletion(team.id, team.name, "player", label, { id });
   }
 
   async function editPlayer(id, updates) {
@@ -1690,16 +1688,20 @@ export default function App() {
     }
     const savedSession = await storeGet("active_session");
     if (savedSession) {
-      // Migration : une ancienne session pouvait être enregistrée sous le nom complet du
-      // joueur ("Aiden Martinez") au lieu de son prénom ("Aiden") — ce qui l'empêchait de
-      // retrouver ses propres données (entraînement, Wellness...) partout ailleurs dans
-      // l'appli, puisqu'elles sont toutes indexées par prénom. On corrige silencieusement.
+      // Migration : une session pouvait avoir été enregistrée sous le seul prénom du joueur
+      // ("Aiden") avant qu'on passe à l'identité par nom complet ("Aiden Martinez") — ce qui
+      // évite les confusions entre deux joueurs partageant le même prénom. On corrige silencieusement.
       if (savedSession.role === "player") {
-        const byFullName = effectiveRoster.find(p => p.name === savedSession.name);
-        if (byFullName && byFullName.first !== savedSession.name) {
-          const fixed = { ...savedSession, name: byFullName.first };
-          await storeSet("active_session", fixed);
-          setSession(fixed);
+        const exactMatch = effectiveRoster.find(p => p.name === savedSession.name);
+        if (!exactMatch) {
+          const byFirstNameOnly = effectiveRoster.find(p => p.first === savedSession.name);
+          if (byFirstNameOnly) {
+            const fixed = { ...savedSession, name: byFirstNameOnly.name };
+            await storeSet("active_session", fixed);
+            setSession(fixed);
+          } else {
+            setSession(savedSession);
+          }
         } else {
           setSession(savedSession);
         }
@@ -2390,7 +2392,7 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
                 </label>
               ))}
               <div style={{ height: 1, background: LINE, margin: "4px 0" }} />
-              {[["stats", "Match Stats sub-tab"], ["objectives", "Objectives sub-tab"], ["training", "Training sub-tab"], ["mental", "Mental evaluation sub-tab"], ["wellness", "Wellness sub-tab"]].map(([key, label]) => (
+              {[["stats", "Match Stats sub-tab"], ["objectives", "Objectives sub-tab"], ["training", "Training sub-tab"], ["mental", "Mental evaluation sub-tab"], ["wellness", "Wellness sub-tab"], ["role", "Role sub-tab"]].map(([key, label]) => (
                 <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
                   <input type="checkbox" checked={visibility.playerDetail[key]} onChange={() => togglePlayerDetail(key)} /> {label}
                 </label>
@@ -2444,14 +2446,13 @@ function LoginScreen({ roster, onLogin }) {
   const [existingUser, setExistingUser] = useState(null);
 
   const staffOptions = ["Head coach", "Assistant coach", "Analyst"];
-  // Le nom AFFICHÉ (complet, pour distinguer deux joueurs qui partagent un prénom) est
-  // différent de l'IDENTITÉ utilisée pour le stockage (le prénom seul) — c'est ce même
-  // prénom qui identifie ce joueur partout ailleurs dans l'appli (entraînement, objectifs,
-  // Wellness, évaluation mentale...). Les confondre faisait que la page d'accueil d'un
-  // joueur ne retrouvait jamais ses propres données.
+  // Le nom complet sert désormais d'identité de stockage ET d'affichage — c'est ce même nom
+  // complet qui identifie ce joueur partout ailleurs dans l'appli (entraînement, objectifs,
+  // Wellness, évaluation mentale...), pour éviter toute confusion entre deux joueurs qui
+  // partageraient le même prénom.
   const nameOptions = [
     ...staffOptions.map(s => ({ key: s, label: s })),
-    ...roster.map(p => ({ key: p.first, label: p.name })),
+    ...roster.map(p => ({ key: p.name, label: p.name })),
   ];
 
   async function chooseName(opt) {
@@ -2586,12 +2587,14 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   const [wStatus, setWStatus] = useState("");
   const scouting = useScoutingTeams();
   const [nextGame, setNextGame] = useState("");
+  const [role, setRole] = useState(null);
 
   useEffect(() => {
     if (playerName) {
       storeGet("training:" + playerName).then(t => setTrainings((t || []).slice(0, 3)));
       storeGet("mental:" + playerName).then(m => setMentalEntries(m || []));
       storeGet("wellness:" + playerName).then(w => setWellnessEntries(w || []));
+      storeGet("role:" + playerName).then(r => setRole(r || null));
     }
   }, [playerName]);
 
@@ -2661,6 +2664,19 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
               <ChevronRight size={16} color="#5C6470" />
             </button>
           )}
+        </div>
+      )}
+
+      {playerName && role && (role.name || role.image) && (
+        <div style={{ marginBottom: 26 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 8 }}>Role</div>
+          <button onClick={() => goToPlayer("role")} style={{ display: "flex", alignItems: "center", gap: 14, width: "100%", maxWidth: 320, padding: "14px 16px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, color: PAPER, cursor: "pointer", textAlign: "left", fontFamily: "inherit" }}>
+            <div style={{ width: 44, height: 44, borderRadius: 8, background: PANEL2, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+              {role.image ? <img src={role.image} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <ShieldCheck size={18} color={AMBER} />}
+            </div>
+            <div style={{ fontWeight: 700, fontSize: 15, flex: 1 }}>{role.name || "Role"}</div>
+            <ChevronRight size={16} color="#5C6470" />
+          </button>
         </div>
       )}
 
@@ -2958,7 +2974,7 @@ function PlayerVsPlayer({ roster, onClose }) {
   const [playerB, setPlayerB] = useState("");
   const [seasonA, setSeasonA] = useState("all");
   const [seasonB, setSeasonB] = useState("all");
-  const names = roster.filter(p => fullBox.byPlayer[p.first]);
+  const names = roster.filter(p => fullBox.byPlayer[p.name]);
 
   function seasonsFor(first) {
     const entries = fullBox.byPlayer[first]?.entries || [];
@@ -3054,12 +3070,18 @@ function PlayersList({ roster, allPlays, onSelect, isCoach, onlyOwn, matchFilter
   const [editName, setEditName] = useState("");
   const [editPosition, setEditPosition] = useState("");
   const [busy, setBusy] = useState(false);
+  const [requestedDeletionIds, setRequestedDeletionIds] = useState(new Set());
+
+  async function handleDeletePlayer(p) {
+    await onRemovePlayer(p.id, p.name);
+    setRequestedDeletionIds(s => new Set([...s, p.id]));
+    setConfirmDelete(null);
+  }
 
   const rows = visibleRoster.map(p => {
-    const plays = allPlays.filter(pl => pl.player === p.first);
+    const plays = allPlays.filter(pl => pl.player === p.name);
     const codedGames = new Set(plays.map(pl => pl.matchId)).size;
-    const b = box.byPlayer[p.first];
-    const ppg = b && b.ptsLabel && b.averages[b.ptsLabel] !== null ? b.averages[b.ptsLabel].toFixed(1) : "–";
+    const b = box.byPlayer[p.name];
     return { ...p, playCount: plays.length, codedGames, boxGames: b ? b.games : 0, ppg };
   });
 
@@ -3104,7 +3126,7 @@ function PlayersList({ roster, allPlays, onSelect, isCoach, onlyOwn, matchFilter
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 20, display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end" }}>
           <div style={{ flex: 1, minWidth: 180 }}>
             <label style={labelStyle}>Full name</label>
-            <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="ex. Jean Dupont" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+            <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="e.g. Jean Dupont" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
           </div>
           <div style={{ width: 180 }}>
             <label style={labelStyle}>Position</label>
@@ -3115,7 +3137,7 @@ function PlayersList({ roster, allPlays, onSelect, isCoach, onlyOwn, matchFilter
               <option value="Big">Big</option>
             </select>
           </div>
-          <button disabled={busy} onClick={submitAdd} style={{ ...btnPrimary, width: "auto", padding: "11px 18px" }}>{busy ? "…" : "Ajouter"}</button>
+          <button disabled={busy} onClick={submitAdd} style={{ ...btnPrimary, width: "auto", padding: "11px 18px" }}>{busy ? "…" : "Add"}</button>
           <button onClick={() => setShowAdd(false)} style={btnSecondary}>Cancel</button>
         </div>
       )}
@@ -3141,13 +3163,13 @@ function PlayersList({ roster, allPlays, onSelect, isCoach, onlyOwn, matchFilter
                   </select>
                 </div>
               </div>
-              {editName.trim().split(" ")[0] !== p.first && (
+              {editName.trim() !== p.name && (
                 <div style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: 10, background: PANEL, border: `1px solid ${RED}`, borderRadius: 8, marginBottom: 10 }}>
                   <AlertTriangle size={14} color={RED} style={{ marginTop: 2, flexShrink: 0 }} />
                   <div style={{ fontSize: 11.5, color: "#D8DCE2", lineHeight: 1.4 }}>
-                    The first name is changing ("{p.first}" → "{editName.trim().split(" ")[0]}"). Since this first name links this player to
+                    The name is changing ("{p.name}" → "{editName.trim()}"). Since this exact name links this player to
                     all their history (matches, box scores, photos, objectives...), that history will stay linked to the old
-                    first name and will no longer appear on this profile. Only confirm if you're sure, or for a player with no history.
+                    name and will no longer appear on this profile. Only confirm if you're sure, or for a player with no history.
                   </div>
                 </div>
               )}
@@ -3158,7 +3180,7 @@ function PlayersList({ roster, allPlays, onSelect, isCoach, onlyOwn, matchFilter
             </div>
           ) : (
             <div key={p.id} style={{ ...btnRow, cursor: "default" }}>
-              <button onClick={() => onSelect(p.first)} style={{ display: "flex", alignItems: "center", gap: 14, background: "none", border: "none", cursor: "pointer", padding: 0, flex: 1, textAlign: "left", fontFamily: "inherit", color: "inherit" }}>
+              <button onClick={() => onSelect(p.name)} style={{ display: "flex", alignItems: "center", gap: 14, background: "none", border: "none", cursor: "pointer", padding: 0, flex: 1, textAlign: "left", fontFamily: "inherit", color: "inherit" }}>
                 <PlayerAvatar playerName={p.first} size={34} />
                 <div>
                   <div style={{ fontWeight: 600, fontSize: 14.5 }}>{p.name}</div>
@@ -3166,18 +3188,20 @@ function PlayersList({ roster, allPlays, onSelect, isCoach, onlyOwn, matchFilter
                 </div>
               </button>
               <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
-                <button onClick={() => onSelect(p.first)} style={{ background: "none", border: "none", cursor: "pointer", display: "flex", padding: 0 }}>
+                <button onClick={() => onSelect(p.name)} style={{ background: "none", border: "none", cursor: "pointer", display: "flex", padding: 0 }}>
                   <div style={{ textAlign: "right" }}>
                     <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 16, fontWeight: 700, color: AMBER }}>{p.ppg}</div>
                     <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>pts/game (box score)</div>
                   </div>
                 </button>
                 {isCoach && !onlyOwn && (
-                  confirmDelete === p.id ? (
+                  requestedDeletionIds.has(p.id) ? (
+                    <span style={{ fontSize: 11.5, color: AMBER }}>Pending admin approval</span>
+                  ) : confirmDelete === p.id ? (
                     <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                      <span style={{ fontSize: 11.5, color: RED }}>Delete ?</span>
-                      <button onClick={(e) => { e.stopPropagation(); onRemovePlayer(p.id); setConfirmDelete(null); }} style={{ background: RED, border: "none", borderRadius: 6, color: "#fff", fontSize: 11.5, padding: "5px 9px", cursor: "pointer" }}>Oui</button>
-                      <button onClick={(e) => { e.stopPropagation(); setConfirmDelete(null); }} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11.5, padding: "5px 9px", cursor: "pointer" }}>Non</button>
+                      <span style={{ fontSize: 11.5, color: RED }}>Delete?</span>
+                      <button onClick={(e) => { e.stopPropagation(); handleDeletePlayer(p); }} style={{ background: RED, border: "none", borderRadius: 6, color: "#fff", fontSize: 11.5, padding: "5px 9px", cursor: "pointer" }}>Yes</button>
+                      <button onClick={(e) => { e.stopPropagation(); setConfirmDelete(null); }} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11.5, padding: "5px 9px", cursor: "pointer" }}>No</button>
                     </div>
                   ) : (
                     <>
@@ -3186,7 +3210,7 @@ function PlayersList({ roster, allPlays, onSelect, isCoach, onlyOwn, matchFilter
                     </>
                   )
                 )}
-                <ChevronRight size={16} color="#5C6470" onClick={() => onSelect(p.first)} style={{ cursor: "pointer" }} />
+                <ChevronRight size={16} color="#5C6470" onClick={() => onSelect(p.name)} style={{ cursor: "pointer" }} />
               </div>
             </div>
           )
@@ -3207,11 +3231,11 @@ function PositionComparisonTable({ position, roster, byPlayer, playerFirst }) {
   const keys = POSITION_FEATURED_STATS[position] || ["pts", "tov"];
   // Union des colonnes réellement présentes chez au moins un des joueurs du poste, dans
   // l'ordre de priorité défini pour ce poste (Pts, Assists, Ballons perdus, % LF, % 3Pts…).
-  const allLabelsAtPosition = Array.from(new Set(peers.flatMap(p => (byPlayer[p.first]?.statLabels) || [])));
+  const allLabelsAtPosition = Array.from(new Set(peers.flatMap(p => (byPlayer[p.name]?.statLabels) || [])));
   const columns = keys.map(key => ({ key, label: findStatCol(allLabelsAtPosition, STAT_PATTERNS[key] || [], key), fallbackLabel: STAT_KEY_LABEL_FR[key] || key }));
 
   const rows = peers.map(p => {
-    const b = byPlayer[p.first];
+    const b = byPlayer[p.name];
     return { name: p.name, first: p.first, values: columns.map(c => (c.label && b && b.averages[c.label] !== undefined) ? b.averages[c.label] : null) };
   });
 
@@ -3246,13 +3270,18 @@ function PositionComparisonTable({ position, roster, byPlayer, playerFirst }) {
 // window.print() avec une mise en page dédiée).
 
 function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster }) {
+  const [wellnessEntries, setWellnessEntries] = useState([]);
+  useEffect(() => { storeGet("wellness:" + playerName).then(w => setWellnessEntries(w || [])); }, [playerName]);
+  const wellnessChartData = [...wellnessEntries].sort((a, b) => (a.date + a.slot).localeCompare(b.date + b.slot))
+    .map(e => ({ match: e.date + " " + (WELLNESS_SLOTS.find(s => s.key === e.slot)?.label || e.slot).slice(0, 3), physical: e.physical, mental: e.mental }));
+
   return (
     <div style={{ padding: 24, background: INK, color: PAPER }}>
       <h1 style={{ fontSize: 24, marginBottom: 4 }}>{playerName}</h1>
       <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 20 }}>{position || "Position not set"} · Report generated on {new Date().toLocaleDateString("en-US")}</div>
 
-      <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Totaux officiels (box score)</h2>
-      {box.entries.length === 0 ? <p>Aucun box score importé.</p> : (
+      <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Official totals (box score)</h2>
+      {box.entries.length === 0 ? <p>No box score imported.</p> : (
         <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 12, marginBottom: 12 }}>
           <thead><tr>{box.statLabels.map(l => <th key={l} style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>{friendlyStatLabel(l)}</th>)}</tr></thead>
           <tbody><tr>{box.statLabels.map(l => <td key={l} style={{ border: `1px solid ${LINE}`, padding: 4 }}>{formatStatValue(l, box.averages[l])}</td>)}</tr></tbody>
@@ -3261,12 +3290,12 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
 
       {position && (
         <>
-          <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Comparaison par poste — {position}</h2>
+          <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Comparison by position — {position}</h2>
           <PositionComparisonTable position={position} roster={roster} byPlayer={allBox.byPlayer} playerFirst={playerName} />
         </>
       )}
 
-      <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Attaque / Defense</h2>
+      <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Offense / Defense</h2>
       <OffenseDefenseBreakdown off={off} def={def} />
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Training</h2>
@@ -3274,6 +3303,36 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Mental evaluation</h2>
       <MentalLog playerName={playerName} isCoach={false} />
+
+      <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Wellness</h2>
+      {wellnessChartData.length === 0 ? <p>No wellness entry recorded.</p> : (
+        <div style={{ display: "flex", gap: 20, flexWrap: "wrap" }}>
+          <div style={{ width: 420, height: 200 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 4 }}>Physically</div>
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={wellnessChartData} margin={{ top: 4, right: 20, left: 0, bottom: 4 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke={LINE} />
+                <XAxis dataKey="match" tick={{ fill: "#5C6470", fontSize: 9 }} axisLine={{ stroke: LINE }} />
+                <YAxis domain={[1, 5]} tick={{ fill: "#5C6470", fontSize: 10 }} axisLine={{ stroke: LINE }} />
+                <Tooltip contentStyle={{ background: PANEL2, border: `1px solid ${LINE}` }} />
+                <Line type="monotone" dataKey="physical" stroke={TEAL} strokeWidth={2.5} dot={{ r: 3, fill: TEAL }} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+          <div style={{ width: 420, height: 200 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 4 }}>Mentally</div>
+            <ResponsiveContainer width="100%" height="100%">
+              <ComposedChart data={wellnessChartData} margin={{ top: 4, right: 20, left: 0, bottom: 4 }}>
+                <CartesianGrid strokeDasharray="3 3" stroke={LINE} />
+                <XAxis dataKey="match" tick={{ fill: "#5C6470", fontSize: 9 }} axisLine={{ stroke: LINE }} />
+                <YAxis domain={[1, 5]} tick={{ fill: "#5C6470", fontSize: 10 }} axisLine={{ stroke: LINE }} />
+                <Tooltip contentStyle={{ background: PANEL2, border: `1px solid ${LINE}` }} />
+                <Line type="monotone" dataKey="mental" stroke={AMBER} strokeWidth={2.5} dot={{ r: 3, fill: AMBER }} />
+              </ComposedChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -3288,7 +3347,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
   const box = useBoxScore(playerName, matchFilter);
   const allBox = useAllBoxScores(matchFilter);
   const teamAdvanced = useTeamAdvancedStats(matchFilter);
-  const me = roster.find(p => p.first === playerName);
+  const me = roster.find(p => p.name === playerName);
   const position = me ? me.position : "";
 
   const [subtab, setSubtab] = useState(initialSubtab || "stats");
@@ -3298,9 +3357,11 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
 
   return (
     <div>
-      <button onClick={onBack} className="screen-only" style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontSize: 13, padding: 0, marginBottom: 18 }}>
-        <ChevronLeft size={15} /> Back to players
-      </button>
+      {isCoach && (
+        <button onClick={onBack} className="screen-only" style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontSize: 13, padding: 0, marginBottom: 18 }}>
+          <ChevronLeft size={15} /> Back to players
+        </button>
+      )}
 
       <div className="screen-only" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 16, marginBottom: 20 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
@@ -3327,7 +3388,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
       </div>
 
       <div className="screen-only" style={{ display: "flex", gap: 8, marginBottom: 20, borderBottom: `1px solid ${LINE}`, paddingBottom: 10, flexWrap: "wrap" }}>
-        {[["stats", "Match Stats", "stats"], ["objectifs", "Objectives", "objectives"], ["training", "Training", "training"], ["mental", "Mental evaluation", "mental"], ["wellness", "Wellness", "wellness"]]
+        {[["stats", "Match Stats", "stats"], ["objectifs", "Objectives", "objectives"], ["training", "Training", "training"], ["mental", "Mental evaluation", "mental"], ["wellness", "Wellness", "wellness"], ["role", "Role", "role"]]
           .filter(([, , key]) => isCoach || pd[key])
           .map(([id, label]) => (
           <button key={id} onClick={() => setSubtab(id)} style={{
@@ -3460,6 +3521,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
         {subtab === "training" && <TrainingLog playerName={playerName} isCoach={isCoach} />}
         {subtab === "mental" && <MentalLog playerName={playerName} isCoach={isCoach} />}
         {subtab === "wellness" && <WellnessTab playerName={playerName} isCoach={isCoach} canSeeCharts={isCoach || v.wellnessCharts} teamId={teamId} teamName={teamName} />}
+        {subtab === "role" && <RoleTab playerName={playerName} isCoach={isCoach} />}
       </div>
 
       <div className="print-only" id="player-print-content">
@@ -4135,7 +4197,7 @@ const MENTAL_CRITERIA = [
 
 const DEFAULT_VISIBILITY = {
   tabs: { players: true, team: true, scouting: true },
-  playerDetail: { stats: true, objectives: true, training: true, mental: true, wellness: true },
+  playerDetail: { stats: true, objectives: true, training: true, mental: true, wellness: true, role: true },
   wellnessCharts: false, // les graphiques Wellness sont cachés aux joueurs par défaut
 };
 
@@ -4161,6 +4223,88 @@ const WELLNESS_SLOTS = [
   { key: "training1", label: "After 1st training" },
   { key: "training2", label: "After 2nd training" },
 ];
+
+// ---------------------------------------------------------------------------
+// Role — définie par le coach pour chaque joueur : un nom de rôle, une description de ce
+// qui est attendu concrètement, et une image le représentant. Le joueur peut la consulter
+// mais pas la modifier.
+// ---------------------------------------------------------------------------
+
+function RoleTab({ playerName, isCoach }) {
+  const [role, setRole] = useState(null);
+  const [name, setName] = useState("");
+  const [description, setDescription] = useState("");
+  const [image, setImage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
+  const imgRef = useRef();
+
+  useEffect(() => {
+    storeGet("role:" + playerName).then(r => {
+      setRole(r || null);
+      setName((r && r.name) || "");
+      setDescription((r && r.description) || "");
+      setImage((r && r.image) || "");
+    });
+  }, [playerName]);
+
+  async function handleImage(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setImage(await fileToResizedDataURL(file, 500, 0.85));
+  }
+
+  async function save() {
+    setBusy(true);
+    const record = { name: name.trim(), description: description.trim(), image };
+    await storeSet("role:" + playerName, record);
+    setRole(record);
+    setStatus("Saved.");
+    setBusy(false);
+  }
+
+  if (role === null && !isCoach) return <EmptyState text="No role defined yet." />;
+
+  if (!isCoach) {
+    // Lecture seule pour le joueur.
+    return (
+      <div>
+        {image && <img src={image} alt="" style={{ width: "100%", maxWidth: 320, borderRadius: 12, marginBottom: 16, display: "block" }} />}
+        <h2 style={{ fontSize: 18, fontWeight: 700, margin: "0 0 10px" }}>{name || "No role defined yet."}</h2>
+        {description && <p style={{ color: "#8B93A1", fontSize: 14, lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{description}</p>}
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18 }}>
+        <div style={{ marginBottom: 14 }}>
+          <label style={labelStyle}>Role name</label>
+          <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Floor general" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+        </div>
+        <div style={{ marginBottom: 14 }}>
+          <label style={labelStyle}>What's expected, concretely</label>
+          <textarea value={description} onChange={e => setDescription(e.target.value)} rows={6} placeholder="e.g. Push the pace in transition, take care of the ball, organize the offense..."
+            style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", resize: "vertical" }} />
+        </div>
+        <div style={{ marginBottom: 16 }}>
+          <label style={labelStyle}>Image representing this role</label>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <button type="button" onClick={() => imgRef.current && imgRef.current.click()} style={{ width: 80, height: 80, borderRadius: 10, background: PANEL2, border: `1px solid ${LINE}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, cursor: "pointer", padding: 0 }}>
+              {image ? <img src={image} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <Camera size={20} color="#5C6470" />}
+            </button>
+            <input ref={imgRef} type="file" accept="image/*" onChange={handleImage} style={{ display: "none" }} />
+            <span style={{ fontSize: 12, color: "#5C6470" }}>Click to choose an image</span>
+          </div>
+        </div>
+        <button disabled={busy} onClick={save} style={{ ...btnPrimary, width: "auto", padding: "10px 20px" }}>{busy ? "…" : "Save"}</button>
+        {status && <div style={{ fontSize: 12, color: TEAL, marginTop: 10 }}>{status}</div>}
+      </div>
+    </div>
+  );
+}
+
 
 function WellnessTab({ playerName, isCoach, canSeeCharts, teamId, teamName }) {
   const [entries, setEntries] = useState([]);
@@ -5724,7 +5868,7 @@ function TagCategoriesSettings({ roster, title = "Column categories (coding file
   }
 
   function syncPlayersFromRoster() {
-    const names = Array.from(new Set([...(cats["Player"] || []), ...roster.map(p => p.first)]));
+    const names = Array.from(new Set([...(cats["Player"] || []), ...roster.map(p => p.name)]));
     persist({ ...cats, "Player": names });
   }
 
@@ -6107,8 +6251,8 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team })
   }, [box.byPlayer]);
 
   const rows = roster.map(p => {
-    const b = box.byPlayer[p.first];
-    const codedGames = new Set(allPlays.filter(pl => pl.player === p.first).map(pl => pl.matchId)).size;
+    const b = box.byPlayer[p.name];
+    const codedGames = new Set(allPlays.filter(pl => pl.player === p.name).map(pl => pl.matchId)).size;
     return {
       name: p.name,
       games: b ? b.games : 0,
