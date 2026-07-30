@@ -411,6 +411,33 @@ async function clearLocalSession() {
   try { if (window.storage) await window.storage.delete(sessionStorageKey(), false); } catch (e) {}
 }
 
+// Même principe que la session : quelle équipe est active doit rester STRICTEMENT LOCALE à
+// cet appareil. Sinon, la dernière équipe choisie par n'importe qui se propage à tous les
+// autres appareils qui ouvrent le site — bug constaté où des joueurs arrivaient directement
+// sur une équipe sans jamais être passés par l'écran de choix.
+const ACTIVE_TEAM_LOCAL_KEY = "hooptrack_active_team_id";
+async function saveLocalActiveTeam(teamId) {
+  try {
+    if (typeof localStorage !== "undefined") { localStorage.setItem(ACTIVE_TEAM_LOCAL_KEY, teamId); return; }
+  } catch (e) {}
+  try { if (window.storage) await window.storage.set(ACTIVE_TEAM_LOCAL_KEY, teamId, false); } catch (e) {}
+}
+async function loadLocalActiveTeam() {
+  try {
+    if (typeof localStorage !== "undefined") { return localStorage.getItem(ACTIVE_TEAM_LOCAL_KEY); }
+  } catch (e) {}
+  try {
+    if (window.storage) { const r = await window.storage.get(ACTIVE_TEAM_LOCAL_KEY, false); return r ? r.value : null; }
+  } catch (e) {}
+  return null;
+}
+async function clearLocalActiveTeam() {
+  try {
+    if (typeof localStorage !== "undefined") { localStorage.removeItem(ACTIVE_TEAM_LOCAL_KEY); return; }
+  } catch (e) {}
+  try { if (window.storage) await window.storage.delete(ACTIVE_TEAM_LOCAL_KEY, false); } catch (e) {}
+}
+
 // ---------------------------------------------------------------------------
 // Parsing du fichier "Database"
 // ---------------------------------------------------------------------------
@@ -674,6 +701,21 @@ async function loadObservationTagCategories() {
 async function saveObservationTagCategories(cats) {
   OBSERVATION_TAG_CATEGORIES = cats;
   await storeSet("observation_tag_categories", cats);
+}
+
+// Style de graphique choisi pour chaque catégorie PERSONNALISÉE (celles ajoutées dans
+// Settings, au-delà des catégories intégrées comme Playtypes qui ont déjà un graphique
+// dédié en dur) : "simple" = donut de comparaison entre les éléments eux-mêmes (comme
+// Shooting Selection), "detailed" = liste avec fréquence/PPPP/Open% (comme Plays).
+let CATEGORY_CHART_STYLES = null;
+function currentCategoryChartStyles() { return CATEGORY_CHART_STYLES || {}; }
+function chartStyleFor(categoryName) { return currentCategoryChartStyles()[categoryName] || "detailed"; }
+async function loadCategoryChartStyles() {
+  CATEGORY_CHART_STYLES = (await storeGet("category_chart_styles")) || {};
+}
+async function saveCategoryChartStyles(styles) {
+  CATEGORY_CHART_STYLES = styles;
+  await storeSet("category_chart_styles", styles);
 }
 
 function parseMatchFile(arrayBuffer, cats) {
@@ -1226,12 +1268,24 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories }) 
         <>
           <SectionTitle eyebrow="Custom categories" title="Settings → other categories" />
           <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 26 }}>
-            {customOff.filter(c => c.items.length).map(c => (
-              <MetricBarList key={"off-" + c.name} title={`${c.name} — attaque`} items={c.items} color={AMBER} />
-            ))}
-            {customDef.filter(c => c.items.length).map(c => (
-              <MetricBarList key={"def-" + c.name} title={`${c.name} — défense`} items={c.items} color={TEAL} />
-            ))}
+            {customOff.filter(c => c.items.length).map(c => {
+              const style = chartStyleFor(c.name);
+              return (
+                <React.Fragment key={"off-" + c.name}>
+                  {(style === "simple" || style === "both") && <DonutCard title={`${c.name} — offense`} data={c.items.map((it, i) => ({ ...it, color: CHART_COLORS[i % CHART_COLORS.length] }))} />}
+                  {(style === "detailed" || style === "both") && <MetricBarList title={`${c.name} — offense`} items={c.items} color={AMBER} />}
+                </React.Fragment>
+              );
+            })}
+            {customDef.filter(c => c.items.length).map(c => {
+              const style = chartStyleFor(c.name);
+              return (
+                <React.Fragment key={"def-" + c.name}>
+                  {(style === "simple" || style === "both") && <DonutCard title={`${c.name} — defense`} data={c.items.map((it, i) => ({ ...it, color: CHART_COLORS[i % CHART_COLORS.length] }))} />}
+                  {(style === "detailed" || style === "both") && <MetricBarList title={`${c.name} — defense`} items={c.items} color={TEAL} />}
+                </React.Fragment>
+              );
+            })}
           </div>
         </>
       )}
@@ -1668,7 +1722,7 @@ export default function App() {
 
   useEffect(() => {
     (async () => {
-      const savedTeamId = await rawGet("active_team_id");
+      const savedTeamId = await loadLocalActiveTeam();
       if (savedTeamId) {
         const teams = await loadTeams();
         const t = teams.find(x => x.id === savedTeamId);
@@ -1683,7 +1737,7 @@ export default function App() {
   function selectTeam(t) {
     setActiveTeam(t.id); // toutes les clés de stockage sont désormais préfixées pour cette équipe
     setTeam(t);
-    rawSet("active_team_id", t.id);
+    saveLocalActiveTeam(t.id);
   }
 
   async function addPlayer(name, position) {
@@ -1706,6 +1760,7 @@ export default function App() {
   async function bootstrap() {
     await loadTagCategories();
     await loadObservationTagCategories();
+    await loadCategoryChartStyles();
     await loadBoxColumnAliases();
     const savedSeason = await storeGet("current_season");
     if (savedSeason) setCurrentSeason(savedSeason); else await storeSet("current_season", currentSeason);
@@ -1846,7 +1901,7 @@ export default function App() {
         team={team}
         onSwitchAccount={async () => { await clearLocalSession(); setSession(null); }}
         onSwitchTeam={async () => {
-          await rawDelete("active_team_id");
+          await clearLocalActiveTeam();
           await clearLocalSession();
           setActiveTeam(null);
           setTeam(null); setSession(null); setRoster(DEFAULT_ROSTER);
@@ -1940,12 +1995,12 @@ export default function App() {
             })()}
           </div>
         )}
-        {tab === "players" && !selectedPlayer && (
+        {tab === "players" && !selectedPlayer && (session.role === "coach" || visibility.tabs.players) && (
           <PlayersList roster={roster} allPlays={allPlays} onSelect={setSelectedPlayer} matchFilter={effectiveMatchFilter}
             isCoach={session.role === "coach"} onlyOwn={session.role === "player" ? session.name : null}
             onAddPlayer={addPlayer} onRemovePlayer={removePlayer} onEditPlayer={editPlayer} />
         )}
-        {tab === "players" && selectedPlayer && (
+        {tab === "players" && selectedPlayer && (session.role === "coach" || visibility.tabs.players) && (
           <PlayerDetail
             playerName={selectedPlayer}
             allPlays={allPlays}
@@ -1959,8 +2014,23 @@ export default function App() {
             initialSubtab={homeNav?.playerSubtab}
           />
         )}
+        {tab === "players" && session.role === "player" && !visibility.tabs.players && (
+          <div style={{ padding: 30, textAlign: "center", color: "#5C6470", border: `1px dashed ${LINE}`, borderRadius: 12, fontSize: 13.5 }}>
+            You don't have the permission to see this.
+          </div>
+        )}
         {tab === "team" && (session.role === "coach" || visibility.tabs.team) && <TeamTab roster={roster} allPlays={allPlays} matchesIndex={matchesIndex} matchFilter={effectiveMatchFilter} isCoach={session.role === "coach"} team={team} visibility={visibility} />}
+        {tab === "team" && session.role === "player" && !visibility.tabs.team && (
+          <div style={{ padding: 30, textAlign: "center", color: "#5C6470", border: `1px dashed ${LINE}`, borderRadius: 12, fontSize: 13.5 }}>
+            You don't have the permission to see this.
+          </div>
+        )}
         {tab === "scouting" && (session.role === "coach" || visibility.tabs.scouting) && <ScoutingTab isCoach={session.role === "coach"} matchFilter={effectiveMatchFilter} initialSubtab={homeNav?.scoutingSubtab} initialReportTeam={homeNav?.scoutingTeam} />}
+        {tab === "scouting" && session.role === "player" && !visibility.tabs.scouting && (
+          <div style={{ padding: 30, textAlign: "center", color: "#5C6470", border: `1px dashed ${LINE}`, borderRadius: 12, fontSize: 13.5 }}>
+            You don't have the permission to see this.
+          </div>
+        )}
         {tab === "planning" && (session.role === "coach" || visibility.tabs.planning) && <PlanningTab isCoach={session.role === "coach"} team={team} roster={roster} playerName={session.role === "player" ? session.name : null} />}
         {tab === "planning" && session.role === "player" && !visibility.tabs.planning && (
           <div style={{ padding: 30, textAlign: "center", color: "#5C6470", border: `1px dashed ${LINE}`, borderRadius: 12, fontSize: 13.5 }}>
@@ -2940,21 +3010,24 @@ function BottomTabBar({ tab, setTab, isCoach, visibility }) {
     ...(isCoach ? [{ id: "settings", label: "Settings", icon: ClipboardList }] : []),
   ];
   return (
-    <div style={{
-      position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 100,
-      background: "#0B0D11", borderTop: `1px solid ${LINE}`,
-      display: "flex", overflowX: "auto", paddingBottom: "env(safe-area-inset-bottom, 0px)",
-    }}>
-      {items.map(it => (
-        <button key={it.id} onClick={() => setTab(it.id)} style={{
-          flex: "1 1 0", minWidth: 64, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
-          gap: 3, padding: "9px 4px 8px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
-          color: tab === it.id ? AMBER : "#7B8390",
-        }}>
-          <it.icon size={20} strokeWidth={tab === it.id ? 2.4 : 1.9} />
-          <span style={{ fontSize: 10.5, fontWeight: tab === it.id ? 700 : 500, whiteSpace: "nowrap" }}>{it.label}</span>
-        </button>
-      ))}
+    <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 100 }}>
+      <div style={{
+        background: "#0B0D11", borderTop: `1px solid ${LINE}`,
+        display: "flex", overflowX: "auto", WebkitOverflowScrolling: "touch", paddingBottom: "env(safe-area-inset-bottom, 0px)",
+      }}>
+        {items.map(it => (
+          <button key={it.id} onClick={() => setTab(it.id)} style={{
+            flex: "0 0 auto", width: 72, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+            gap: 3, padding: "9px 4px 8px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
+            color: tab === it.id ? AMBER : "#7B8390",
+          }}>
+            <it.icon size={20} strokeWidth={tab === it.id ? 2.4 : 1.9} />
+            <span style={{ fontSize: 10.5, fontWeight: tab === it.id ? 700 : 500, whiteSpace: "nowrap" }}>{it.label}</span>
+          </button>
+        ))}
+      </div>
+      {/* Léger indice visuel qu'il y a d'autres onglets à faire glisser — sans bloquer le tap. */}
+      <div style={{ position: "absolute", top: 0, right: 0, bottom: "env(safe-area-inset-bottom, 0px)", width: 28, background: "linear-gradient(90deg, transparent, #0B0D11)", pointerEvents: "none" }} />
     </div>
   );
 }
@@ -6158,6 +6231,15 @@ function TagCategoriesSettings({ roster, title = "Column categories (coding file
   const [newCatName, setNewCatName] = useState("");
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
+  const [chartStyles, setChartStyles] = useState(currentCategoryChartStyles());
+
+  const BUILTIN_CATEGORIES = new Set(["Player", "Playtypes", "Plays", "Shot selection", "Defensive mistakes", "Screen defense", "Spacing", "Shot zone", "Results & misc."]);
+
+  async function setChartStyle(catName, style) {
+    const next = { ...chartStyles, [catName]: style };
+    setChartStyles(next);
+    await saveCategoryChartStyles(next);
+  }
 
   async function persist(next) {
     setBusy(true);
@@ -6233,6 +6315,16 @@ function TagCategoriesSettings({ roster, title = "Column categories (coding file
               )}
             </div>
           </div>
+          {!BUILTIN_CATEGORIES.has(catName) && (
+            <div style={{ marginBottom: 12 }}>
+              <label style={labelStyle}>Chart shown for this category</label>
+              <select value={chartStyles[catName] || "detailed"} onChange={e => setChartStyle(catName, e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", maxWidth: 340 }}>
+                <option value="detailed">Detailed list — frequency, PPP and % open per tag (like Plays)</option>
+                <option value="simple">Simple comparison — a donut comparing the tags to each other (like Shooting Selection)</option>
+                <option value="both">Both — show the donut and the detailed list together</option>
+              </select>
+            </div>
+          )}
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
             {tags.length === 0 && <span style={{ fontSize: 12.5, color: "#5C6470" }}>No column yet.</span>}
             {tags.map(tag => (
@@ -6700,7 +6792,7 @@ function detectResourceType(url) {
 // lecture seule. L'écran d'accueil affiche uniquement les événements du jour même.
 // ---------------------------------------------------------------------------
 
-const PLANNING_EVENT_TYPES = ["Training", "Meeting", "Other"];
+const DEFAULT_PLANNING_EVENT_TYPES = ["Training", "Meeting", "Other"];
 const PLANNING_COLORS = ["#F2A93B", "#2FBF9C", "#E4231C", "#4A90D9", "#B15FE0", "#8B93A1"];
 
 function startOfWeek(d) {
@@ -6717,26 +6809,31 @@ function formatDayLabel(d) { return d.toLocaleDateString("en-US", { weekday: "sh
 
 function PlanningTab({ isCoach, team, roster = [], playerName }) {
   const [events, setEvents] = useState([]);
+  const [eventTypes, setEventTypes] = useState(DEFAULT_PLANNING_EVENT_TYPES);
   const [loading, setLoading] = useState(true);
   const [weekStart, setWeekStart] = useState(startOfWeek(new Date()));
+  const [editingId, setEditingId] = useState(null); // null = nouvel événement, sinon en cours de modification
   const [date, setDate] = useState(todayLocal());
   const [startTime, setStartTime] = useState("09:00");
   const [endTime, setEndTime] = useState("10:00");
-  const [type, setType] = useState("Training");
+  const [type, setType] = useState(DEFAULT_PLANNING_EVENT_TYPES[0]);
   const [title, setTitle] = useState("");
   const [location, setLocation] = useState("");
   const [color, setColor] = useState(PLANNING_COLORS[0]);
   const [playerIds, setPlayerIds] = useState([]); // vide = concerne toute l'équipe
   const [viewAsPlayerId, setViewAsPlayerId] = useState(""); // coach : voir le planning d'un joueur précis
+  const [newTypeName, setNewTypeName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [requestedIds, setRequestedIds] = useState(new Set());
+  const formRef = useRef();
 
   useEffect(() => { load(); }, []);
   async function load() {
     setLoading(true);
     setEvents((await storeGet("planning_events")) || []);
+    setEventTypes((await storeGet("planning_event_types")) || DEFAULT_PLANNING_EVENT_TYPES);
     setLoading(false);
   }
 
@@ -6744,16 +6841,51 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
     setPlayerIds(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
   }
 
-  async function addEvent() {
+  async function addEventType() {
+    const name = newTypeName.trim();
+    if (!name || eventTypes.includes(name)) return;
+    const next = [...eventTypes, name];
+    await storeSet("planning_event_types", next);
+    setEventTypes(next);
+    setNewTypeName("");
+  }
+
+  function resetForm() {
+    setEditingId(null);
+    setDate(todayLocal()); setStartTime("09:00"); setEndTime("10:00");
+    setType(eventTypes[0]); setTitle(""); setLocation(""); setColor(PLANNING_COLORS[0]); setPlayerIds([]);
+  }
+
+  // Pré-remplit le formulaire avec les données d'un événement — pour le modifier (editingId
+  // défini) ou pour le dupliquer sur un autre jour (editingId reste vide, donc "Add event"
+  // créera une NOUVELLE entrée au lieu d'écraser l'originale).
+  function loadIntoForm(ev, forEditing) {
+    setEditingId(forEditing ? ev.id : null);
+    setDate(ev.date); setStartTime(ev.startTime); setEndTime(ev.endTime);
+    setType(ev.type); setTitle(ev.title); setLocation(ev.location || "");
+    setColor(ev.color); setPlayerIds(ev.playerIds || []);
+    setError("");
+    if (formRef.current) formRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  async function submitEvent() {
     setError("");
     if (!title.trim()) { setError("Add a title."); return; }
     if (endTime <= startTime) { setError("End time must be after start time."); return; }
     setBusy(true);
-    const entry = { id: uid(), date, startTime, endTime, type, title: title.trim(), location: location.trim(), color, playerIds };
-    const next = [...events, entry];
-    await storeSet("planning_events", next);
-    setEvents(next);
-    setTitle(""); setLocation(""); setPlayerIds([]);
+    if (editingId) {
+      const next = events.map(ev => ev.id === editingId
+        ? { ...ev, date, startTime, endTime, type, title: title.trim(), location: location.trim(), color, playerIds }
+        : ev);
+      await storeSet("planning_events", next);
+      setEvents(next);
+    } else {
+      const entry = { id: uid(), date, startTime, endTime, type, title: title.trim(), location: location.trim(), color, playerIds };
+      const next = [...events, entry];
+      await storeSet("planning_events", next);
+      setEvents(next);
+    }
+    resetForm();
     setBusy(false);
   }
 
@@ -6783,36 +6915,43 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
   return (
     <div>
       {isCoach && (
-        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 24 }}>
-          <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 14 }}>New event</div>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
-            <div style={{ width: 160 }}>
+        <div ref={formRef} style={{ background: PANEL, border: `1px solid ${editingId ? AMBER : LINE}`, borderRadius: 12, padding: 18, marginBottom: 24 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
+            <div style={{ fontSize: 14, fontWeight: 700 }}>{editingId ? "Edit event" : "New event"}</div>
+            {editingId && <button onClick={resetForm} style={{ fontSize: 11.5, color: "#8B93A1", background: "none", border: "none", cursor: "pointer" }}>Cancel edit</button>}
+          </div>
+          <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 16 }}>
+            <div style={{ flex: "1 1 140px", minWidth: 140 }}>
               <label style={labelStyle}>Date</label>
-              <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+              <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "100%", height: 46, boxSizing: "border-box" }} />
             </div>
-            <div style={{ width: 120 }}>
+            <div style={{ flex: "1 1 110px", minWidth: 110 }}>
               <label style={labelStyle}>Start</label>
-              <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+              <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "100%", height: 46, boxSizing: "border-box" }} />
             </div>
-            <div style={{ width: 120 }}>
+            <div style={{ flex: "1 1 110px", minWidth: 110 }}>
               <label style={labelStyle}>End</label>
-              <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
-            </div>
-            <div style={{ width: 150 }}>
-              <label style={labelStyle}>Type</label>
-              <select value={type} onChange={e => setType(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }}>
-                {PLANNING_EVENT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
-              </select>
+              <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "100%", height: 46, boxSizing: "border-box" }} />
             </div>
           </div>
-          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
-            <div style={{ flex: 1, minWidth: 180 }}>
-              <label style={labelStyle}>Title</label>
-              <input value={title} onChange={e => setTitle(e.target.value)} placeholder="e.g. Full team practice" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+          <div style={{ marginBottom: 16 }}>
+            <label style={labelStyle}>Type</label>
+            <select value={type} onChange={e => setType(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "100%", maxWidth: 260 }}>
+              {eventTypes.map(t => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <div style={{ display: "flex", gap: 8, marginTop: 8, maxWidth: 320 }}>
+              <input value={newTypeName} onChange={e => setNewTypeName(e.target.value)} placeholder="New category…" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", fontSize: 12, padding: "8px 10px", flex: 1 }} />
+              <button type="button" onClick={addEventType} style={{ ...btnSecondary, padding: "8px 14px", fontSize: 12, flexShrink: 0 }}>Add</button>
             </div>
-            <div style={{ flex: 1, minWidth: 180 }}>
+          </div>
+          <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 16 }}>
+            <div style={{ flex: "1 1 180px", minWidth: 180 }}>
+              <label style={labelStyle}>Title</label>
+              <input value={title} onChange={e => setTitle(e.target.value)} placeholder="e.g. Full team practice" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "100%" }} />
+            </div>
+            <div style={{ flex: "1 1 180px", minWidth: 180 }}>
               <label style={labelStyle}>Location</label>
-              <input value={location} onChange={e => setLocation(e.target.value)} placeholder="e.g. Main gym" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+              <input value={location} onChange={e => setLocation(e.target.value)} placeholder="e.g. Main gym" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "100%" }} />
             </div>
           </div>
           <div style={{ marginBottom: 14 }}>
@@ -6840,7 +6979,7 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
             </div>
           </div>
           {error && <div style={{ color: RED, fontSize: 12.5, marginBottom: 10 }}>{error}</div>}
-          <button disabled={busy} onClick={addEvent} style={{ ...btnPrimary, width: "auto", padding: "9px 18px" }}>{busy ? "…" : "Add event"}</button>
+          <button disabled={busy} onClick={submitEvent} style={{ ...btnPrimary, width: "auto", padding: "9px 18px" }}>{busy ? "…" : editingId ? "Save changes" : "Add event"}</button>
         </div>
       )}
 
@@ -6894,7 +7033,11 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
                             <button onClick={() => setConfirmDeleteId(null)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Cancel</button>
                           </div>
                         ) : (
-                          <button onClick={() => setConfirmDeleteId(ev.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex", flexShrink: 0 }}><Trash2 size={14} /></button>
+                          <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+                            <button onClick={() => loadIntoForm(ev, true)} title="Edit" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><ClipboardList size={14} /></button>
+                            <button onClick={() => loadIntoForm(ev, false)} title="Duplicate to another day" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Plus size={14} /></button>
+                            <button onClick={() => setConfirmDeleteId(ev.id)} title="Delete" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={14} /></button>
+                          </div>
                         )
                       )}
                     </div>
