@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
-import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon } from "lucide-react";
+import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon, Calendar } from "lucide-react";
 import {
   PieChart, Pie, Cell, ComposedChart, Bar as RBar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
   RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar,
@@ -54,6 +54,12 @@ function simpleHash(s) {
 }
 
 function uid() { return Math.random().toString(36).slice(2, 10) + Date.now().toString(36); }
+// Volontairement PAS new Date().toISOString().slice(0,10) : ça convertit en UTC et peut
+// décaler la date d'un jour pour un fuseau horaire en avance sur UTC (ex. la Suisse),
+// surtout en fin de journée locale. On utilise les composants de date LOCALE à la place.
+function todayLocal(d = new Date()) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+}
 function matchKey(date, opponent) { return `${date}||${opponent}`; }
 
 // Saison basket = juillet à juin. Sert de valeur par défaut, modifiable dans Settings.
@@ -1862,6 +1868,7 @@ export default function App() {
             goToPlayer={(subtab) => { setSelectedPlayer(session.name); setHomeNav({ playerSubtab: subtab }); setTab("players"); }}
             goToScouting={(subtab, teamName) => { setHomeNav({ scoutingSubtab: subtab, scoutingTeam: teamName }); setTab("scouting"); }}
             goToTeam={() => setTab("team")}
+            goToPlanning={() => setTab("planning")}
             visibility={visibility}
           />
         )}
@@ -1954,6 +1961,12 @@ export default function App() {
         )}
         {tab === "team" && (session.role === "coach" || visibility.tabs.team) && <TeamTab roster={roster} allPlays={allPlays} matchesIndex={matchesIndex} matchFilter={effectiveMatchFilter} isCoach={session.role === "coach"} team={team} visibility={visibility} />}
         {tab === "scouting" && (session.role === "coach" || visibility.tabs.scouting) && <ScoutingTab isCoach={session.role === "coach"} matchFilter={effectiveMatchFilter} initialSubtab={homeNav?.scoutingSubtab} initialReportTeam={homeNav?.scoutingTeam} />}
+        {tab === "planning" && (session.role === "coach" || visibility.tabs.planning) && <PlanningTab isCoach={session.role === "coach"} team={team} roster={roster} playerName={session.role === "player" ? session.name : null} />}
+        {tab === "planning" && session.role === "player" && !visibility.tabs.planning && (
+          <div style={{ padding: 30, textAlign: "center", color: "#5C6470", border: `1px dashed ${LINE}`, borderRadius: 12, fontSize: 13.5 }}>
+            You don't have the permission to see this.
+          </div>
+        )}
         {tab === "backup" && session.role === "coach" && <BackupTab team={team} roster={roster} />}
         {tab === "settings" && session.role === "coach" && (
           <div>
@@ -2168,6 +2181,10 @@ async function approveDeletion(req) {
     const key = p + "team_resources";
     const resources = (await rawGet(key)) || [];
     await rawSet(key, resources.filter(r => r.id !== req.meta.id));
+  } else if (req.type === "planning_event") {
+    const key = p + "planning_events";
+    const evs = (await rawGet(key)) || [];
+    await rawSet(key, evs.filter(e => e.id !== req.meta.id));
   }
   const pending = (await rawGet("pending_deletions")) || [];
   await rawSet("pending_deletions", pending.filter(r => r.id !== req.id));
@@ -2424,7 +2441,7 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
           <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 8 }}>Visible to players</div>
           {visibility && (
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
-              {[["players", "Players tab"], ["team", "Team tab"], ["scouting", "Scouting tab"]].map(([key, label]) => (
+              {[["players", "Players tab"], ["team", "Team tab"], ["scouting", "Scouting tab"], ["planning", "Planning tab"]].map(([key, label]) => (
                 <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
                   <input type="checkbox" checked={visibility.tabs[key]} onChange={() => toggleTab(key)} /> {label}
                 </label>
@@ -2617,7 +2634,7 @@ function HomeSectionLink({ eyebrow, title, onClick }) {
   );
 }
 
-function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, team, goToPlayer, goToScouting, goToTeam, visibility }) {
+function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, team, goToPlayer, goToScouting, goToTeam, goToPlanning, visibility }) {
   const box = useBoxScore(playerName, matchFilter);
   const advanced = useTeamAdvancedStats(matchFilter);
   const objectives = useObjectives(playerName || "");
@@ -2633,8 +2650,17 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   const [nextGame, setNextGame] = useState("");
   const [role, setRole] = useState(null);
   const [resources, setResources] = useState([]);
+  const [todayEvents, setTodayEvents] = useState([]);
 
   useEffect(() => { storeGet("team_resources").then(r => setResources(((r || []).sort((a, b) => b.addedAt.localeCompare(a.addedAt))).slice(0, 2))); }, []);
+  useEffect(() => {
+    storeGet("planning_events").then(evs => {
+      const todayKey = toDateKey(new Date());
+      const me = playerName ? roster.find(p => p.name === playerName) : null;
+      const relevant = (evs || []).filter(e => e.date === todayKey && (!e.playerIds || e.playerIds.length === 0 || (me && e.playerIds.includes(me.id))));
+      setTodayEvents(relevant.sort((a, b) => a.startTime.localeCompare(b.startTime)));
+    });
+  }, []);
 
   useEffect(() => {
     if (playerName) {
@@ -2654,7 +2680,7 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
 
   async function submitWellness() {
     setWBusy(true); setWStatus("");
-    const today = new Date().toISOString().slice(0, 10);
+    const today = todayLocal();
     const existingIdx = wellnessEntries.findIndex(e => e.date === today && e.slot === wSlot);
     const entry = { id: existingIdx >= 0 ? wellnessEntries[existingIdx].id : uid(), date: today, slot: wSlot, physical: wPhysical, mental: wMental };
     const next = existingIdx >= 0 ? wellnessEntries.map((e, i) => i === existingIdx ? entry : e) : [entry, ...wellnessEntries];
@@ -2677,7 +2703,7 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   };
   const ortg = avg("ortg"), drtg = avg("drtg"), efg = avg("efg"), tovPct = avg("tovPct"), ftRate = avg("ftRate"), oreb = avg("oreb");
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = todayLocal();
   const answeredToday = new Set(wellnessEntries.filter(e => e.date === today).map(e => e.slot));
   const mentalAvg = mentalEntries.length
     ? mentalEntries.reduce((s, e) => s + (Object.values(e.ratings || {}).reduce((a, b) => a + b, 0) / (Object.values(e.ratings || {}).length || 1)), 0) / mentalEntries.length
@@ -2784,6 +2810,25 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
             </>
           )}
 
+          {(visibility || DEFAULT_VISIBILITY).tabs.planning && (
+            <>
+              <HomeSectionLink eyebrow={new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })} title="Today's schedule" onClick={goToPlanning} />
+              {todayEvents.length === 0 ? <EmptyState text="Nothing scheduled today." /> : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 26 }}>
+                  {todayEvents.map(ev => (
+                    <div key={ev.id} style={{ display: "flex", alignItems: "center", gap: 10, background: PANEL, border: `1px solid ${LINE}`, borderLeft: `4px solid ${ev.color}`, borderRadius: 8, padding: "8px 12px" }}>
+                      <div style={{ fontSize: 12, color: "#8B93A1", width: 90, flexShrink: 0 }}>{ev.startTime}–{ev.endTime}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13.5, fontWeight: 600 }}>{ev.title} <span style={{ color: "#5C6470", fontWeight: 400 }}>· {ev.type}</span></div>
+                        {ev.location && <div style={{ fontSize: 11.5, color: "#5C6470" }}>{ev.location}</div>}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </>
+          )}
+
           {pd.stats && (
             <>
               <HomeSectionLink eyebrow="Box score" title="Your totals" onClick={() => goToPlayer("stats")} />
@@ -2885,6 +2930,7 @@ function BottomTabBar({ tab, setTab, isCoach, visibility }) {
   const v = visibility || DEFAULT_VISIBILITY;
   const items = [
     { id: "home", label: "Home", icon: Home },
+    ...(isCoach || v.tabs.planning ? [{ id: "planning", label: "Planning", icon: Calendar }] : []),
     ...(isCoach ? [{ id: "import", label: "Import", icon: Upload }] : []),
     ...(isCoach ? [{ id: "boxscore", label: "Full Stats", icon: ClipboardList }] : []),
     ...(isCoach || v.tabs.players ? [{ id: "players", label: "Players", icon: Users }] : []),
@@ -2920,7 +2966,7 @@ function BottomTabBar({ tab, setTab, isCoach, visibility }) {
 function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch }) {
   const [preview, setPreview] = useState(null);
   const [fileErr, setFileErr] = useState("");
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(todayLocal());
   const [opponent, setOpponent] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
@@ -3517,7 +3563,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
           <div style={{ fontSize: 12.5, color: "#5C6470" }}>{games.length} match{games.length !== 1 ? "s" : ""} coded · {box.entries.length} box score{box.entries.length !== 1 ? "s" : ""}</div>
           <button onClick={async () => {
-            const filename = `fiche_${playerName}_${new Date().toISOString().slice(0, 10)}.html`;
+            const filename = `fiche_${playerName}_${todayLocal()}.html`;
             const pdfOk = await tryExportPdf("player-print-content", filename, "dark");
             if (pdfOk) return;
             const r = buildReportHtml("player-print-content", filename, "dark");
@@ -3544,7 +3590,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
       <div className="screen-only">
         {!isCoach && !pd[SUBTAB_KEY[subtab]] && (
           <div style={{ padding: 30, textAlign: "center", color: "#5C6470", border: `1px dashed ${LINE}`, borderRadius: 12, fontSize: 13.5, marginBottom: 26 }}>
-            The admin doesn't give you access to this.
+            You don't have the permission to see this.
           </div>
         )}
         {subtab === "stats" && (isCoach || pd.stats) && (
@@ -3782,7 +3828,7 @@ const tdStyle = { padding: "9px 14px", borderBottom: `1px solid ${LINE}`, whiteS
 function BoxScoreTab({ roster, index, onImported, onDelete }) {
   const [preview, setPreview] = useState(null);
   const [fileErr, setFileErr] = useState("");
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(todayLocal());
   const [opponent, setOpponent] = useState("");
   const [opponentScore, setOpponentScore] = useState("");
   const [teamName, setTeamName] = useState("");
@@ -3968,7 +4014,7 @@ function ObjectiveForm({ initial, linkableStats, onSave, onCancel, busy }) {
   const [targetValue, setTargetValue] = useState(initial?.targetValue ?? "");
   const [manualCurrent, setManualCurrent] = useState(initial?.manualCurrent ?? "");
   const [startValue, setStartValue] = useState(initial?.startValue ?? "");
-  const startDate = initial?.startDate || new Date().toISOString().slice(0, 10);
+  const startDate = initial?.startDate || todayLocal();
 
   // À la création d'un objectif, si on choisit une stat liée, on capture sa valeur actuelle
   // comme point de départ (point fixe, ne bouge plus ensuite même si la stat évolue).
@@ -4188,7 +4234,7 @@ function TrainingPlanEditor({ plan, onSave, isCoach }) {
 
 function TrainingLog({ playerName, isCoach }) {
   const [entries, setEntries] = useState([]);
-  const [form, setForm] = useState({ date: new Date().toISOString().slice(0, 10), thematique: TRAINING_THEMES[0], theme: "", objectif: "", commentaire: "", eval: 3, duree: 15 });
+  const [form, setForm] = useState({ date: todayLocal(), thematique: TRAINING_THEMES[0], theme: "", objectif: "", commentaire: "", eval: 3, duree: 15 });
   const [busy, setBusy] = useState(false);
   const { plan, save: savePlan } = useTrainingPlan(playerName);
 
@@ -4200,7 +4246,7 @@ function TrainingLog({ playerName, isCoach }) {
     const next = [{ id: uid(), ...form }, ...entries];
     await storeSet("training:" + playerName, next);
     setEntries(next);
-    setForm({ date: new Date().toISOString().slice(0, 10), thematique: TRAINING_THEMES[0], theme: "", objectif: "", commentaire: "", eval: 3, duree: 15 });
+    setForm({ date: todayLocal(), thematique: TRAINING_THEMES[0], theme: "", objectif: "", commentaire: "", eval: 3, duree: 15 });
     setBusy(false);
   }
   async function remove(id) {
@@ -4346,7 +4392,7 @@ const MENTAL_CRITERIA = [
 // ---------------------------------------------------------------------------
 
 const DEFAULT_VISIBILITY = {
-  tabs: { players: true, team: true, scouting: true },
+  tabs: { players: true, team: true, scouting: true, planning: true },
   playerDetail: { stats: true, objectives: true, training: true, mental: true, wellness: true, role: true, meetings: true },
   team: { standings: true, teamPlay: true, advanced: true, resources: true },
   wellnessCharts: false, // les graphiques Wellness sont cachés aux joueurs par défaut
@@ -4389,7 +4435,7 @@ const WELLNESS_SLOTS = [
 function MeetingsTab({ playerName, isCoach }) {
   const [meetings, setMeetings] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(todayLocal());
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [busy, setBusy] = useState(false);
@@ -4562,7 +4608,7 @@ function RoleTab({ playerName, isCoach }) {
 
 function WellnessTab({ playerName, isCoach, canSeeCharts, teamId, teamName }) {
   const [entries, setEntries] = useState([]);
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(todayLocal());
   const [slot, setSlot] = useState("wake");
   const [physical, setPhysical] = useState(3);
   const [mental, setMental] = useState(3);
@@ -4692,7 +4738,7 @@ function WellnessTab({ playerName, isCoach, canSeeCharts, teamId, teamName }) {
 
 function MentalLog({ playerName, isCoach }) {
   const [entries, setEntries] = useState([]);
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(todayLocal());
   const [comment, setComment] = useState("");
   const [ratings, setRatings] = useState(Object.fromEntries(MENTAL_CRITERIA.map(c => [c, 3])));
   const [busy, setBusy] = useState(false);
@@ -4965,7 +5011,7 @@ function useScoutingTeams() {
     const names = (await storeGet("scouting_teams")) || [];
     if (!names.includes(trimmed)) { await storeSet("scouting_teams", [...names, trimmed]); }
     const existing = await storeGet("scouting:" + trimmed);
-    const record = { stats, source, updatedAt: new Date().toISOString().slice(0, 10), logo: existing?.logo };
+    const record = { stats, source, updatedAt: todayLocal(), logo: existing?.logo };
     await storeSet("scouting:" + trimmed, record);
     setTeams(t => ({ ...t, [trimmed]: record }));
   }
@@ -5291,12 +5337,12 @@ function ScoutingPlayerForm({ initial, onSave, onCancel, busy }) {
             <input type="number" value={height} onChange={e => setHeight(e.target.value)} placeholder="195" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
           </div>
           <div style={{ width: 130 }}>
-            <label style={labelStyle}>Main forte</label>
+            <label style={labelStyle}>Dominant hand</label>
             <select value={handedness} onChange={e => setHandedness(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }}>
               <option value="">—</option>
-              <option value="Droite">Droite</option>
-              <option value="Gauche">Gauche</option>
-              <option value="Ambidextre">Ambidextre</option>
+              <option value="Right">Right</option>
+              <option value="Left">Left</option>
+              <option value="Ambidextrous">Ambidextrous</option>
             </select>
           </div>
         </div>
@@ -5390,13 +5436,13 @@ function ScoutingPlayerCard({ player, isCoach, onEdit, onDelete }) {
               {player.height && (
                 <div style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 12px", flex: 1, textAlign: "center" }}>
                   <div style={{ fontWeight: 800, fontSize: 16, color: PAPER }}>{player.height} cm</div>
-                  <div style={{ fontSize: 9.5, color: "#5C6470", textTransform: "uppercase" }}>Taille</div>
+                  <div style={{ fontSize: 9.5, color: "#5C6470", textTransform: "uppercase" }}>Height</div>
                 </div>
               )}
               {player.handedness && (
                 <div style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 12px", flex: 1, textAlign: "center" }}>
                   <div style={{ fontWeight: 800, fontSize: 16, color: PAPER }}>{player.handedness}</div>
-                  <div style={{ fontSize: 9.5, color: "#5C6470", textTransform: "uppercase" }}>Main forte</div>
+                  <div style={{ fontSize: 9.5, color: "#5C6470", textTransform: "uppercase" }}>Dominant hand</div>
                 </div>
               )}
             </div>
@@ -5476,7 +5522,7 @@ function ScoutingReportTab({ isCoach, teamNames, initialTeam }) {
                 ) : <div />}
                 {report.players.length > 0 && (
                   <button onClick={async () => {
-                    const filename = `scouting_${selectedTeam}_${new Date().toISOString().slice(0, 10)}.html`;
+                    const filename = `scouting_${selectedTeam}_${todayLocal()}.html`;
                     const pdfOk = await tryExportPdf("scouting-print-content", filename, "dark");
                     if (pdfOk) return;
                     const r = buildReportHtml("scouting-print-content", filename, "dark");
@@ -6303,7 +6349,7 @@ function BackupTab({ team, roster }) {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `backup_${team.name.replace(/[^a-z0-9]+/gi, "_")}_${new Date().toISOString().slice(0, 10)}.json`;
+      a.download = `backup_${team.name.replace(/[^a-z0-9]+/gi, "_")}_${todayLocal()}.json`;
       document.body.appendChild(a); a.click(); a.remove();
       URL.revokeObjectURL(url);
       setStatus(`Backup ready — ${Object.keys(backup.data).length} items. If the download didn't start, use "Copy text" below.`);
@@ -6447,13 +6493,14 @@ function BackupTab({ team, roster }) {
 
 function CollectiveTraining({ roster }) {
   const [selected, setSelected] = useState([]); // ids de joueurs
-  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [date, setDate] = useState(todayLocal());
   const [thematique, setThematique] = useState(TRAINING_THEMES[0]);
   const [theme, setTheme] = useState("");
   const [objectif, setObjective] = useState("");
   const [duree, setDuree] = useState(15);
   const [commentaire, setCommentaire] = useState("");
   const [notes, setNotes] = useState({}); // playerId -> note 1-5
+  const [comments, setComments] = useState({}); // playerId -> commentaire individuel
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
@@ -6461,8 +6508,13 @@ function CollectiveTraining({ roster }) {
   function toggle(id) {
     setSelected(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
     setNotes(n => (id in n ? n : { ...n, [id]: 3 }));
+    setComments(c => (id in c ? c : { ...c, [id]: "" }));
   }
-  function selectAll() { setSelected(roster.map(p => p.id)); setNotes(Object.fromEntries(roster.map(p => [p.id, 3]))); }
+  function selectAll() {
+    setSelected(roster.map(p => p.id));
+    setNotes(Object.fromEntries(roster.map(p => [p.id, 3])));
+    setComments(c => Object.fromEntries(roster.map(p => [p.id, c[p.id] || ""])));
+  }
   function selectNone() { setSelected([]); }
 
   async function submit() {
@@ -6475,11 +6527,13 @@ function CollectiveTraining({ roster }) {
         const player = roster.find(p => p.id === id);
         if (!player) continue;
         const existing = (await storeGet("training:" + player.name)) || [];
-        const entry = { id: uid(), date, thematique, theme, objectif, duree, commentaire, eval: notes[id] ?? 3 };
+        const individualComment = (comments[id] || "").trim();
+        const fullComment = [commentaire, individualComment].filter(Boolean).join(commentaire && individualComment ? "\n\n" : "");
+        const entry = { id: uid(), date, thematique, theme, objectif, duree, commentaire: fullComment, eval: notes[id] ?? 3 };
         await storeSet("training:" + player.name, [entry, ...existing]);
       }
       setStatus(`Session added to ${selected.length} player${selected.length !== 1 ? "s" : ""} — saved under: ${selected.map(id => { const p = roster.find(pl => pl.id === id); return p ? `"${p.name}"` : "?"; }).join(", ")}.`);
-      setTheme(""); setObjective(""); setCommentaire("");
+      setTheme(""); setObjective(""); setCommentaire(""); setComments({});
     } catch (err) {
       setError("Save failed: " + (err.message || "erreur inconnue"));
     }
@@ -6507,7 +6561,7 @@ function CollectiveTraining({ roster }) {
 
       <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 20 }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12 }}>
-          <div style={{ fontSize: 13, fontWeight: 700 }}>Players involved — individual rating per player</div>
+          <div style={{ fontSize: 13, fontWeight: 700 }}>Players involved — individual rating & comment per player</div>
           <div style={{ display: "flex", gap: 10 }}>
             <button onClick={selectAll} style={{ fontSize: 11.5, color: AMBER, background: "none", border: "none", cursor: "pointer" }}>All</button>
             <button onClick={selectNone} style={{ fontSize: 11.5, color: "#5C6470", background: "none", border: "none", cursor: "pointer" }}>None</button>
@@ -6515,16 +6569,27 @@ function CollectiveTraining({ roster }) {
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {roster.map(p => (
-            <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 12, padding: "8px 12px", background: selected.includes(p.id) ? PANEL2 : "transparent", border: `1px solid ${LINE}`, borderRadius: 8 }}>
-              <label style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, cursor: "pointer" }}>
-                <input type="checkbox" checked={selected.includes(p.id)} onChange={() => toggle(p.id)} />
-                <span style={{ fontSize: 13.5 }}>{p.name}</span>
-              </label>
+            <div key={p.id} style={{ padding: "8px 12px", background: selected.includes(p.id) ? PANEL2 : "transparent", border: `1px solid ${LINE}`, borderRadius: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 10, flex: 1, cursor: "pointer" }}>
+                  <input type="checkbox" checked={selected.includes(p.id)} onChange={() => toggle(p.id)} />
+                  <span style={{ fontSize: 13.5 }}>{p.name}</span>
+                </label>
+                {selected.includes(p.id) && (
+                  <select value={notes[p.id] ?? 3} onChange={e => setNotes(n => ({ ...n, [p.id]: Number(e.target.value) }))}
+                    style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 90, padding: "6px 10px", fontSize: 13, color: ratingColor(notes[p.id] ?? 3), fontWeight: 700 }}>
+                    {[1, 2, 3, 4, 5].map(v => <option key={v} value={v}>Rating {v}</option>)}
+                  </select>
+                )}
+              </div>
               {selected.includes(p.id) && (
-                <select value={notes[p.id] ?? 3} onChange={e => setNotes(n => ({ ...n, [p.id]: Number(e.target.value) }))}
-                  style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 90, padding: "6px 10px", fontSize: 13, color: ratingColor(notes[p.id] ?? 3), fontWeight: 700 }}>
-                  {[1, 2, 3, 4, 5].map(v => <option key={v} value={v}>Note {v}</option>)}
-                </select>
+                <textarea
+                  value={comments[p.id] || ""}
+                  onChange={e => setComments(c => ({ ...c, [p.id]: e.target.value }))}
+                  placeholder={`Individual comment for ${p.first}…`}
+                  rows={2}
+                  style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", resize: "vertical", marginTop: 8, fontSize: 12.5 }}
+                />
               )}
             </div>
           ))}
@@ -6627,6 +6692,221 @@ function TeamPrintReport({ team, rows, otherLabels, advanced, teamOff, teamDef, 
 
 function detectResourceType(url) {
   return /youtube\.com|youtu\.be|vimeo\.com|\.mp4($|\?)/i.test(url) ? "video" : "document";
+}
+
+// ---------------------------------------------------------------------------
+// Planning — emploi du temps de l'équipe. Le coach ajoute des événements (entraînement,
+// meeting, autre) avec heure de début/fin, lieu et couleur ; le joueur consulte en
+// lecture seule. L'écran d'accueil affiche uniquement les événements du jour même.
+// ---------------------------------------------------------------------------
+
+const PLANNING_EVENT_TYPES = ["Training", "Meeting", "Other"];
+const PLANNING_COLORS = ["#F2A93B", "#2FBF9C", "#E4231C", "#4A90D9", "#B15FE0", "#8B93A1"];
+
+function startOfWeek(d) {
+  const date = new Date(d);
+  const day = date.getDay(); // 0 = dimanche
+  const diff = day === 0 ? -6 : 1 - day; // ramène au lundi de la semaine
+  date.setDate(date.getDate() + diff);
+  date.setHours(0, 0, 0, 0);
+  return date;
+}
+function addDays(d, n) { const c = new Date(d); c.setDate(c.getDate() + n); return c; }
+function toDateKey(d) { return todayLocal(d); }
+function formatDayLabel(d) { return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }); }
+
+function PlanningTab({ isCoach, team, roster = [], playerName }) {
+  const [events, setEvents] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [weekStart, setWeekStart] = useState(startOfWeek(new Date()));
+  const [date, setDate] = useState(todayLocal());
+  const [startTime, setStartTime] = useState("09:00");
+  const [endTime, setEndTime] = useState("10:00");
+  const [type, setType] = useState("Training");
+  const [title, setTitle] = useState("");
+  const [location, setLocation] = useState("");
+  const [color, setColor] = useState(PLANNING_COLORS[0]);
+  const [playerIds, setPlayerIds] = useState([]); // vide = concerne toute l'équipe
+  const [viewAsPlayerId, setViewAsPlayerId] = useState(""); // coach : voir le planning d'un joueur précis
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [requestedIds, setRequestedIds] = useState(new Set());
+
+  useEffect(() => { load(); }, []);
+  async function load() {
+    setLoading(true);
+    setEvents((await storeGet("planning_events")) || []);
+    setLoading(false);
+  }
+
+  function togglePlayer(id) {
+    setPlayerIds(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
+  }
+
+  async function addEvent() {
+    setError("");
+    if (!title.trim()) { setError("Add a title."); return; }
+    if (endTime <= startTime) { setError("End time must be after start time."); return; }
+    setBusy(true);
+    const entry = { id: uid(), date, startTime, endTime, type, title: title.trim(), location: location.trim(), color, playerIds };
+    const next = [...events, entry];
+    await storeSet("planning_events", next);
+    setEvents(next);
+    setTitle(""); setLocation(""); setPlayerIds([]);
+    setBusy(false);
+  }
+
+  async function handleDelete(ev) {
+    await requestDeletion(team.id, team.name, "planning_event", `${ev.title} — ${ev.date}`, { id: ev.id });
+    setRequestedIds(s => new Set([...s, ev.id]));
+    setConfirmDeleteId(null);
+  }
+
+  if (loading) return <EmptyState text="Loading…" />;
+
+  // Un joueur ne voit que les événements qui le concernent : ceux sans sélection de
+  // joueurs (= toute l'équipe) et ceux où il est explicitement listé. Le coach voit tout
+  // par défaut, mais peut choisir de consulter le planning d'un joueur précis.
+  const me = !isCoach && playerName ? roster.find(p => p.name === playerName) : null;
+  const viewingAs = isCoach && viewAsPlayerId ? roster.find(p => p.id === viewAsPlayerId) : me;
+  const visibleEvents = (!isCoach || viewAsPlayerId)
+    ? events.filter(ev => !ev.playerIds || ev.playerIds.length === 0 || (viewingAs && ev.playerIds.includes(viewingAs.id)))
+    : events;
+
+  const days = Array.from({ length: 7 }, (_, i) => addDays(weekStart, i));
+  const byDay = {};
+  for (const d of days) byDay[toDateKey(d)] = [];
+  for (const ev of visibleEvents) { if (byDay[ev.date]) byDay[ev.date].push(ev); }
+  for (const k in byDay) byDay[k].sort((a, b) => a.startTime.localeCompare(b.startTime));
+
+  return (
+    <div>
+      {isCoach && (
+        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 24 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 14 }}>New event</div>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+            <div style={{ width: 160 }}>
+              <label style={labelStyle}>Date</label>
+              <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+            </div>
+            <div style={{ width: 120 }}>
+              <label style={labelStyle}>Start</label>
+              <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+            </div>
+            <div style={{ width: 120 }}>
+              <label style={labelStyle}>End</label>
+              <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+            </div>
+            <div style={{ width: 150 }}>
+              <label style={labelStyle}>Type</label>
+              <select value={type} onChange={e => setType(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }}>
+                {PLANNING_EVENT_TYPES.map(t => <option key={t} value={t}>{t}</option>)}
+              </select>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+            <div style={{ flex: 1, minWidth: 180 }}>
+              <label style={labelStyle}>Title</label>
+              <input value={title} onChange={e => setTitle(e.target.value)} placeholder="e.g. Full team practice" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+            </div>
+            <div style={{ flex: 1, minWidth: 180 }}>
+              <label style={labelStyle}>Location</label>
+              <input value={location} onChange={e => setLocation(e.target.value)} placeholder="e.g. Main gym" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+            </div>
+          </div>
+          <div style={{ marginBottom: 14 }}>
+            <label style={labelStyle}>Color</label>
+            <div style={{ display: "flex", gap: 8 }}>
+              {PLANNING_COLORS.map(c => (
+                <button key={c} type="button" onClick={() => setColor(c)} style={{
+                  width: 26, height: 26, borderRadius: "50%", background: c, cursor: "pointer",
+                  border: color === c ? `2px solid ${PAPER}` : "2px solid transparent", padding: 0,
+                }} />
+              ))}
+            </div>
+          </div>
+          <div style={{ marginBottom: 14 }}>
+            <label style={labelStyle}>Players concerned (leave empty for the whole team)</label>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {roster.map(p => (
+                <button key={p.id} type="button" onClick={() => togglePlayer(p.id)} style={{
+                  fontSize: 12, padding: "5px 10px", borderRadius: 20, cursor: "pointer",
+                  background: playerIds.includes(p.id) ? AMBER : PANEL2,
+                  color: playerIds.includes(p.id) ? "#1A1300" : "#8B93A1",
+                  border: `1px solid ${playerIds.includes(p.id) ? AMBER : LINE}`,
+                }}>{p.name}</button>
+              ))}
+            </div>
+          </div>
+          {error && <div style={{ color: RED, fontSize: 12.5, marginBottom: 10 }}>{error}</div>}
+          <button disabled={busy} onClick={addEvent} style={{ ...btnPrimary, width: "auto", padding: "9px 18px" }}>{busy ? "…" : "Add event"}</button>
+        </div>
+      )}
+
+      {isCoach && (
+        <div style={{ marginBottom: 16 }}>
+          <label style={labelStyle}>View schedule for</label>
+          <select value={viewAsPlayerId} onChange={e => setViewAsPlayerId(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", maxWidth: 260 }}>
+            <option value="">— Whole team (everything) —</option>
+            {roster.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+          </select>
+        </div>
+      )}
+
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+        <button onClick={() => setWeekStart(addDays(weekStart, -7))} style={btnSecondary}><ChevronLeft size={15} /></button>
+        <div style={{ fontSize: 13.5, fontWeight: 700 }}>{formatDayLabel(days[0])} – {formatDayLabel(days[6])}</div>
+        <button onClick={() => setWeekStart(addDays(weekStart, 7))} style={btnSecondary}><ChevronRight size={15} /></button>
+      </div>
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+        {days.map(d => {
+          const key = toDateKey(d);
+          const isToday = key === toDateKey(new Date());
+          return (
+            <div key={key}>
+              <div style={{ fontSize: 12, fontWeight: 700, color: isToday ? AMBER : "#8B93A1", textTransform: "uppercase", marginBottom: 6 }}>
+                {formatDayLabel(d)}{isToday ? " · Today" : ""}
+              </div>
+              {byDay[key].length === 0 ? (
+                <div style={{ fontSize: 12.5, color: "#5C6470", paddingLeft: 4 }}>—</div>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                  {byDay[key].map(ev => (
+                    <div key={ev.id} style={{ display: "flex", alignItems: "center", gap: 10, background: PANEL, border: `1px solid ${LINE}`, borderLeft: `4px solid ${ev.color}`, borderRadius: 8, padding: "8px 12px" }}>
+                      <div style={{ fontSize: 12, color: "#8B93A1", width: 90, flexShrink: 0 }}>{ev.startTime}–{ev.endTime}</div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontSize: 13.5, fontWeight: 600 }}>{ev.title} <span style={{ color: "#5C6470", fontWeight: 400 }}>· {ev.type}</span></div>
+                        {ev.location && <div style={{ fontSize: 11.5, color: "#5C6470" }}>{ev.location}</div>}
+                        {isCoach && (
+                          <div style={{ fontSize: 11, color: "#5C6470" }}>
+                            {!ev.playerIds || ev.playerIds.length === 0 ? "Whole team" : ev.playerIds.map(id => roster.find(p => p.id === id)?.first).filter(Boolean).join(", ")}
+                          </div>
+                        )}
+                      </div>
+                      {isCoach && (
+                        requestedIds.has(ev.id) ? (
+                          <span style={{ fontSize: 11, color: AMBER, flexShrink: 0 }}>Pending admin approval</span>
+                        ) : confirmDeleteId === ev.id ? (
+                          <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                            <button onClick={() => handleDelete(ev)} style={{ background: RED, border: "none", borderRadius: 6, color: "#fff", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Yes</button>
+                            <button onClick={() => setConfirmDeleteId(null)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Cancel</button>
+                          </div>
+                        ) : (
+                          <button onClick={() => setConfirmDeleteId(ev.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex", flexShrink: 0 }}><Trash2 size={14} /></button>
+                        )
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
 }
 
 function TeamResourcesTab({ isCoach, team }) {
@@ -6761,7 +7041,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
         <SectionTitle eyebrow="Overview" title="Team" />
         {rows.length > 0 && (
           <button onClick={async () => {
-            const filename = `team_${team?.name || "export"}_${new Date().toISOString().slice(0, 10)}.html`;
+            const filename = `team_${team?.name || "export"}_${todayLocal()}.html`;
             const pdfOk = await tryExportPdf("team-print-content", filename, "dark");
             if (pdfOk) return;
             const r = buildReportHtml("team-print-content", filename, "dark");
@@ -6793,7 +7073,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
 
       {!isCoach && !v[{ classement: "standings", collectif: "teamPlay", avance: "advanced", resources: "resources" }[subtab]] && (
         <div style={{ padding: 30, textAlign: "center", color: "#5C6470", border: `1px dashed ${LINE}`, borderRadius: 12, fontSize: 13.5, marginBottom: 26 }}>
-          The admin doesn't give you access to this.
+          You don't have the permission to see this.
         </div>
       )}
 
