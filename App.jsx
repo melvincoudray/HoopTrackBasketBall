@@ -2012,6 +2012,7 @@ export default function App() {
             teamId={team.id}
             teamName={team.name}
             initialSubtab={homeNav?.playerSubtab}
+            onEditPlayer={editPlayer}
           />
         )}
         {tab === "players" && session.role === "player" && !visibility.tabs.players && (
@@ -3522,7 +3523,7 @@ function PositionComparisonTable({ position, roster, byPlayer, playerFirst }) {
 function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster }) {
   const [wellnessEntries, setWellnessEntries] = useState([]);
   useEffect(() => { storeGet("wellness:" + playerName).then(w => setWellnessEntries(w || [])); }, [playerName]);
-  const wellnessChartData = [...wellnessEntries].sort((a, b) => (a.date + a.slot).localeCompare(b.date + b.slot))
+  const wellnessChartData = [...wellnessEntries].sort((a, b) => wellnessSortKey(a).localeCompare(wellnessSortKey(b)))
     .map(e => ({ match: e.date + " " + (WELLNESS_SLOTS.find(s => s.key === e.slot)?.label || e.slot).slice(0, 3), physical: e.physical, mental: e.mental }));
 
   return (
@@ -3596,7 +3597,7 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
   );
 }
 
-function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilter, visibility, teamId, teamName, initialSubtab }) {
+function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilter, visibility, teamId, teamName, initialSubtab, onEditPlayer }) {
   const v = (visibility || DEFAULT_VISIBILITY);
   const pd = v.playerDetail || DEFAULT_VISIBILITY.playerDetail;
   const plays = allPlays.filter(p => p.player === playerName);
@@ -3608,6 +3609,13 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
   const teamAdvanced = useTeamAdvancedStats(matchFilter);
   const me = roster.find(p => p.name === playerName);
   const position = me ? me.position : "";
+  const [editingPosition, setEditingPosition] = useState(false);
+  const [positionDraft, setPositionDraft] = useState(position);
+
+  async function savePosition() {
+    if (me && onEditPlayer) await onEditPlayer(me.id, { position: positionDraft });
+    setEditingPosition(false);
+  }
 
   const SUBTAB_ORDER = ["stats", "objectifs", "training", "mental", "wellness", "role", "meetings"];
   const SUBTAB_KEY = { stats: "stats", objectifs: "objectives", training: "training", mental: "mental", wellness: "wellness", role: "role", meetings: "meetings" };
@@ -3630,7 +3638,26 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
           <PlayerAvatar playerName={playerName} size={72} editable={isCoach} />
           <div>
             <h2 style={{ fontSize: 26, fontWeight: 800, margin: 0, letterSpacing: "-0.01em" }}>{playerName}</h2>
-            {position && <div style={{ fontSize: 12.5, color: "#5C6470" }}>{position}</div>}
+            {isCoach ? (
+              editingPosition ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
+                  <select value={positionDraft} onChange={e => setPositionDraft(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", fontSize: 12.5, padding: "5px 8px", width: "auto" }}>
+                    <option value="">—</option>
+                    <option value="Point Guard">Point Guard</option>
+                    <option value="Forward">Forward</option>
+                    <option value="Big">Big</option>
+                  </select>
+                  <button onClick={savePosition} style={{ fontSize: 11.5, color: TEAL, background: "none", border: "none", cursor: "pointer", fontWeight: 700 }}>Save</button>
+                  <button onClick={() => { setEditingPosition(false); setPositionDraft(position); }} style={{ fontSize: 11.5, color: "#5C6470", background: "none", border: "none", cursor: "pointer" }}>Cancel</button>
+                </div>
+              ) : (
+                <button onClick={() => { setPositionDraft(position); setEditingPosition(true); }} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12.5, color: "#5C6470", background: "none", border: "none", cursor: "pointer", padding: 0, fontFamily: "inherit" }}>
+                  {position || "Set position"} <ClipboardList size={11} />
+                </button>
+              )
+            ) : (
+              position && <div style={{ fontSize: 12.5, color: "#5C6470" }}>{position}</div>
+            )}
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
@@ -4493,6 +4520,13 @@ const WELLNESS_SLOTS = [
   { key: "training1", label: "After 1st training" },
   { key: "training2", label: "After 2nd training" },
 ];
+// Tri chronologique correct : par date, puis par ORDRE du créneau dans la journée (Wake up
+// → After 1st training → After 2nd training) — pas alphabétique sur le nom du créneau, qui
+// plaçait "wake" après "training1"/"training2" par erreur ("t" < "w").
+function wellnessSortKey(entry) {
+  const idx = WELLNESS_SLOTS.findIndex(s => s.key === entry.slot);
+  return entry.date + "-" + String(idx >= 0 ? idx : 9).padStart(2, "0");
+}
 
 // ---------------------------------------------------------------------------
 // Role — définie par le coach pour chaque joueur : un nom de rôle, une description de ce
@@ -4689,6 +4723,7 @@ function WellnessTab({ playerName, isCoach, canSeeCharts, teamId, teamName }) {
   const [status, setStatus] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [requestedIds, setRequestedIds] = useState(new Set());
+  const [filterDate, setFilterDate] = useState(""); // vide = tous les jours
 
   useEffect(() => { load(); }, [playerName]);
   async function load() { setEntries((await storeGet("wellness:" + playerName)) || []); }
@@ -4710,7 +4745,9 @@ function WellnessTab({ playerName, isCoach, canSeeCharts, teamId, teamName }) {
     setBusy(false);
   }
 
-  const chartData = [...entries].sort((a, b) => (a.date + a.slot).localeCompare(b.date + b.slot))
+  const chartData = [...entries]
+    .filter(e => !filterDate || e.date === filterDate)
+    .sort((a, b) => wellnessSortKey(a).localeCompare(wellnessSortKey(b)))
     .map(e => ({ label: `${e.date} · ${WELLNESS_SLOTS.find(s => s.key === e.slot)?.label || e.slot}`, physical: e.physical, mental: e.mental }));
 
   return (
@@ -4751,39 +4788,52 @@ function WellnessTab({ playerName, isCoach, canSeeCharts, teamId, teamName }) {
       ) : entries.length === 0 ? (
         <EmptyState text="No check-in recorded yet." />
       ) : (
-        <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
-          <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: "16px 10px 8px 0", flex: "1 1 320px" }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: PAPER, padding: "0 18px 10px" }}>Physical</div>
-            <ResponsiveContainer width="100%" height={200}>
-              <ComposedChart data={chartData} margin={{ top: 4, right: 20, left: 0, bottom: 4 }}>
-                <CartesianGrid stroke={LINE} vertical={false} />
-                <XAxis dataKey="label" tick={{ fill: "#5C6470", fontSize: 9 }} axisLine={{ stroke: LINE }} hide />
-                <YAxis domain={[1, 5]} tick={{ fill: "#5C6470", fontSize: 10 }} axisLine={{ stroke: LINE }} />
-                <Tooltip contentStyle={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, fontSize: 12 }} />
-                <Line type="monotone" dataKey="physical" stroke={TEAL} strokeWidth={2.5} dot={{ r: 4, fill: TEAL }} />
-              </ComposedChart>
-            </ResponsiveContainer>
+        <>
+          <div style={{ marginBottom: 16, maxWidth: 220 }}>
+            <label style={labelStyle}>View a specific day</label>
+            <div style={{ display: "flex", gap: 8 }}>
+              <input type="date" value={filterDate} onChange={e => setFilterDate(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "100%" }} />
+              {filterDate && <button onClick={() => setFilterDate("")} style={{ ...btnSecondary, flexShrink: 0, padding: "9px 12px" }}>All</button>}
+            </div>
           </div>
-          <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: "16px 10px 8px 0", flex: "1 1 320px" }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: PAPER, padding: "0 18px 10px" }}>Mental</div>
-            <ResponsiveContainer width="100%" height={200}>
-              <ComposedChart data={chartData} margin={{ top: 4, right: 20, left: 0, bottom: 4 }}>
-                <CartesianGrid stroke={LINE} vertical={false} />
-                <XAxis dataKey="label" tick={{ fill: "#5C6470", fontSize: 9 }} axisLine={{ stroke: LINE }} hide />
-                <YAxis domain={[1, 5]} tick={{ fill: "#5C6470", fontSize: 10 }} axisLine={{ stroke: LINE }} />
-                <Tooltip contentStyle={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, fontSize: 12 }} />
-                <Line type="monotone" dataKey="mental" stroke={AMBER} strokeWidth={2.5} dot={{ r: 4, fill: AMBER }} />
-              </ComposedChart>
-            </ResponsiveContainer>
+          {filterDate && chartData.length === 0 ? (
+            <EmptyState text="No check-in recorded on this day." />
+          ) : (
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+            <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: "16px 10px 8px 0", flex: "1 1 320px" }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: PAPER, padding: "0 18px 10px" }}>Physical</div>
+              <ResponsiveContainer width="100%" height={200}>
+                <ComposedChart data={chartData} margin={{ top: 4, right: 20, left: 0, bottom: 4 }}>
+                  <CartesianGrid stroke={LINE} vertical={false} />
+                  <XAxis dataKey="label" tick={{ fill: "#5C6470", fontSize: 9 }} axisLine={{ stroke: LINE }} hide={!filterDate} />
+                  <YAxis domain={[1, 5]} tick={{ fill: "#5C6470", fontSize: 10 }} axisLine={{ stroke: LINE }} />
+                  <Tooltip contentStyle={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, fontSize: 12 }} />
+                  <Line type="monotone" dataKey="physical" stroke={TEAL} strokeWidth={2.5} dot={{ r: 4, fill: TEAL }} />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+            <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: "16px 10px 8px 0", flex: "1 1 320px" }}>
+              <div style={{ fontSize: 13, fontWeight: 700, color: PAPER, padding: "0 18px 10px" }}>Mental</div>
+              <ResponsiveContainer width="100%" height={200}>
+                <ComposedChart data={chartData} margin={{ top: 4, right: 20, left: 0, bottom: 4 }}>
+                  <CartesianGrid stroke={LINE} vertical={false} />
+                  <XAxis dataKey="label" tick={{ fill: "#5C6470", fontSize: 9 }} axisLine={{ stroke: LINE }} hide={!filterDate} />
+                  <YAxis domain={[1, 5]} tick={{ fill: "#5C6470", fontSize: 10 }} axisLine={{ stroke: LINE }} />
+                  <Tooltip contentStyle={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, fontSize: 12 }} />
+                  <Line type="monotone" dataKey="mental" stroke={AMBER} strokeWidth={2.5} dot={{ r: 4, fill: AMBER }} />
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
           </div>
-        </div>
+          )}
+        </>
       )}
 
       {isCoach && entries.length > 0 && (
         <div style={{ marginTop: 20 }}>
           <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 8 }}>Log</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {[...entries].sort((a, b) => (b.date + b.slot).localeCompare(a.date + a.slot)).map(e => (
+            {[...entries].filter(e => !filterDate || e.date === filterDate).sort((a, b) => wellnessSortKey(b).localeCompare(wellnessSortKey(a))).map(e => (
               <div key={e.id} style={{ ...btnRow, cursor: "default" }}>
                 <span style={{ fontSize: 12.5 }}>
                   {e.date} <span style={{ color: "#5C6470" }}>· {WELLNESS_SLOTS.find(s => s.key === e.slot)?.label || e.slot}</span>
@@ -6920,7 +6970,7 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
             <div style={{ fontSize: 14, fontWeight: 700 }}>{editingId ? "Edit event" : "New event"}</div>
             {editingId && <button onClick={resetForm} style={{ fontSize: 11.5, color: "#8B93A1", background: "none", border: "none", cursor: "pointer" }}>Cancel edit</button>}
           </div>
-          <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 16 }}>
+          <div style={{ display: "flex", gap: 32, flexWrap: "wrap", marginBottom: 16 }}>
             <div style={{ flex: "1 1 140px", minWidth: 140 }}>
               <label style={labelStyle}>Date</label>
               <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "100%", height: 46, boxSizing: "border-box" }} />
