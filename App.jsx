@@ -340,19 +340,19 @@ async function storeGet(key) {
 async function storeSet(key, value) {
   await supabaseInit;
   const k = TEAM_PREFIX + key;
-  try {
-    if (window.storage) {
-      await window.storage.set(k, JSON.stringify(value), true);
-      memoryStore[k] = value;
-      return;
-    }
-    if (supabase) {
-      await supabase.from("app_storage").upsert({ key: k, value });
-      memoryStore[k] = value;
-      return;
-    }
-  } catch (e) {}
-  memoryStore[k] = value;
+  memoryStore[k] = value; // repli local immédiat, pour que l'UI reste cohérente même en cas d'échec réseau
+  if (window.storage) {
+    await window.storage.set(k, JSON.stringify(value), true);
+    return;
+  }
+  if (supabase) {
+    const { error } = await supabase.from("app_storage").upsert({ key: k, value });
+    if (error) { console.error("[storage] Supabase set FAILED on", k, ":", error); throw error; }
+    return;
+  }
+  // Ni window.storage ni Supabase disponibles : seule la copie mémoire locale existe, ce
+  // qui n'est PAS persistant — on le signale clairement dans la console pour le diagnostic.
+  console.warn("[storage] No persistent backend available — data for", k, "only exists in memory for this session.");
 }
 async function storeDelete(key) {
   await supabaseInit;
@@ -2200,16 +2200,12 @@ async function rawGet(fullKey) {
 }
 async function rawSet(fullKey, value) {
   await supabaseInit;
-  try {
-    if (window.storage) { await window.storage.set(fullKey, JSON.stringify(value), true); memoryStore[fullKey] = value; return; }
-    if (supabase) {
-      const { error } = await supabase.from("app_storage").upsert({ key: fullKey, value });
-      if (error) console.error("[storage] Supabase set error on", fullKey, ":", error);
-      memoryStore[fullKey] = value;
-      return;
-    }
-  } catch (e) { console.error("[storage] rawSet failed on", fullKey, ":", e); }
   memoryStore[fullKey] = value;
+  if (window.storage) { await window.storage.set(fullKey, JSON.stringify(value), true); return; }
+  if (supabase) {
+    const { error } = await supabase.from("app_storage").upsert({ key: fullKey, value });
+    if (error) { console.error("[storage] Supabase rawSet FAILED on", fullKey, ":", error); throw error; }
+  }
 }
 async function rawDelete(fullKey) {
   await supabaseInit;
@@ -2755,9 +2751,16 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
     const existingIdx = wellnessEntries.findIndex(e => e.date === today && e.slot === wSlot);
     const entry = { id: existingIdx >= 0 ? wellnessEntries[existingIdx].id : uid(), date: today, slot: wSlot, physical: wPhysical, mental: wMental };
     const next = existingIdx >= 0 ? wellnessEntries.map((e, i) => i === existingIdx ? entry : e) : [entry, ...wellnessEntries];
-    await storeSet("wellness:" + playerName, next);
-    setWellnessEntries(next);
-    setWStatus("Saved — thanks!");
+    try {
+      await storeSet("wellness:" + playerName, next);
+      setWellnessEntries(next);
+      setWStatus("Saved — thanks!");
+    } catch (e) {
+      // Ne JAMAIS afficher "Saved" si l'écriture a réellement échoué (ex. mauvaise connexion) —
+      // bug réel constaté où un joueur voyait une confirmation alors que la réponse n'avait
+      // jamais atteint la base de données.
+      setWStatus("Not saved — check your connection and try again.");
+    }
     setWBusy(false);
   }
 
@@ -4725,7 +4728,7 @@ function WellnessTab({ playerName, isCoach, canSeeCharts, teamId, teamName }) {
   const [requestedIds, setRequestedIds] = useState(new Set());
   const [filterDate, setFilterDate] = useState(""); // vide = tous les jours
 
-  useEffect(() => { load(); }, [playerName]);
+  useEffect(() => { load(); setFilterDate(""); }, [playerName]);
   async function load() { setEntries((await storeGet("wellness:" + playerName)) || []); }
 
   async function handleDeleteEntry(e) {
@@ -4739,9 +4742,13 @@ function WellnessTab({ playerName, isCoach, canSeeCharts, teamId, teamName }) {
     const existingIdx = entries.findIndex(e => e.date === date && e.slot === slot);
     const entry = { id: existingIdx >= 0 ? entries[existingIdx].id : uid(), date, slot, physical, mental };
     const next = existingIdx >= 0 ? entries.map((e, i) => i === existingIdx ? entry : e) : [entry, ...entries];
-    await storeSet("wellness:" + playerName, next);
-    setEntries(next);
-    setStatus("Saved — thanks!");
+    try {
+      await storeSet("wellness:" + playerName, next);
+      setEntries(next);
+      setStatus("Saved — thanks!");
+    } catch (e) {
+      setStatus("Not saved — check your connection and try again.");
+    }
     setBusy(false);
   }
 
@@ -6970,16 +6977,16 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
             <div style={{ fontSize: 14, fontWeight: 700 }}>{editingId ? "Edit event" : "New event"}</div>
             {editingId && <button onClick={resetForm} style={{ fontSize: 11.5, color: "#8B93A1", background: "none", border: "none", cursor: "pointer" }}>Cancel edit</button>}
           </div>
-          <div style={{ display: "flex", gap: 32, flexWrap: "wrap", marginBottom: 16 }}>
-            <div style={{ flex: "1 1 140px", minWidth: 140 }}>
-              <label style={labelStyle}>Date</label>
-              <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "100%", height: 46, boxSizing: "border-box" }} />
-            </div>
-            <div style={{ flex: "1 1 110px", minWidth: 110 }}>
+          <div style={{ marginBottom: 16 }}>
+            <label style={labelStyle}>Date</label>
+            <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "100%", maxWidth: 320, height: 46, boxSizing: "border-box" }} />
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", columnGap: 20, marginBottom: 16, boxSizing: "border-box" }}>
+            <div style={{ minWidth: 0 }}>
               <label style={labelStyle}>Start</label>
               <input type="time" value={startTime} onChange={e => setStartTime(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "100%", height: 46, boxSizing: "border-box" }} />
             </div>
-            <div style={{ flex: "1 1 110px", minWidth: 110 }}>
+            <div style={{ minWidth: 0 }}>
               <label style={labelStyle}>End</label>
               <input type="time" value={endTime} onChange={e => setEndTime(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "100%", height: 46, boxSizing: "border-box" }} />
             </div>
