@@ -4298,8 +4298,26 @@ function ObjectivesPanel({ playerName, isCoach, box, off, def }) {
   );
 }
 
-const TRAINING_THEMES = ["Pts + Indiv", "Pts - Indiv", "Coll Off", "Coll Def"];
+const DEFAULT_TRAINING_THEMES = ["Pts + Indiv", "Pts - Indiv", "Coll Off", "Coll Def"];
 const TRAINING_THEME_COLORS = { "Pts + Indiv": AMBER, "Pts - Indiv": "#C97BE0", "Coll Off": TEAL, "Coll Def": "#7C9CF2" };
+const TRAINING_THEME_FALLBACK_COLORS = ["#E4231C", "#4A90D9", "#B15FE0", "#8B93A1", "#F2A93B", "#2FBF9C"];
+function trainingThemeColor(name, allThemes) {
+  if (TRAINING_THEME_COLORS[name]) return TRAINING_THEME_COLORS[name];
+  const idx = Math.max(0, allThemes.indexOf(name));
+  return TRAINING_THEME_FALLBACK_COLORS[idx % TRAINING_THEME_FALLBACK_COLORS.length];
+}
+function useTrainingThemes() {
+  const [themes, setThemes] = useState(DEFAULT_TRAINING_THEMES);
+  useEffect(() => { storeGet("training_themes").then(t => setThemes(t && t.length ? t : DEFAULT_TRAINING_THEMES)); }, []);
+  async function addTheme(name) {
+    const trimmed = name.trim();
+    if (!trimmed || themes.includes(trimmed)) return;
+    const next = [...themes, trimmed];
+    await storeSet("training_themes", next);
+    setThemes(next);
+  }
+  return { themes, addTheme };
+}
 
 function useTrainingPlan(playerName) {
   const [plan, setPlan] = useState(null);
@@ -4311,25 +4329,26 @@ function useTrainingPlan(playerName) {
 function TrainingPlanEditor({ plan, onSave, isCoach }) {
   const [values, setValues] = useState(plan);
   const [busy, setBusy] = useState(false);
+  const { themes } = useTrainingThemes();
   useEffect(() => setValues(plan), [plan]);
-  const total = TRAINING_THEMES.reduce((s, t) => s + (Number(values[t]) || 0), 0);
+  const total = themes.reduce((s, t) => s + (Number(values[t]) || 0), 0);
 
   if (!isCoach) return null;
   return (
     <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 20 }}>
       <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10 }}>Target plan — desired session breakdown</div>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
-        {TRAINING_THEMES.map(t => (
+        {themes.map(t => (
           <div key={t} style={{ width: 130 }}>
-            <label style={{ ...labelStyle, color: TRAINING_THEME_COLORS[t] }}>{t}</label>
-            <input type="number" min={0} max={100} value={values[t]} onChange={e => setValues(v => ({ ...v, [t]: Number(e.target.value) }))}
+            <label style={{ ...labelStyle, color: trainingThemeColor(t, themes) }}>{t}</label>
+            <input type="number" min={0} max={100} value={values[t] || 0} onChange={e => setValues(v => ({ ...v, [t]: Number(e.target.value) }))}
               style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
           </div>
         ))}
       </div>
       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
         <span style={{ fontSize: 12, color: total === 100 ? TEAL : AMBER }}>{total}% of plan allocated{total !== 100 ? " (ideally 100%)" : ""}</span>
-        <button disabled={busy} onClick={async () => { setBusy(true); await onSave(values); setBusy(false); }} style={{ ...btnPrimary, width: "auto", padding: "8px 16px" }}>{busy ? "…" : "Save le plan"}</button>
+        <button disabled={busy} onClick={async () => { setBusy(true); await onSave(values); setBusy(false); }} style={{ ...btnPrimary, width: "auto", padding: "8px 16px" }}>{busy ? "…" : "Save plan"}</button>
       </div>
     </div>
   );
@@ -4337,35 +4356,52 @@ function TrainingPlanEditor({ plan, onSave, isCoach }) {
 
 function TrainingLog({ playerName, isCoach }) {
   const [entries, setEntries] = useState([]);
-  const [form, setForm] = useState({ date: todayLocal(), thematique: TRAINING_THEMES[0], theme: "", objectif: "", commentaire: "", eval: 3, duree: 15 });
+  const { themes, addTheme } = useTrainingThemes();
+  const [editingId, setEditingId] = useState(null);
+  const [newThemeName, setNewThemeName] = useState("");
+  const [form, setForm] = useState({ date: todayLocal(), thematique: themes[0], theme: "", objectif: "", commentaire: "", eval: 3, duree: 15 });
   const [busy, setBusy] = useState(false);
   const { plan, save: savePlan } = useTrainingPlan(playerName);
+  const formRef = useRef();
 
   useEffect(() => { load(); }, [playerName]);
   async function load() { setEntries((await storeGet("training:" + playerName)) || []); }
 
-  async function add() {
+  function resetForm() {
+    setEditingId(null);
+    setForm({ date: todayLocal(), thematique: themes[0], theme: "", objectif: "", commentaire: "", eval: 3, duree: 15 });
+  }
+  function startEdit(e) {
+    setEditingId(e.id);
+    setForm({ date: e.date, thematique: e.thematique, theme: e.theme || "", objectif: e.objectif || "", commentaire: e.commentaire || "", eval: e.eval ?? 3, duree: e.duree ?? 15 });
+    if (formRef.current) formRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  async function save() {
     setBusy(true);
-    const next = [{ id: uid(), ...form }, ...entries];
+    const next = editingId
+      ? entries.map(e => e.id === editingId ? { ...e, ...form } : e)
+      : [{ id: uid(), ...form }, ...entries];
     await storeSet("training:" + playerName, next);
     setEntries(next);
-    setForm({ date: todayLocal(), thematique: TRAINING_THEMES[0], theme: "", objectif: "", commentaire: "", eval: 3, duree: 15 });
+    resetForm();
     setBusy(false);
   }
   async function remove(id) {
     const next = entries.filter(e => e.id !== id);
     await storeSet("training:" + playerName, next);
     setEntries(next);
+    if (editingId === id) resetForm();
   }
 
   const total = entries.length;
   const avgEval = total ? entries.reduce((s, e) => s + (Number(e.eval) || 0), 0) / total : null;
   const totalDuree = entries.reduce((s, e) => s + (Number(e.duree) || 0), 0);
   const dureeByTheme = (t) => entries.filter(e => e.thematique === t).reduce((s, e) => s + (Number(e.duree) || 0), 0);
-  const realDistribution = TRAINING_THEMES.map(t => ({
-    name: t, value: dureeByTheme(t), color: TRAINING_THEME_COLORS[t],
+  const realDistribution = themes.map(t => ({
+    name: t, value: dureeByTheme(t), color: trainingThemeColor(t, themes),
   })).filter(d => d.value > 0);
-  const realPct = TRAINING_THEMES.map(t => ({ theme: t, real: totalDuree ? (100 * dureeByTheme(t)) / totalDuree : 0, target: plan ? Number(plan[t]) || 0 : 0 }));
+  const realPct = themes.map(t => ({ theme: t, real: totalDuree ? (100 * dureeByTheme(t)) / totalDuree : 0, target: plan ? Number(plan[t]) || 0 : 0 }));
 
   return (
     <div>
@@ -4395,7 +4431,7 @@ function TrainingLog({ playerName, isCoach }) {
                   <div style={{ width: "100%", height: 50, display: "flex", alignItems: "flex-end" }}>
                     <div style={{ width: "100%", height: `${(count / maxCount) * 100}%`, minHeight: count > 0 ? 4 : 0, borderRadius: "4px 4px 0 0", background: ratingColor(v) }} />
                   </div>
-                  <div style={{ fontSize: 11, color: "#5C6470" }}>Note {v}</div>
+                  <div style={{ fontSize: 11, color: "#5C6470" }}>Rating {v}</div>
                 </div>
               );
             })}
@@ -4427,14 +4463,22 @@ function TrainingLog({ playerName, isCoach }) {
       )}
 
       {isCoach && (
-        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 20 }}>
+        <div ref={formRef} style={{ background: PANEL, border: `1px solid ${editingId ? AMBER : LINE}`, borderRadius: 12, padding: 18, marginBottom: 20 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+            <div style={{ fontSize: 13, fontWeight: 700 }}>{editingId ? "Edit session" : "New session"}</div>
+            {editingId && <button onClick={resetForm} style={{ fontSize: 11.5, color: "#8B93A1", background: "none", border: "none", cursor: "pointer" }}>Cancel edit</button>}
+          </div>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
             <div><label style={labelStyle}>Date</label><input type="date" value={form.date} onChange={e => setForm(f => ({ ...f, date: e.target.value }))} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 160 }} /></div>
-            <div style={{ width: 160 }}>
+            <div style={{ width: 180 }}>
               <label style={labelStyle}>Category</label>
-              <select value={form.thematique} onChange={e => setForm(f => ({ ...f, thematique: e.target.value }))} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", color: TRAINING_THEME_COLORS[form.thematique], fontWeight: 700 }}>
-                {TRAINING_THEMES.map(t => <option key={t} value={t}>{t}</option>)}
+              <select value={form.thematique} onChange={e => setForm(f => ({ ...f, thematique: e.target.value }))} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", color: trainingThemeColor(form.thematique, themes), fontWeight: 700 }}>
+                {themes.map(t => <option key={t} value={t}>{t}</option>)}
               </select>
+              <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+                <input value={newThemeName} onChange={e => setNewThemeName(e.target.value)} placeholder="New category…" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", fontSize: 11.5, padding: "6px 8px" }} />
+                <button type="button" onClick={async () => { await addTheme(newThemeName); setNewThemeName(""); }} style={{ ...btnSecondary, padding: "6px 10px", fontSize: 11.5 }}>Add</button>
+              </div>
             </div>
             <div style={{ flex: 1, minWidth: 160 }}><label style={labelStyle}>Specific theme</label><input value={form.theme} onChange={e => setForm(f => ({ ...f, theme: e.target.value }))} placeholder="e.g. Shot off a PnR" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} /></div>
             <div style={{ width: 110 }}>
@@ -4442,7 +4486,7 @@ function TrainingLog({ playerName, isCoach }) {
               <input type="number" min={0} value={form.duree} onChange={e => setForm(f => ({ ...f, duree: Number(e.target.value) }))} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
             </div>
             <div style={{ width: 130 }}>
-              <label style={labelStyle}>Éval /5</label>
+              <label style={labelStyle}>Rating /5</label>
               <select value={form.eval} onChange={e => setForm(f => ({ ...f, eval: Number(e.target.value) }))} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", color: ratingColor(form.eval), fontWeight: 700 }}>
                 {[1, 2, 3, 4, 5].map(v => <option key={v} value={v}>{v}</option>)}
               </select>
@@ -4450,7 +4494,7 @@ function TrainingLog({ playerName, isCoach }) {
           </div>
           <div style={{ marginBottom: 10 }}><label style={labelStyle}>Objective</label><input value={form.objectif} onChange={e => setForm(f => ({ ...f, objectif: e.target.value }))} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} /></div>
           <div style={{ marginBottom: 12 }}><label style={labelStyle}>Comments</label><textarea value={form.commentaire} onChange={e => setForm(f => ({ ...f, commentaire: e.target.value }))} rows={2} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", resize: "vertical" }} /></div>
-          <button disabled={busy} onClick={add} style={{ ...btnPrimary, width: "auto", padding: "9px 18px", display: "flex", alignItems: "center", gap: 6 }}><Plus size={14} /> Add the session</button>
+          <button disabled={busy} onClick={save} style={{ ...btnPrimary, width: "auto", padding: "9px 18px", display: "flex", alignItems: "center", gap: 6 }}>{editingId ? "Save changes" : (<><Plus size={14} /> Add the session</>)}</button>
         </div>
       )}
       {entries.length === 0 ? <EmptyState text="No session recorded." /> : (
@@ -4460,15 +4504,20 @@ function TrainingLog({ playerName, isCoach }) {
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <div style={{ fontSize: 13, color: "#5C6470" }}>{e.date}</div>
-                  {e.thematique && <span style={{ fontSize: 10.5, fontWeight: 700, color: TRAINING_THEME_COLORS[e.thematique], border: `1px solid ${TRAINING_THEME_COLORS[e.thematique]}`, borderRadius: 5, padding: "1px 6px" }}>{e.thematique}</span>}
+                  {e.thematique && <span style={{ fontSize: 10.5, fontWeight: 700, color: trainingThemeColor(e.thematique, themes), border: `1px solid ${trainingThemeColor(e.thematique, themes)}`, borderRadius: 5, padding: "1px 6px" }}>{e.thematique}</span>}
                   {e.duree ? <span style={{ fontSize: 11, color: "#5C6470" }}>{e.duree} min</span> : null}
                 </div>
                 <div style={{ fontFamily: "ui-monospace, monospace", color: ratingColor(e.eval), fontWeight: 700 }}>{e.eval ?? "–"}/5</div>
               </div>
               <div style={{ fontWeight: 600, marginTop: 4 }}>{e.theme}</div>
-              {e.objectif && <div style={{ fontSize: 13, color: "#8B93A1", marginTop: 2 }}>Objective : {e.objectif}</div>}
+              {e.objectif && <div style={{ fontSize: 13, color: "#8B93A1", marginTop: 2 }}>Objective: {e.objectif}</div>}
               {e.commentaire && <div style={{ fontSize: 13, color: "#8B93A1", marginTop: 4 }}>{e.commentaire}</div>}
-              {isCoach && <button onClick={() => remove(e.id)} style={{ position: "absolute", top: 12, right: 12, background: "none", border: "none", color: "#5C6470", cursor: "pointer" }}><X size={14} /></button>}
+              {isCoach && (
+                <div style={{ position: "absolute", top: 12, right: 12, display: "flex", gap: 10 }}>
+                  <button onClick={() => startEdit(e)} title="Edit" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><ClipboardList size={14} /></button>
+                  <button onClick={() => remove(e.id)} title="Delete" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><X size={14} /></button>
+                </div>
+              )}
             </div>
           ))}
         </div>
@@ -6643,7 +6692,9 @@ function BackupTab({ team, roster }) {
 function CollectiveTraining({ roster }) {
   const [selected, setSelected] = useState([]); // ids de joueurs
   const [date, setDate] = useState(todayLocal());
-  const [thematique, setThematique] = useState(TRAINING_THEMES[0]);
+  const { themes, addTheme } = useTrainingThemes();
+  const [thematique, setThematique] = useState(themes[0]);
+  const [newThemeName, setNewThemeName] = useState("");
   const [theme, setTheme] = useState("");
   const [objectif, setObjective] = useState("");
   const [duree, setDuree] = useState(15);
@@ -6695,11 +6746,15 @@ function CollectiveTraining({ roster }) {
         <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 12 }}>Shared session info</div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
           <div><label style={labelStyle}>Date</label><input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 160 }} /></div>
-          <div style={{ width: 160 }}>
+          <div style={{ width: 180 }}>
             <label style={labelStyle}>Category</label>
-            <select value={thematique} onChange={e => setThematique(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", color: TRAINING_THEME_COLORS[thematique], fontWeight: 700 }}>
-              {TRAINING_THEMES.map(t => <option key={t} value={t}>{t}</option>)}
+            <select value={thematique} onChange={e => setThematique(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", color: trainingThemeColor(thematique, themes), fontWeight: 700 }}>
+              {themes.map(t => <option key={t} value={t}>{t}</option>)}
             </select>
+            <div style={{ display: "flex", gap: 6, marginTop: 6 }}>
+              <input value={newThemeName} onChange={e => setNewThemeName(e.target.value)} placeholder="New category…" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", fontSize: 11.5, padding: "6px 8px" }} />
+              <button type="button" onClick={async () => { await addTheme(newThemeName); setNewThemeName(""); }} style={{ ...btnSecondary, padding: "6px 10px", fontSize: 11.5 }}>Add</button>
+            </div>
           </div>
           <div style={{ flex: 1, minWidth: 160 }}><label style={labelStyle}>Specific theme</label><input value={theme} onChange={e => setTheme(e.target.value)} placeholder="e.g. Screen defense" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} /></div>
           <div style={{ width: 110 }}><label style={labelStyle}>Duration (min)</label><input type="number" min={0} value={duree} onChange={e => setDuree(Number(e.target.value))} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} /></div>
