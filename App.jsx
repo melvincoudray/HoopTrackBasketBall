@@ -1329,7 +1329,20 @@ function useBoxScore(playerName, filterKeys) {
       const data = await storeGet("boxscore:" + m.id);
       if (!data) continue;
       const row = data.rows.find(r => r.player === playerName);
-      if (row) out.push({ date: m.date, opponent: m.opponent, stats: { ...row.stats, ...derivedMatchStats(row.stats) } });
+      if (row) {
+        // Possessions de l'ÉQUIPE pour CE match, nécessaires pour le %usage du joueur — priorité
+        // à la ligne de totaux d'équipe si détectée, sinon somme des lignes joueurs du match.
+        const teamStats = data.teamRow ? data.teamRow.stats : sumRowStats(data.rows);
+        const teamPossessions = computeTeamPossessionsFromStats(teamStats);
+        // Durée totale du match : 5 joueurs sur le terrain en permanence, donc la somme des
+        // minutes de TOUS les joueurs (hors ligne de totaux) équivaut à 5 × la durée réelle du
+        // match — plus fiable que de supposer 40 minutes fixes (prolongations, format jeune...).
+        const minutesCol = findStatCol(Object.keys(row.stats), STAT_PATTERNS.minutes);
+        const playerRows = data.rows.filter(r => r !== data.teamRow);
+        const totalPlayerMinutes = minutesCol ? sumStat(playerRows, minutesCol) : null;
+        const teamMinutes = totalPlayerMinutes ? totalPlayerMinutes / 5 : null;
+        out.push({ date: m.date, opponent: m.opponent, stats: { ...row.stats, ...derivedMatchStats(row.stats, teamPossessions, teamMinutes) } });
+      }
     }
     setEntries(out.sort((a, b) => a.date.localeCompare(b.date)));
     setLoading(false);
@@ -1394,7 +1407,7 @@ async function saveBoxColumnAliases(aliases) {
 const MADE = "(r[ée]ussis?|made)$";
 const MISSED = "(manqu[ée]s?|missed)$";
 const STAT_PATTERNS = {
-  minutes: [/^Temps\s*de\s*jeu$/i, /^Min(ute)?s?$/i, /^MIN$/i],
+  minutes: [/^Temps\s*de\s*jeu$/i, /^Min(ute)?s?$/i, /^MIN$/i, /^Time$/i],
   made2: [new RegExp(`^2\\s*(pts?|points?)?\\s*${MADE}`, "i"), /^2PM$/i, /^2P\+$/i, /^FGM$/i, /^FG\s*Made$/i],
   missed2: [new RegExp(`^2\\s*(pts?|points?)?\\s*${MISSED}`, "i"), /^2P-$/i],
   made3: [new RegExp(`^3\\s*(pts?|points?)?\\s*${MADE}`, "i"), /^3PM$/i, /^3P\+$/i, /^Threes?\s*Made$/i],
@@ -1455,17 +1468,56 @@ function sumStat(rows, colName) {
   if (!colName) return null;
   return rows.reduce((s, r) => s + (Number(r.stats[colName]) || 0), 0);
 }
+// Additionne toutes les colonnes numériques d'un ensemble de lignes joueurs en un seul objet
+// de stats — repli utilisé quand le fichier n'a pas de ligne de totaux d'équipe explicite.
+function sumRowStats(rows) {
+  const out = {};
+  for (const r of rows) {
+    for (const [k, v] of Object.entries(r.stats)) {
+      const n = Number(v);
+      if (!Number.isNaN(n)) out[k] = (out[k] || 0) + n;
+    }
+  }
+  return out;
+}
+
+// Estimation standard des possessions d'ÉQUIPE (Dean Oliver) à partir d'un objet de stats
+// brutes quelconque (ligne de totaux d'équipe, ou somme des joueurs) : FGA - OREB + TOV +
+// 0.44*FTA. Réutilisée à la fois pour les stats avancées d'équipe et pour le %usage individuel.
+function computeTeamPossessionsFromStats(statsObj) {
+  if (!statsObj) return null;
+  const labels = Object.keys(statsObj);
+  const get = (patterns) => { const l = findStatCol(labels, patterns); return l !== undefined ? statsObj[l] : undefined; };
+  const made2 = get(STAT_PATTERNS.made2), missed2 = get(STAT_PATTERNS.missed2);
+  const made3 = get(STAT_PATTERNS.made3), missed3 = get(STAT_PATTERNS.missed3);
+  const fga = get(STAT_PATTERNS.fga) ?? ((made2 !== undefined || missed2 !== undefined || made3 !== undefined || missed3 !== undefined)
+    ? (made2 || 0) + (missed2 || 0) + (made3 || 0) + (missed3 || 0) : undefined);
+  const fta = get(STAT_PATTERNS.fta);
+  const tov = get(STAT_PATTERNS.tov);
+  const oreb = get(STAT_PATTERNS.oreb);
+  if (fga === undefined || fta === undefined || tov === undefined) return null;
+  return fga - (oreb || 0) + tov + 0.44 * fta;
+}
 
 // À partir des colonnes brutes d'UN match (ex. "2pts", "3pts Missed"…), calcule les
 // pourcentages qui ne sont pas fournis tels quels par le fichier — pour qu'ils soient
 // sélectionnables dans les courbes d'évolution même si le club ne les exporte pas.
-function derivedMatchStats(statsObj) {
+// teamPossessions (optionnel) : possessions totales de l'ÉQUIPE pour ce même match.
+// teamMinutes (optionnel) : durée totale du match, en minutes (ex. 40) — pour ramener le
+// %usage aux possessions THÉORIQUES pendant le temps de jeu du joueur, pas tout le match :
+// possessions théoriques sur le terrain = (minutes du joueur / durée du match) × possessions
+// d'équipe. Le %usage est alors : possessions terminées ÷ possessions théoriques sur le terrain.
+function derivedMatchStats(statsObj, teamPossessions, teamMinutes) {
   const labels = Object.keys(statsObj);
   const get = (patterns) => { const l = findStatCol(labels, patterns); return l !== undefined ? statsObj[l] : undefined; };
   const made2 = get(STAT_PATTERNS.made2), missed2 = get(STAT_PATTERNS.missed2);
   const made3 = get(STAT_PATTERNS.made3), missed3 = get(STAT_PATTERNS.missed3);
   const madeFT = get(STAT_PATTERNS.madeFT), missedFT = get(STAT_PATTERNS.missedFT);
-  const directPct2 = get(STAT_PATTERNS.twoPct), directPct3 = get(STAT_PATTERNS.tpmPct), directPctFT = get(STAT_PATTERNS.ftPct);
+  // BUG RÉEL CORRIGÉ : la colonne du fichier est souvent une fraction 0-1 (ex. 0.319 pour
+  // 31.9%) alors que le calcul de repli produit un nombre 0-100 — sans cette normalisation,
+  // les courbes d'évolution afficheraient une échelle complètement fausse pour ce match précis.
+  const normalizePct = (v) => (v === undefined || v === null) ? undefined : (Math.abs(v) <= 1 ? v * 100 : v);
+  const directPct2 = normalizePct(get(STAT_PATTERNS.twoPct)), directPct3 = normalizePct(get(STAT_PATTERNS.tpmPct)), directPctFT = normalizePct(get(STAT_PATTERNS.ftPct));
   const derived = {};
   if (directPct2 !== undefined) derived["% 2pts"] = directPct2;
   else if (made2 !== undefined && missed2 !== undefined && made2 + missed2 > 0)
@@ -1476,8 +1528,23 @@ function derivedMatchStats(statsObj) {
   if (directPctFT !== undefined) derived["% LF"] = directPctFT;
   else if (madeFT !== undefined && missedFT !== undefined && madeFT + missedFT > 0)
     derived["% LF (calculated)"] = (100 * madeFT) / (madeFT + missedFT);
-  const fgm = (made2 || 0) + (made3 || 0), fga = (made2 || 0) + (missed2 || 0) + (made3 || 0) + (missed3 || 0);
+  const fgm = (made2 || 0) + (made3 || 0), fga = get(STAT_PATTERNS.fga) ?? ((made2 || 0) + (missed2 || 0) + (made3 || 0) + (missed3 || 0));
   if (fga > 0) derived["eFG% (calculated)"] = (100 * (fgm + 0.5 * (made3 || 0))) / fga;
+
+  // Possessions terminées par le joueur : tirs tentés + pertes de balle + 0.44 × lancers francs
+  // tentés. Et %usage : cette part rapportée aux possessions THÉORIQUES de l'équipe pendant le
+  // temps de jeu du joueur (pas tout le match, sauf s'il a joué la totalité des minutes).
+  const fta = get(STAT_PATTERNS.fta) ?? ((madeFT !== undefined || missedFT !== undefined) ? (madeFT || 0) + (missedFT || 0) : undefined);
+  const tov = get(STAT_PATTERNS.tov);
+  const playerMinutes = get(STAT_PATTERNS.minutes);
+  if (fga !== undefined && tov !== undefined && fta !== undefined) {
+    const endedPoss = fga + tov + 0.44 * fta;
+    derived["Ended possessions"] = endedPoss;
+    if (teamPossessions && teamMinutes && playerMinutes !== undefined) {
+      const theoreticalPossOnCourt = (playerMinutes / teamMinutes) * teamPossessions;
+      if (theoreticalPossOnCourt > 0) derived["Usage%"] = (100 * endedPoss) / theoreticalPossOnCourt;
+    }
+  }
   return derived;
 }
 
@@ -1534,9 +1601,14 @@ function useTeamAdvancedStats(filterKeys) {
       // uniquement si on lit une vraie ligne de totaux d'équipe : additionner des pourcentages
       // joueur par joueur n'aurait aucun sens (ça peut dépasser 100%). Sans ligne de totaux, on
       // recalcule toujours depuis les comptages réussis/manqués, qui eux s'additionnent correctement.
-      const directPct2 = m.teamRow ? s(columns.twoPct) : null;
-      const directPct3 = m.teamRow ? s(columns.tpmPct) : null;
-      const directPctFT = m.teamRow ? s(columns.ftPct) : null;
+      // BUG RÉEL CORRIGÉ : la colonne du fichier est souvent une fraction 0-1 (ex. 0.319 pour
+      // 31.9%) alors que le calcul de repli produit un nombre 0-100 — sans cette normalisation,
+      // "% 2pts" s'affichait comme "0.3%" au lieu de "31.9%" dès qu'un fichier avait une ligne
+      // de totaux d'équipe avec pourcentages déjà calculés (constaté sur un vrai fichier importé).
+      const normalizePct = (v) => (v === null || v === undefined) ? null : (Math.abs(v) <= 1 ? v * 100 : v);
+      const directPct2 = m.teamRow ? normalizePct(s(columns.twoPct)) : null;
+      const directPct3 = m.teamRow ? normalizePct(s(columns.tpmPct)) : null;
+      const directPctFT = m.teamRow ? normalizePct(s(columns.ftPct)) : null;
       const pct2 = directPct2 ?? ((made2 !== null && missed2 !== null && made2 + missed2 > 0) ? (100 * made2) / (made2 + missed2) : null);
       const pct3 = directPct3 ?? ((made3 !== null && missed3 !== null && made3 + missed3 > 0) ? (100 * made3) / (made3 + missed3) : null);
       const pctFT = directPctFT ?? ((madeFT !== null && missedFT !== null && madeFT + missedFT > 0) ? (100 * madeFT) / (madeFT + missedFT) : null);
@@ -1752,6 +1824,10 @@ export default function App() {
   }
 
   async function editPlayer(id, updates) {
+    const current = roster.find(p => p.id === id);
+    if (current && updates.name && updates.name !== current.name) {
+      await migratePlayerRename(current.name, updates.name);
+    }
     const newRoster = roster.map(p => p.id === id ? { ...p, ...updates } : p);
     await storeSet("roster", newRoster);
     setRoster(newRoster);
@@ -3418,12 +3494,12 @@ function PlayersList({ roster, allPlays, onSelect, isCoach, onlyOwn, matchFilter
                 </div>
               </div>
               {editName.trim() !== p.name && (
-                <div style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: 10, background: PANEL, border: `1px solid ${RED}`, borderRadius: 8, marginBottom: 10 }}>
-                  <AlertTriangle size={14} color={RED} style={{ marginTop: 2, flexShrink: 0 }} />
+                <div style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: 10, background: PANEL, border: `1px solid ${TEAL}`, borderRadius: 8, marginBottom: 10 }}>
+                  <ShieldCheck size={14} color={TEAL} style={{ marginTop: 2, flexShrink: 0 }} />
                   <div style={{ fontSize: 11.5, color: "#D8DCE2", lineHeight: 1.4 }}>
-                    The name is changing ("{p.name}" → "{editName.trim()}"). Since this exact name links this player to
-                    all their history (matches, box scores, photos, objectives...), that history will stay linked to the old
-                    name and will no longer appear on this profile. Only confirm if you're sure, or for a player with no history.
+                    The name is changing ("{p.name}" → "{editName.trim()}"). Everything already recorded for this player
+                    (training, objectives, mental evaluations, Wellness, role, meetings, coded matches, box scores, login)
+                    will automatically move over to the new name — nothing gets lost.
                   </div>
                 </div>
               )}
@@ -6463,7 +6539,7 @@ function TagCategoriesSettings({ roster, title = "Column categories (coding file
 
 async function migrateToFullNameIdentity(roster) {
   let migrated = 0;
-  const perPlayerKeys = ["training", "objectives", "mental", "wellness", "photo", "role"];
+  const perPlayerKeys = ["training", "objectives", "mental", "wellness", "photo", "role", "meetings"];
   for (const p of roster) {
     if (!p.first || !p.name || p.first === p.name) continue;
     for (const prefix of perPlayerKeys) {
@@ -6514,6 +6590,46 @@ async function migrateToFullNameIdentity(roster) {
   }
 
   return migrated;
+}
+
+// Migration lors du RENOMMAGE d'un joueur (pas seulement prénom → nom complet, mais n'importe
+// quel changement de nom) : reprend tout ce qui était enregistré sous l'ancien nom et le
+// rattache au nouveau, pour qu'aucune donnée déjà rentrée ne devienne orpheline.
+async function migratePlayerRename(oldName, newName) {
+  if (!oldName || !newName || oldName === newName) return;
+  const perPlayerKeys = ["training", "objectives", "mental", "wellness", "photo", "role", "meetings"];
+  for (const prefix of perPlayerKeys) {
+    const oldData = await storeGet(prefix + ":" + oldName);
+    if (oldData !== null && oldData !== undefined) {
+      await storeSet(prefix + ":" + newName, oldData);
+      await storeDelete(prefix + ":" + oldName);
+    }
+  }
+  // Identifiants de connexion (même code PIN conservé, juste rattaché au nouveau nom).
+  const users = (await storeGet("app_users")) || {};
+  if (users[oldName]) {
+    users[newName] = users[oldName];
+    delete users[oldName];
+    await storeSet("app_users", users);
+  }
+  // Matchs déjà codés : remplace l'ancien nom par le nouveau dans chaque action du joueur.
+  const matchIdx = (await storeGet("match_index")) || [];
+  for (const m of matchIdx) {
+    const data = await storeGet("match:" + m.id);
+    if (!data || !data.plays) continue;
+    if (!data.plays.some(play => play.player === oldName)) continue;
+    const plays = data.plays.map(play => play.player === oldName ? { ...play, player: newName } : play);
+    await storeSet("match:" + m.id, { ...data, plays });
+  }
+  // Box scores déjà importés : idem pour chaque ligne joueur.
+  const boxIdx = (await storeGet("boxscore_index")) || [];
+  for (const b of boxIdx) {
+    const data = await storeGet("boxscore:" + b.id);
+    if (!data || !data.rows) continue;
+    if (!data.rows.some(row => row.player === oldName)) continue;
+    const rows = data.rows.map(row => row.player === oldName ? { ...row, player: newName, playerFull: newName } : row);
+    await storeSet("boxscore:" + b.id, { ...data, rows });
+  }
 }
 
 function BackupTab({ team, roster }) {
