@@ -1542,7 +1542,10 @@ function derivedMatchStats(statsObj, teamPossessions, teamMinutes) {
     derived["Ended possessions"] = endedPoss;
     if (teamPossessions && teamMinutes && playerMinutes !== undefined) {
       const theoreticalPossOnCourt = (playerMinutes / teamMinutes) * teamPossessions;
-      if (theoreticalPossOnCourt > 0) derived["Usage%"] = (100 * endedPoss) / theoreticalPossOnCourt;
+      if (theoreticalPossOnCourt > 0) {
+        derived["Theoretical possessions"] = theoreticalPossOnCourt;
+        derived["Usage%"] = (100 * endedPoss) / theoreticalPossOnCourt;
+      }
     }
   }
   return derived;
@@ -2794,6 +2797,22 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   const [role, setRole] = useState(null);
   const [resources, setResources] = useState([]);
   const [todayEvents, setTodayEvents] = useState([]);
+  const [homeMessage, setHomeMessage] = useState("");
+  const [editingMessage, setEditingMessage] = useState(false);
+  const [messageDraft, setMessageDraft] = useState("");
+  const [messageBusy, setMessageBusy] = useState(false);
+
+  useEffect(() => { storeGet("home_message").then(m => setHomeMessage(m || "")); }, []);
+  async function saveHomeMessage() {
+    setMessageBusy(true);
+    try { await storeSet("home_message", messageDraft.trim()); setHomeMessage(messageDraft.trim()); }
+    finally { setMessageBusy(false); setEditingMessage(false); }
+  }
+  async function clearHomeMessage() {
+    setMessageBusy(true);
+    try { await storeSet("home_message", ""); setHomeMessage(""); }
+    finally { setMessageBusy(false); }
+  }
 
   useEffect(() => { storeGet("team_resources").then(r => setResources(((r || []).sort((a, b) => b.addedAt.localeCompare(a.addedAt))).slice(0, 2))); }, []);
   useEffect(() => {
@@ -2861,9 +2880,45 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
 
   return (
     <div>
-      <div style={{ marginBottom: 24 }}>
-        <div style={{ fontFamily: "ui-monospace, monospace", color: AMBER, fontSize: 12, letterSpacing: "0.1em", marginBottom: 4 }}>WELCOME</div>
-        <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>{session.name}</h1>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 24, flexWrap: "wrap" }}>
+        <div>
+          <div style={{ fontFamily: "ui-monospace, monospace", color: AMBER, fontSize: 12, letterSpacing: "0.1em", marginBottom: 4 }}>WELCOME</div>
+          <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>{session.name}</h1>
+        </div>
+
+        <div style={{ maxWidth: 280, width: "100%", flexShrink: 0 }}>
+          {isCoach ? (
+            editingMessage ? (
+              <div style={{ background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 10, padding: 12 }}>
+                <textarea value={messageDraft} onChange={e => setMessageDraft(e.target.value)} rows={3} placeholder="Message shown to players on their Home screen…"
+                  style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", resize: "vertical", fontSize: 13, marginBottom: 8 }} />
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button disabled={messageBusy} onClick={saveHomeMessage} style={{ ...btnPrimary, width: "auto", padding: "6px 14px", fontSize: 12.5 }}>{messageBusy ? "…" : "Save"}</button>
+                  <button onClick={() => setEditingMessage(false)} style={{ ...btnSecondary, padding: "6px 14px", fontSize: 12.5 }}>Cancel</button>
+                </div>
+              </div>
+            ) : homeMessage ? (
+              <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12 }}>
+                <div style={{ fontSize: 12.5, color: PAPER, lineHeight: 1.5, whiteSpace: "pre-wrap", marginBottom: 8 }}>{homeMessage}</div>
+                <div style={{ display: "flex", gap: 12 }}>
+                  <button onClick={() => { setMessageDraft(homeMessage); setEditingMessage(true); }} style={{ fontSize: 11.5, color: AMBER, background: "none", border: "none", cursor: "pointer" }}>Edit</button>
+                  <button onClick={clearHomeMessage} style={{ fontSize: 11.5, color: "#5C6470", background: "none", border: "none", cursor: "pointer" }}>Remove</button>
+                </div>
+              </div>
+            ) : (
+              <button onClick={() => { setMessageDraft(""); setEditingMessage(true); }} style={{ fontSize: 12, color: "#5C6470", background: "none", border: `1px dashed ${LINE}`, borderRadius: 10, padding: "10px 12px", cursor: "pointer", width: "100%", textAlign: "left" }}>
+                + Write a message for players' Home screen
+              </button>
+            )
+          ) : (
+            homeMessage && (
+              <div style={{ background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 10, padding: 12 }}>
+                <div style={{ fontSize: 10.5, fontWeight: 700, color: AMBER, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>Message from the coach</div>
+                <div style={{ fontSize: 12.5, color: PAPER, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{homeMessage}</div>
+              </div>
+            )
+          )}
+        </div>
       </div>
 
       {(isCoach || (nextGame && (visibility || DEFAULT_VISIBILITY).tabs.scouting)) && (
@@ -3807,30 +3862,23 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
                 </div>
 
                 {(() => {
-                  // Ces trois indicateurs dépendent du temps de jeu, absent de la plupart des
-                  // box scores importés jusqu'ici — on affiche "–" plutôt qu'un faux calcul
-                  // quand la donnée manque, comme demandé.
+                  // Ces indicateurs dépendent du temps de jeu, absent de la plupart des box
+                  // scores importés jusqu'ici — on affiche "–" plutôt qu'un faux calcul quand la
+                  // donnée manque. Les valeurs viennent de derivedMatchStats (via useBoxScore),
+                  // seule source de vérité pour ce calcul — BUG RÉEL CORRIGÉ : ce bloc avait sa
+                  // propre formule dupliquée et fausse (facteur ×5 en trop), jamais mise à jour
+                  // en même temps que le reste, ce qui donnait ~49.8% au lieu de ~10.8% pour le
+                  // même joueur et le même match.
                   const minutesLabel = findStatCol(box.statLabels, STAT_PATTERNS.minutes, "minutes");
                   const playerMinutes = minutesLabel ? box.averages[minutesLabel] : undefined;
-                  const teamAvg = (key) => {
-                    const vals = teamAdvanced.perMatch.map(m => m[key]).filter(v => v !== null && v !== undefined);
-                    return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : undefined;
-                  };
-                  const teamPoss = teamAvg("poss"), teamFga = teamAvg("fga"), teamFta = teamAvg("fta"), teamTov = teamAvg("tov");
-                  const GAME_MINUTES = 40; // hypothèse FIBA/standard (4x10) faute d'info sur la durée réelle du match
-                  const theoreticalPoss = (playerMinutes !== undefined && teamPoss !== undefined) ? (playerMinutes / GAME_MINUTES) * teamPoss : undefined;
-
-                  const fgaLabel = findStatCol(box.statLabels, STAT_PATTERNS.fga, "fga"), ftaLabel = findStatCol(box.statLabels, STAT_PATTERNS.fta, "fta"), tovLabel = findStatCol(box.statLabels, STAT_PATTERNS.tov, "tov");
-                  const playerFga = fgaLabel ? box.averages[fgaLabel] : undefined, playerFta = ftaLabel ? box.averages[ftaLabel] : undefined, playerTov = tovLabel ? box.averages[tovLabel] : undefined;
-                  const usagePct = (playerMinutes && teamFga !== undefined && teamFta !== undefined && teamTov !== undefined && playerFga !== undefined && playerFta !== undefined && playerTov !== undefined)
-                    ? (100 * (playerFga + 0.44 * playerFta + playerTov) * (5 * GAME_MINUTES)) / (playerMinutes * (teamFga + 0.44 * teamFta + teamTov))
-                    : undefined;
+                  const theoreticalPoss = box.averages["Theoretical possessions"];
+                  const usagePct = box.averages["Usage%"];
 
                   return (
                     <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
                       <StatPill label="Playing time" value={playerMinutes !== undefined ? playerMinutes.toFixed(1) + " min" : "–"} sub={minutesLabel ? "average / game" : "data missing from box score"} />
-                      <StatPill label="Possessions played (theoretical)" value={theoreticalPoss !== undefined ? theoreticalPoss.toFixed(1) : "–"} sub={playerMinutes !== undefined ? `out of ${GAME_MINUTES} min, based on ${teamPoss?.toFixed(1)} team poss.` : "requires playing time"} />
-                      <StatPill label="% Usage" value={usagePct !== undefined ? usagePct.toFixed(1) + "%" : "–"} sub={playerMinutes !== undefined ? "possessions ended / possessions played" : "requires playing time"} tone="red" />
+                      <StatPill label="Possessions played (theoretical)" value={theoreticalPoss !== undefined ? theoreticalPoss.toFixed(1) : "–"} sub={playerMinutes !== undefined ? "based on team possessions & playing time" : "requires playing time"} />
+                      <StatPill label="% Usage" value={usagePct !== undefined && usagePct !== null ? usagePct.toFixed(1) + "%" : "–"} sub={playerMinutes !== undefined ? "possessions ended / possessions played" : "requires playing time"} tone="red" />
                     </div>
                   );
                 })()}
