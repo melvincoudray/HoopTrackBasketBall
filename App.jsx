@@ -1860,22 +1860,40 @@ export default function App() {
     }
     const savedSession = await loadLocalSession();
     if (savedSession) {
-      // Migration : une session pouvait avoir été enregistrée sous le seul prénom du joueur
-      // ("Aiden") avant qu'on passe à l'identité par nom complet ("Aiden Martinez") — ce qui
-      // évite les confusions entre deux joueurs partageant le même prénom. On corrige silencieusement.
+      // BUG RÉEL CORRIGÉ : si un joueur est renommé (icône crayon) alors qu'il reste connecté
+      // sur son appareil sans se reconnecter, sa session gardait l'ANCIEN nom indéfiniment —
+      // toutes ses réponses (Wellness, Training…) continuaient à s'enregistrer sous l'ancien
+      // nom, invisibles pour le coach qui consulte désormais le nouveau nom. On resynchronise
+      // maintenant TOUJOURS le nom depuis l'id stable du joueur (si disponible), à chaque
+      // chargement de l'app — pas seulement pour l'ancienne migration prénom → nom complet.
       if (savedSession.role === "player") {
-        const exactMatch = effectiveRoster.find(p => p.name === savedSession.name);
-        if (!exactMatch) {
-          const byFirstNameOnly = effectiveRoster.find(p => p.first === savedSession.name);
-          if (byFirstNameOnly) {
-            const fixed = { ...savedSession, name: byFirstNameOnly.name };
+        const byId = savedSession.id ? effectiveRoster.find(p => p.id === savedSession.id) : null;
+        if (byId && byId.name !== savedSession.name) {
+          const fixed = { ...savedSession, name: byId.name };
+          await saveLocalSession(fixed);
+          setSession(fixed);
+        } else if (byId) {
+          setSession(savedSession);
+        } else {
+          // Pas d'id en session (ancienne connexion antérieure à ce correctif) — on retombe sur
+          // l'ancienne logique de migration prénom seul → nom complet, par nom cette fois.
+          const exactMatch = effectiveRoster.find(p => p.name === savedSession.name);
+          if (!exactMatch) {
+            const byFirstNameOnly = effectiveRoster.find(p => p.first === savedSession.name);
+            if (byFirstNameOnly) {
+              const fixed = { ...savedSession, name: byFirstNameOnly.name, id: byFirstNameOnly.id };
+              await saveLocalSession(fixed);
+              setSession(fixed);
+            } else {
+              setSession(savedSession);
+            }
+          } else {
+            // Rattache l'id maintenant qu'on l'a trouvé par nom, pour que les futurs
+            // renommages soient correctement suivis à partir de maintenant.
+            const fixed = { ...savedSession, id: exactMatch.id };
             await saveLocalSession(fixed);
             setSession(fixed);
-          } else {
-            setSession(savedSession);
           }
-        } else {
-          setSession(savedSession);
         }
       } else {
         setSession(savedSession);
@@ -2676,7 +2694,8 @@ function LoginScreen({ roster, onLogin }) {
     const users = (await storeGet("app_users")) || {};
     const u = users[name];
     if (simpleHash(pin) !== u.pin) { setError("Incorrect code."); return; }
-    onLogin({ name, role: u.role });
+    const match = roster.find(p => p.name === name);
+    onLogin({ name, role: u.role, id: u.role === "player" ? match?.id : undefined });
   }
 
   async function submitNewPin() {
@@ -2686,7 +2705,8 @@ function LoginScreen({ roster, onLogin }) {
     const role = staffOptions.includes(name) ? "coach" : "player";
     users[name] = { pin: simpleHash(pin), role };
     await storeSet("app_users", users);
-    onLogin({ name, role });
+    const match = roster.find(p => p.name === name);
+    onLogin({ name, role, id: role === "player" ? match?.id : undefined });
   }
 
   return (
@@ -2843,10 +2863,15 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   async function submitWellness() {
     setWBusy(true); setWStatus("");
     const today = todayLocal();
-    const existingIdx = wellnessEntries.findIndex(e => e.date === today && e.slot === wSlot);
-    const entry = { id: existingIdx >= 0 ? wellnessEntries[existingIdx].id : uid(), date: today, slot: wSlot, physical: wPhysical, mental: wMental };
-    const next = existingIdx >= 0 ? wellnessEntries.map((e, i) => i === existingIdx ? entry : e) : [entry, ...wellnessEntries];
     try {
+      // BUG RÉEL CORRIGÉ : se baser sur l'état React local (wellnessEntries) au lieu de relire
+      // la donnée la plus récente juste avant d'écrire pouvait écraser une réponse qui venait
+      // juste d'être enregistrée si le joueur répondait à deux créneaux coup sur coup, avant que
+      // l'état local n'ait eu le temps de se mettre à jour — certaines réponses "disparaissaient".
+      const latest = (await storeGet("wellness:" + playerName)) || [];
+      const existingIdx = latest.findIndex(e => e.date === today && e.slot === wSlot);
+      const entry = { id: existingIdx >= 0 ? latest[existingIdx].id : uid(), date: today, slot: wSlot, physical: wPhysical, mental: wMental };
+      const next = existingIdx >= 0 ? latest.map((e, i) => i === existingIdx ? entry : e) : [entry, ...latest];
       await storeSet("wellness:" + playerName, next);
       setWellnessEntries(next);
       setWStatus("Saved — thanks!");
@@ -4912,10 +4937,14 @@ function WellnessTab({ playerName, isCoach, canSeeCharts, teamId, teamName }) {
 
   async function submit() {
     setBusy(true); setStatus("");
-    const existingIdx = entries.findIndex(e => e.date === date && e.slot === slot);
-    const entry = { id: existingIdx >= 0 ? entries[existingIdx].id : uid(), date, slot, physical, mental };
-    const next = existingIdx >= 0 ? entries.map((e, i) => i === existingIdx ? entry : e) : [entry, ...entries];
     try {
+      // Même correctif que dans HomeTab : relit l'état le plus récent juste avant d'écrire,
+      // au lieu de se fier à l'état React local qui peut être périmé si deux soumissions
+      // se suivent de près (ex. le coach modifie deux entrées rapidement).
+      const latest = (await storeGet("wellness:" + playerName)) || [];
+      const existingIdx = latest.findIndex(e => e.date === date && e.slot === slot);
+      const entry = { id: existingIdx >= 0 ? latest[existingIdx].id : uid(), date, slot, physical, mental };
+      const next = existingIdx >= 0 ? latest.map((e, i) => i === existingIdx ? entry : e) : [entry, ...latest];
       await storeSet("wellness:" + playerName, next);
       setEntries(next);
       setStatus("Saved — thanks!");
