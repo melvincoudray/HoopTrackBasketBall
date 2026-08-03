@@ -1346,7 +1346,7 @@ function useBoxScore(playerName, filterKeys) {
     setLoading(false);
   }
 
-  const statLabels = prioritizeLabels(Array.from(new Set(entries.flatMap(e => Object.keys(e.stats)))));
+  const statLabels = filterRedundantRawPctColumns(prioritizeLabels(Array.from(new Set(entries.flatMap(e => Object.keys(e.stats))))));
   const weighted = computeWeightedPlayerPercentages(entries);
   // BUG RÉEL CORRIGÉ (même erreur que côté équipe, signalée par l'utilisateur) : les
   // pourcentages d'un joueur sur plusieurs matchs ne peuvent pas être moyennés match par
@@ -1465,15 +1465,30 @@ const STAT_KEY_FRIENDLY_NAME = {
   twoPct: "% 2PT (if already in the file)", tpmPct: "% 3PT (if already in the file)", ftPct: "% FT (if already in the file)",
 };
 
+// Retire les colonnes de pourcentage BRUTES du fichier (2PTS%, 3PT %…) de la liste des
+// statistiques affichées : elles font doublon avec "% 2pts"/"% 3pts"/"% LF" (calculées par
+// derivedMatchStats, correctement moyennées sur plusieurs matchs) et créaient une confusion
+// réelle — deux colonnes différentes pour la même chose, l'une correcte et l'autre pas
+// (constaté : 33% affiché, moyenne naïve fausse de la colonne brute, alors que la version
+// normalisée affichait le bon 25%). Une seule version claire désormais.
+function filterRedundantRawPctColumns(statLabels) {
+  const rawPctPatterns = [...STAT_PATTERNS.twoPct, ...STAT_PATTERNS.tpmPct, ...STAT_PATTERNS.ftPct];
+  return statLabels.filter(l => !rawPctPatterns.some(p => p.test(String(l).trim())));
+}
+
 // Pour un joueur donné, retrouve — parmi SES colonnes réellement présentes dans le fichier
 // importé — le nom exact de colonne correspondant à chaque stat mise en avant pour son poste.
 function featuredStatsForPosition(position, statLabels) {
   const keys = POSITION_FEATURED_STATS[position] || ["pts", "tov"];
-  return keys.map(key => ({
-    key,
-    fallbackLabel: STAT_KEY_LABEL_FR[key] || key,
-    label: findStatCol(statLabels, STAT_PATTERNS[key] || [], key),
-  }));
+  // Même correctif que PositionComparisonTable : priorise la colonne normalisée ("% 3pts")
+  // à la colonne brute du fichier, qui peut varier d'un fichier importé à l'autre.
+  const NORMALIZED_PCT_LABEL = { twoPct: "% 2pts", tpmPct: "% 3pts", ftPct: "% LF" };
+  return keys.map(key => {
+    if (NORMALIZED_PCT_LABEL[key] && statLabels.includes(NORMALIZED_PCT_LABEL[key])) {
+      return { key, fallbackLabel: STAT_KEY_LABEL_FR[key] || key, label: NORMALIZED_PCT_LABEL[key] };
+    }
+    return { key, fallbackLabel: STAT_KEY_LABEL_FR[key] || key, label: findStatCol(statLabels, STAT_PATTERNS[key] || [], key) };
+  });
 }
 
 // Cherche une valeur numérique dans la ligne d'un joueur pour une catégorie donnée, en
@@ -1777,7 +1792,7 @@ function useAllBoxScores(filterKeys) {
     }
     const result = {};
     Object.entries(map).forEach(([player, entries]) => {
-      const statLabels = prioritizeLabels(Array.from(new Set(entries.flatMap(e => Object.keys(e.stats)))));
+      const statLabels = filterRedundantRawPctColumns(prioritizeLabels(Array.from(new Set(entries.flatMap(e => Object.keys(e.stats))))));
       const weighted = computeWeightedPlayerPercentages(entries);
       const WEIGHTED_LABELS = {
         "% 2pts": "pct2", "% 2pts (calculated)": "pct2", "% 3pts": "pct3", "% 3pts (calculated)": "pct3",
@@ -3449,7 +3464,7 @@ function lowerIsBetterGuess(label) {
 }
 
 function computeAveragesFromEntries(entries) {
-  const statLabels = prioritizeLabels(Array.from(new Set(entries.flatMap(e => Object.keys(e.stats)))));
+  const statLabels = filterRedundantRawPctColumns(prioritizeLabels(Array.from(new Set(entries.flatMap(e => Object.keys(e.stats))))));
   const weighted = computeWeightedPlayerPercentages(entries);
   const WEIGHTED_LABELS = {
     "% 2pts": "pct2", "% 2pts (calculated)": "pct2", "% 3pts": "pct3", "% 3pts (calculated)": "pct3",
@@ -3766,7 +3781,19 @@ function PositionComparisonTable({ position, roster, byPlayer, playerFirst }) {
   // Union des colonnes réellement présentes chez au moins un des joueurs du poste, dans
   // l'ordre de priorité défini pour ce poste (Pts, Assists, Ballons perdus, % LF, % 3Pts…).
   const allLabelsAtPosition = Array.from(new Set(peers.flatMap(p => (byPlayer[p.name]?.statLabels) || [])));
-  const columns = keys.map(key => ({ key, label: findStatCol(allLabelsAtPosition, STAT_PATTERNS[key] || [], key), fallbackLabel: STAT_KEY_LABEL_FR[key] || key }));
+  // BUG RÉEL CORRIGÉ : pour les pourcentages de tir (twoPct/tpmPct/ftPct), utiliser la colonne
+  // BRUTE du fichier ("3PTS%", "3PT %"…) plutôt que la version normalisée ("% 3pts") pose
+  // problème dès que deux fichiers importés n'utilisent pas exactement le même intitulé de
+  // colonne — un seul des deux matchs était alors pris en compte dans la moyenne (constaté :
+  // Nathan Mettler affiché à 50% au lieu de 25% sur ses deux matchs). "% 2pts"/"% 3pts"/"% LF"
+  // sont TOUJOURS le même nom quel que soit le fichier d'origine, donc on les priorise ici.
+  const NORMALIZED_PCT_LABEL = { twoPct: "% 2pts", tpmPct: "% 3pts", ftPct: "% LF" };
+  const columns = keys.map(key => {
+    if (NORMALIZED_PCT_LABEL[key] && allLabelsAtPosition.includes(NORMALIZED_PCT_LABEL[key])) {
+      return { key, label: NORMALIZED_PCT_LABEL[key], fallbackLabel: STAT_KEY_LABEL_FR[key] || key };
+    }
+    return { key, label: findStatCol(allLabelsAtPosition, STAT_PATTERNS[key] || [], key), fallbackLabel: STAT_KEY_LABEL_FR[key] || key };
+  });
 
   const rows = peers.map(p => {
     const b = byPlayer[p.name];
