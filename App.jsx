@@ -1359,9 +1359,15 @@ function useBoxScore(playerName, filterKeys) {
   };
   const averages = {};
   statLabels.forEach(l => {
-    if (WEIGHTED_LABELS[l]) { averages[l] = weighted[WEIGHTED_LABELS[l]]; return; }
     const vals = entries.map(e => e.stats[l]).filter(v => v !== undefined);
-    averages[l] = vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
+    const naiveAvg = vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
+    // BUG RÉEL CORRIGÉ : si le fichier n'a pas de colonnes détaillées (tirs réussis/manqués
+    // séparés) pour recalculer ce pourcentage à partir des totaux, le calcul pondéré renvoie
+    // null — dans ce cas on retombe sur la moyenne simple plutôt que d'afficher "–" alors
+    // qu'une vraie valeur existait pour ce match (constaté : un joueur à 1 seul match et un
+    // vrai pourcentage de tir s'affichait vide).
+    if (WEIGHTED_LABELS[l]) { averages[l] = weighted[WEIGHTED_LABELS[l]] ?? naiveAvg; return; }
+    averages[l] = naiveAvg;
   });
 
   return { entries, statLabels, averages, loading, reload: load };
@@ -1779,9 +1785,10 @@ function useAllBoxScores(filterKeys) {
       };
       const averages = {};
       statLabels.forEach(l => {
-        if (WEIGHTED_LABELS[l]) { averages[l] = weighted[WEIGHTED_LABELS[l]]; return; }
         const vals = entries.map(e => e.stats[l]).filter(v => v !== undefined);
-        averages[l] = vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
+        const naiveAvg = vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
+        if (WEIGHTED_LABELS[l]) { averages[l] = weighted[WEIGHTED_LABELS[l]] ?? naiveAvg; return; }
+        averages[l] = naiveAvg;
       });
       // Détection heuristique de la colonne "points" pour le classement d'équipe.
       const ptsLabel = statLabels.find(l => /^pts?$|^points?$/i.test(l.trim()));
@@ -3450,9 +3457,15 @@ function computeAveragesFromEntries(entries) {
   };
   const averages = {};
   statLabels.forEach(l => {
-    if (WEIGHTED_LABELS[l]) { averages[l] = weighted[WEIGHTED_LABELS[l]]; return; }
     const vals = entries.map(e => e.stats[l]).filter(v => v !== undefined);
-    averages[l] = vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
+    const naiveAvg = vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
+    // BUG RÉEL CORRIGÉ : si le fichier n'a pas de colonnes détaillées (tirs réussis/manqués
+    // séparés) pour recalculer ce pourcentage à partir des totaux, le calcul pondéré renvoie
+    // null — dans ce cas on retombe sur la moyenne simple plutôt que d'afficher "–" alors
+    // qu'une vraie valeur existait pour ce match (constaté : un joueur à 1 seul match et un
+    // vrai pourcentage de tir s'affichait vide).
+    if (WEIGHTED_LABELS[l]) { averages[l] = weighted[WEIGHTED_LABELS[l]] ?? naiveAvg; return; }
+    averages[l] = naiveAvg;
   });
   return { statLabels, averages, games: entries.length };
 }
