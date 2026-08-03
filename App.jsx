@@ -3897,12 +3897,12 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
             <StatPill label="Games played" value={box.entries.length} sub="games he actually played in (box score)" />
             {(() => {
-              // Contrairement à l'écran (qui limite l'aperçu à 8 encadrés par souci de place),
-              // l'export affiche TOUJOURS TOUTES les statistiques disponibles, sans plafond —
-              // c'est un document de référence complet, pas un aperçu rapide.
+              // Même logique EXACTEMENT que l'écran (même plafond de 8) — l'export doit refléter
+              // ce que montre le site, pas afficher en plus des statistiques brutes qui n'y
+              // apparaissent jamais (constaté : 31 encadrés à l'export contre 9 à l'écran).
               const featured = position ? featuredStatsForPosition(position, box.statLabels).filter(f => f.label) : [];
               const featuredLabels = new Set(featured.map(f => f.label));
-              const rest = box.statLabels.filter(l => !featuredLabels.has(l));
+              const rest = box.statLabels.filter(l => !featuredLabels.has(l)).slice(0, 8 - featured.length);
               return (
                 <>
                   {featured.map(f => {
