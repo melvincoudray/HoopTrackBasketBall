@@ -1488,9 +1488,14 @@ const STAT_KEY_FRIENDLY_NAME = {
 // réelle — deux colonnes différentes pour la même chose, l'une correcte et l'autre pas
 // (constaté : 33% affiché, moyenne naïve fausse de la colonne brute, alors que la version
 // normalisée affichait le bon 25%). Une seule version claire désormais.
+// BUG RÉEL CORRIGÉ : le motif de détection de "FT%" brut ("%\s*LF$") correspond aussi, par
+// accident, au nom de NOTRE PROPRE libellé normalisé "% LF" — le filtre le supprimait donc
+// lui-même, faisant disparaître %FT partout (fiche joueur, comparaison par poste). On exempte
+// maintenant explicitement nos propres libellés dérivés, jamais concernés par ce filtre.
+const NORMALIZED_DERIVED_LABELS = new Set(["% 2pts", "% 2pts (calculated)", "% 3pts", "% 3pts (calculated)", "% LF", "% LF (calculated)"]);
 function filterRedundantRawPctColumns(statLabels) {
   const rawPctPatterns = [...STAT_PATTERNS.twoPct, ...STAT_PATTERNS.tpmPct, ...STAT_PATTERNS.ftPct];
-  return statLabels.filter(l => !rawPctPatterns.some(p => p.test(String(l).trim())));
+  return statLabels.filter(l => NORMALIZED_DERIVED_LABELS.has(l) || !rawPctPatterns.some(p => p.test(String(l).trim())));
 }
 
 // Pour un joueur donné, retrouve — parmi SES colonnes réellement présentes dans le fichier
