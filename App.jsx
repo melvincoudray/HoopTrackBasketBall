@@ -3897,9 +3897,12 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
             <StatPill label="Games played" value={box.entries.length} sub="games he actually played in (box score)" />
             {(() => {
+              // Contrairement à l'écran (qui limite l'aperçu à 8 encadrés par souci de place),
+              // l'export affiche TOUJOURS TOUTES les statistiques disponibles, sans plafond —
+              // c'est un document de référence complet, pas un aperçu rapide.
               const featured = position ? featuredStatsForPosition(position, box.statLabels).filter(f => f.label) : [];
               const featuredLabels = new Set(featured.map(f => f.label));
-              const rest = box.statLabels.filter(l => !featuredLabels.has(l)).slice(0, 8 - featured.length);
+              const rest = box.statLabels.filter(l => !featuredLabels.has(l));
               return (
                 <>
                   {featured.map(f => {
@@ -3914,6 +3917,22 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
               );
             })()}
           </div>
+
+          {(() => {
+            // Manquait à l'export alors qu'affiché à l'écran — mêmes données, même source
+            // (box.averages, déjà calculé correctement via derivedMatchStats/useBoxScore).
+            const minutesLabel = findStatCol(box.statLabels, STAT_PATTERNS.minutes, "minutes");
+            const playerMinutes = minutesLabel ? box.averages[minutesLabel] : undefined;
+            const theoreticalPoss = box.averages["Theoretical possessions"];
+            const usagePct = box.averages["Usage%"];
+            return (
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+                <StatPill label="Playing time" value={playerMinutes !== undefined ? playerMinutes.toFixed(1) + " min" : "–"} sub={minutesLabel ? "average / game" : "data missing from box score"} />
+                <StatPill label="Possessions played (theoretical)" value={theoreticalPoss !== undefined ? theoreticalPoss.toFixed(1) : "–"} sub={playerMinutes !== undefined ? "based on team possessions & playing time" : "requires playing time"} />
+                <StatPill label="% Usage" value={usagePct !== undefined && usagePct !== null ? usagePct.toFixed(1) + "%" : "–"} sub={playerMinutes !== undefined ? "possessions ended / possessions played" : "requires playing time"} tone="red" />
+              </div>
+            );
+          })()}
 
           <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Match by match</h2>
           {/* Police et espacement volontairement compacts pour que le tableau tienne sur la
