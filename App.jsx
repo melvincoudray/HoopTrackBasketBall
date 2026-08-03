@@ -350,8 +350,6 @@ async function storeSet(key, value) {
     if (error) { console.error("[storage] Supabase set FAILED on", k, ":", error); throw error; }
     return;
   }
-  // Ni window.storage ni Supabase disponibles : seule la copie mémoire locale existe, ce
-  // qui n'est PAS persistant — on le signale clairement dans la console pour le diagnostic.
   console.warn("[storage] No persistent backend available — data for", k, "only exists in memory for this session.");
 }
 async function storeDelete(key) {
@@ -1349,8 +1347,19 @@ function useBoxScore(playerName, filterKeys) {
   }
 
   const statLabels = prioritizeLabels(Array.from(new Set(entries.flatMap(e => Object.keys(e.stats)))));
+  const weighted = computeWeightedPlayerPercentages(entries);
+  // BUG RÉEL CORRIGÉ (même erreur que côté équipe, signalée par l'utilisateur) : les
+  // pourcentages d'un joueur sur plusieurs matchs ne peuvent pas être moyennés match par
+  // match — un match à 1 tir tenté compterait autant qu'un match à 15. On recalcule ces
+  // libellés précis depuis les comptages sommés (weighted), tout le reste reste une moyenne
+  // simple (correcte pour des stats de comptage comme les points ou les rebonds).
+  const WEIGHTED_LABELS = {
+    "% 2pts": "pct2", "% 2pts (calculated)": "pct2", "% 3pts": "pct3", "% 3pts (calculated)": "pct3",
+    "% LF": "pctFT", "% LF (calculated)": "pctFT", "eFG% (calculated)": "efg", "Usage%": "usagePct",
+  };
   const averages = {};
   statLabels.forEach(l => {
+    if (WEIGHTED_LABELS[l]) { averages[l] = weighted[WEIGHTED_LABELS[l]]; return; }
     const vals = entries.map(e => e.stats[l]).filter(v => v !== undefined);
     averages[l] = vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
   });
@@ -1553,6 +1562,86 @@ function derivedMatchStats(statsObj, teamPossessions, teamMinutes) {
 
 // Charge les box scores bruts (toutes les lignes de tous les joueurs, par match) pour
 // calculer des statistiques d'ÉQUIPE — possessions, Four Factors, ORTG, DRTG.
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur) : on ne peut pas faire la moyenne de
+// pourcentages calculés match par match — un match à 2 tirs tentés compterait autant qu'un
+// match à 20 dans la moyenne, ce qui fausse complètement le résultat. La bonne méthode :
+// additionner les comptages bruts (réussis, manqués, pertes de balle, possessions...) sur
+// TOUS les matchs d'abord, puis calculer UN SEUL pourcentage global à partir de ces totaux.
+function computeWeightedTeamPercentages(perMatch) {
+  const sum = (key) => perMatch.reduce((s, m) => s + (m[key] !== null && m[key] !== undefined ? m[key] : 0), 0);
+  const has = (key) => perMatch.some(m => m[key] !== null && m[key] !== undefined);
+
+  const sumMade2 = sum("made2"), sumMissed2 = sum("missed2");
+  const pct2 = (has("made2") && has("missed2") && sumMade2 + sumMissed2 > 0) ? (100 * sumMade2) / (sumMade2 + sumMissed2) : null;
+
+  const sumMade3 = sum("made3"), sumMissed3 = sum("missed3");
+  const pct3 = (has("made3") && has("missed3") && sumMade3 + sumMissed3 > 0) ? (100 * sumMade3) / (sumMade3 + sumMissed3) : null;
+
+  const sumMadeFT = sum("madeFT"), sumMissedFT = sum("missedFT");
+  const pctFT = (has("madeFT") && has("missedFT") && sumMadeFT + sumMissedFT > 0) ? (100 * sumMadeFT) / (sumMadeFT + sumMissedFT) : null;
+
+  const sumFgm = sum("fgm"), sumTpm = sum("tpm"), sumFga = sum("fga");
+  const efg = (has("fgm") && has("tpm") && sumFga > 0) ? (100 * (sumFgm + 0.5 * sumTpm)) / sumFga : null;
+
+  const sumTov = sum("tov"), sumPoss = sum("poss");
+  const tovPct = (has("tov") && has("poss") && sumPoss > 0) ? (100 * sumTov) / sumPoss : null;
+
+  const sumOreb = sum("oreb"), sumMissedFG = sumMissed2 + sumMissed3;
+  const orebOpportunities = sumMissedFG + 0.44 * sumMissedFT;
+  const orebPct = (has("oreb") && (has("missed2") || has("missed3")) && has("missedFT") && orebOpportunities > 0) ? (100 * sumOreb) / orebOpportunities : null;
+
+  const sumAst = sum("ast");
+  const astOpportunities = sumFgm + 0.44 * sumMadeFT;
+  const astPct = (has("ast") && has("fgm") && has("madeFT") && astOpportunities > 0) ? (100 * sumAst) / astOpportunities : null;
+
+  return { pct2, pct3, pctFT, efg, tovPct, orebPct, astPct };
+}
+
+// Même correctif, au niveau INDIVIDUEL cette fois : les pourcentages d'un joueur sur
+// plusieurs matchs (%2pts, %3pts, %FT, eFG%, Usage%) ne doivent pas non plus être moyennés
+// match par match — on part des colonnes brutes de chaque box score, on additionne les
+// comptages, puis on calcule un seul pourcentage global.
+function computeWeightedPlayerPercentages(entries) {
+  const get = (statsObj, patterns) => {
+    const l = findStatCol(Object.keys(statsObj), patterns);
+    return l !== undefined ? Number(statsObj[l]) : undefined;
+  };
+  let sumMade2 = 0, sumMissed2 = 0, sumMade3 = 0, sumMissed3 = 0, sumMadeFT = 0, sumMissedFT = 0, sumFga = 0, sumFgm = 0, sumTpm = 0;
+  let hasMade2 = false, hasMissed2 = false, hasMade3 = false, hasMissed3 = false, hasMadeFT = false, hasMissedFT = false, hasFga = false;
+  let sumEndedPoss = 0, sumTheoPoss = 0, hasUsage = false;
+
+  for (const e of entries) {
+    const s = e.stats;
+    const made2 = get(s, STAT_PATTERNS.made2), missed2 = get(s, STAT_PATTERNS.missed2);
+    const made3 = get(s, STAT_PATTERNS.made3), missed3 = get(s, STAT_PATTERNS.missed3);
+    const madeFT = get(s, STAT_PATTERNS.madeFT), missedFT = get(s, STAT_PATTERNS.missedFT);
+    const fga = get(s, STAT_PATTERNS.fga) ?? ((made2 !== undefined || missed2 !== undefined || made3 !== undefined || missed3 !== undefined)
+      ? (made2 || 0) + (missed2 || 0) + (made3 || 0) + (missed3 || 0) : undefined);
+    if (made2 !== undefined) { sumMade2 += made2; hasMade2 = true; }
+    if (missed2 !== undefined) { sumMissed2 += missed2; hasMissed2 = true; }
+    if (made3 !== undefined) { sumMade3 += made3; hasMade3 = true; }
+    if (missed3 !== undefined) { sumMissed3 += missed3; hasMissed3 = true; }
+    if (madeFT !== undefined) { sumMadeFT += madeFT; hasMadeFT = true; }
+    if (missedFT !== undefined) { sumMissedFT += missedFT; hasMissedFT = true; }
+    if (fga !== undefined) {
+      sumFga += fga; hasFga = true;
+      sumFgm += (made2 || 0) + (made3 || 0);
+      sumTpm += (made3 || 0);
+    }
+    if (s["Ended possessions"] !== undefined && s["Theoretical possessions"] !== undefined) {
+      sumEndedPoss += s["Ended possessions"]; sumTheoPoss += s["Theoretical possessions"]; hasUsage = true;
+    }
+  }
+
+  const pct2 = (hasMade2 && hasMissed2 && sumMade2 + sumMissed2 > 0) ? (100 * sumMade2) / (sumMade2 + sumMissed2) : null;
+  const pct3 = (hasMade3 && hasMissed3 && sumMade3 + sumMissed3 > 0) ? (100 * sumMade3) / (sumMade3 + sumMissed3) : null;
+  const pctFT = (hasMadeFT && hasMissedFT && sumMadeFT + sumMissedFT > 0) ? (100 * sumMadeFT) / (sumMadeFT + sumMissedFT) : null;
+  const efg = (hasFga && sumFga > 0) ? (100 * (sumFgm + 0.5 * sumTpm)) / sumFga : null;
+  const usagePct = (hasUsage && sumTheoPoss > 0) ? (100 * sumEndedPoss) / sumTheoPoss : null;
+
+  return { pct2, pct3, pctFT, efg, usagePct };
+}
+
 function useTeamAdvancedStats(filterKeys) {
   const [data, setData] = useState({ perMatch: [], columns: {}, loading: true });
 
@@ -1627,9 +1716,17 @@ function useTeamAdvancedStats(filterKeys) {
       const ftRate = (fta !== null && fga) ? fta / fga : null;
       const ortg = (pts !== null && poss) ? (100 * pts) / poss : null;
       const drtg = (m.opponentScore !== null && m.opponentScore !== undefined && poss) ? (100 * m.opponentScore) / poss : null;
+      // % Rebonds offensifs : rebonds offensifs ÷ (tirs manqués + 0.44 × lancers francs
+      // manqués) — n'a besoin que des propres stats de l'équipe, pas de celles de l'adversaire.
+      const missedFG = (missed2 !== null || missed3 !== null) ? (missed2 || 0) + (missed3 || 0) : null;
+      const orebOpportunities = (missedFG !== null && missedFT !== null) ? missedFG + 0.44 * missedFT : null;
+      const orebPct = (oreb !== null && orebOpportunities) ? (100 * oreb) / orebOpportunities : null;
+      // % Passes décisives : passes décisives ÷ (tirs marqués + 0.44 × lancers francs marqués).
+      const astOpportunities = (fgm !== null && madeFT !== null) ? fgm + 0.44 * madeFT : null;
+      const astPct = (ast !== null && astOpportunities) ? (100 * ast) / astOpportunities : null;
       return {
         date: m.date, opponent: m.opponent, opponentScore: m.opponentScore, pts, poss, approxPoss, efg, tovPct, oreb, dreb, reb, ftRate, ortg, drtg,
-        fga, fta, tov, made2, missed2, made3, missed3, madeFT, missedFT, ast, pct2, pct3, pctFT,
+        fga, fta, tov, made2, missed2, made3, missed3, madeFT, missedFT, ast, pct2, pct3, pctFT, orebPct, astPct, fgm, tpm,
       };
     });
 
@@ -1675,8 +1772,14 @@ function useAllBoxScores(filterKeys) {
     const result = {};
     Object.entries(map).forEach(([player, entries]) => {
       const statLabels = prioritizeLabels(Array.from(new Set(entries.flatMap(e => Object.keys(e.stats)))));
+      const weighted = computeWeightedPlayerPercentages(entries);
+      const WEIGHTED_LABELS = {
+        "% 2pts": "pct2", "% 2pts (calculated)": "pct2", "% 3pts": "pct3", "% 3pts (calculated)": "pct3",
+        "% LF": "pctFT", "% LF (calculated)": "pctFT", "eFG% (calculated)": "efg", "Usage%": "usagePct",
+      };
       const averages = {};
       statLabels.forEach(l => {
+        if (WEIGHTED_LABELS[l]) { averages[l] = weighted[WEIGHTED_LABELS[l]]; return; }
         const vals = entries.map(e => e.stats[l]).filter(v => v !== undefined);
         averages[l] = vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
       });
@@ -2895,7 +2998,8 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
     const vals = advanced.perMatch.map(m => m[key]).filter(v => v !== null && v !== undefined);
     return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
   };
-  const ortg = avg("ortg"), drtg = avg("drtg"), efg = avg("efg"), tovPct = avg("tovPct"), ftRate = avg("ftRate"), oreb = avg("oreb");
+  const { efg, tovPct, orebPct } = computeWeightedTeamPercentages(advanced.perMatch);
+  const ortg = avg("ortg"), drtg = avg("drtg"), ftRate = avg("ftRate"), oreb = avg("oreb");
 
   const today = todayLocal();
   const answeredToday = new Set(wellnessEntries.filter(e => e.date === today).map(e => e.slot));
@@ -3131,10 +3235,10 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 26 }}>
                   <StatPill label="ORTG" value={ortg !== null ? ortg.toFixed(1) : "–"} tone="teal" />
                   <StatPill label="DRTG" value={drtg !== null ? drtg.toFixed(1) : "–"} tone="red" />
-                  <StatPill label="eFG%" value={efg !== null ? (efg * 100).toFixed(1) + "%" : "–"} />
-                  <StatPill label="TOV%" value={tovPct !== null ? (tovPct * 100).toFixed(1) + "%" : "–"} tone="red" />
+                  <StatPill label="eFG%" value={efg !== null ? efg.toFixed(1) + "%" : "–"} />
+                  <StatPill label="TOV%" value={tovPct !== null ? tovPct.toFixed(1) + "%" : "–"} tone="red" />
                   <StatPill label="FTA/FGA" value={ftRate !== null ? ftRate.toFixed(2) : "–"} />
-                  <StatPill label="Off. rebounds / game" value={oreb !== null ? oreb.toFixed(1) : "–"} />
+                  <StatPill label="OREB%" value={orebPct !== null ? orebPct.toFixed(1) + "%" : "–"} />
                 </div>
               )}
             </>
@@ -3339,8 +3443,14 @@ function lowerIsBetterGuess(label) {
 
 function computeAveragesFromEntries(entries) {
   const statLabels = prioritizeLabels(Array.from(new Set(entries.flatMap(e => Object.keys(e.stats)))));
+  const weighted = computeWeightedPlayerPercentages(entries);
+  const WEIGHTED_LABELS = {
+    "% 2pts": "pct2", "% 2pts (calculated)": "pct2", "% 3pts": "pct3", "% 3pts (calculated)": "pct3",
+    "% LF": "pctFT", "% LF (calculated)": "pctFT", "eFG% (calculated)": "efg", "Usage%": "usagePct",
+  };
   const averages = {};
   statLabels.forEach(l => {
+    if (WEIGHTED_LABELS[l]) { averages[l] = weighted[WEIGHTED_LABELS[l]]; return; }
     const vals = entries.map(e => e.stats[l]).filter(v => v !== undefined);
     averages[l] = vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
   });
@@ -3362,7 +3472,8 @@ function PlayerVsPlayer({ roster, onClose }) {
   // Note moyenne d'entraînement et d'évaluation mentale — en plus des stats de box score.
   async function loadExtras(playerName) {
     const training = (await storeGet("training:" + playerName)) || [];
-    const trainingAvg = training.length ? training.reduce((s, e) => s + (Number(e.eval) || 0), 0) / training.length : null;
+    const rated = training.filter(e => e.eval !== null && e.eval !== undefined);
+    const trainingAvg = rated.length ? rated.reduce((s, e) => s + Number(e.eval), 0) / rated.length : null;
     const mental = (await storeGet("mental:" + playerName)) || [];
     const mentalAvg = mental.length
       ? mental.reduce((s, e) => s + (Object.values(e.ratings || {}).reduce((a, b) => a + b, 0) / (Object.values(e.ratings || {}).length || 1)), 0) / mental.length
@@ -3692,10 +3803,49 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Official totals (box score)</h2>
       {box.entries.length === 0 ? <p>No box score imported.</p> : (
-        <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 12, marginBottom: 12 }}>
-          <thead><tr>{box.statLabels.map(l => <th key={l} style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>{friendlyStatLabel(l)}</th>)}</tr></thead>
-          <tbody><tr>{box.statLabels.map(l => <td key={l} style={{ border: `1px solid ${LINE}`, padding: 4 }}>{formatStatValue(l, box.averages[l])}</td>)}</tr></tbody>
-        </table>
+        <>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
+            <StatPill label="Games played" value={box.entries.length} sub="games he actually played in (box score)" />
+            {(() => {
+              const featured = position ? featuredStatsForPosition(position, box.statLabels).filter(f => f.label) : [];
+              const featuredLabels = new Set(featured.map(f => f.label));
+              const rest = box.statLabels.filter(l => !featuredLabels.has(l)).slice(0, 8 - featured.length);
+              return (
+                <>
+                  {featured.map(f => {
+                    const rank = teamRank(allBox.byPlayer, f.label, playerName);
+                    return <StatPill key={f.key} label={f.label} value={formatStatValue(f.label, box.averages[f.label])} sub={rank ? `${position} · #${rank.rank} of ${rank.total} team` : position} tone="amber" />;
+                  })}
+                  {rest.map(l => {
+                    const rank = teamRank(allBox.byPlayer, l, playerName);
+                    return <StatPill key={l} label={l} value={formatStatValue(l, box.averages[l])} sub={rank ? `average / game · #${rank.rank} of ${rank.total} team` : "average / game"} tone="teal" />;
+                  })}
+                </>
+              );
+            })()}
+          </div>
+
+          <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Match by match</h2>
+          {/* Police et espacement volontairement compacts pour que le tableau tienne sur la
+              largeur de la page à l'export — un tableau "overflow-x: auto" comme à l'écran ne
+              fonctionne pas dans un PDF statique, il serait simplement coupé sans possibilité de défiler. */}
+          <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 9.5, marginBottom: 12, tableLayout: "fixed" }}>
+            <thead><tr>
+              <th style={{ border: `1px solid ${LINE}`, padding: "3px 4px", textAlign: "left" }}>Date</th>
+              <th style={{ border: `1px solid ${LINE}`, padding: "3px 4px", textAlign: "left" }}>Opponent</th>
+              {box.statLabels.map(l => <th key={l} style={{ border: `1px solid ${LINE}`, padding: "3px 4px", textAlign: "left" }}>{friendlyStatLabel(l)}</th>)}
+            </tr></thead>
+            <tbody>
+              {box.entries.map((e, i) => (
+                <tr key={i}>
+                  <td style={{ border: `1px solid ${LINE}`, padding: "3px 4px" }}>{e.date}</td>
+                  <td style={{ border: `1px solid ${LINE}`, padding: "3px 4px" }}>{e.opponent}</td>
+                  {box.statLabels.map(l => <td key={l} style={{ border: `1px solid ${LINE}`, padding: "3px 4px", fontFamily: "ui-monospace, monospace" }}>{formatStatValue(l, e.stats[l])}</td>)}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </>
       )}
 
       {position && (
@@ -3871,14 +4021,14 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
                           const rank = teamRank(allBox.byPlayer, f.label, playerName);
                           return (
                             <StatPill key={f.key} label={f.label} value={formatStatValue(f.label, box.averages[f.label])}
-                              sub={rank ? `${position} · #${rank.rank} sur ${rank.total} équipe` : position} tone="amber" />
+                              sub={rank ? `${position} · #${rank.rank} of ${rank.total} team` : position} tone="amber" />
                           );
                         })}
                         {rest.map(l => {
                           const rank = teamRank(allBox.byPlayer, l, playerName);
                           return (
                             <StatPill key={l} label={l} value={formatStatValue(l, box.averages[l])}
-                              sub={rank ? `moyenne / match · #${rank.rank} sur ${rank.total} équipe` : "average / game"} tone="teal" />
+                              sub={rank ? `average / game · #${rank.rank} of ${rank.total} team` : "average / game"} tone="teal" />
                           );
                         })}
                       </>
@@ -4053,7 +4203,7 @@ function BoxScoreHistoryTable({ box }) {
       <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 13 }}>
         <thead>
           <tr>
-            <th style={thStyle}>Date</th><th style={thStyle}>Adversaire</th>
+            <th style={thStyle}>Date</th><th style={thStyle}>Opponent</th>
             {box.statLabels.map(l => <th key={l} style={thStyle}>{friendlyStatLabel(l)}</th>)}
           </tr>
         </thead>
@@ -4522,7 +4672,7 @@ function TrainingLog({ playerName, isCoach }) {
   }
   function startEdit(e) {
     setEditingId(e.id);
-    setForm({ date: e.date, thematique: e.thematique, theme: e.theme || "", objectif: e.objectif || "", commentaire: e.commentaire || "", eval: e.eval ?? 3, duree: e.duree ?? 15 });
+    setForm({ date: e.date, thematique: e.thematique, theme: e.theme || "", objectif: e.objectif || "", commentaire: e.commentaire || "", eval: e.eval ?? null, duree: e.duree ?? 15 });
     if (formRef.current) formRef.current.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
@@ -4544,7 +4694,8 @@ function TrainingLog({ playerName, isCoach }) {
   }
 
   const total = entries.length;
-  const avgEval = total ? entries.reduce((s, e) => s + (Number(e.eval) || 0), 0) / total : null;
+  const ratedEntries = entries.filter(e => e.eval !== null && e.eval !== undefined);
+  const avgEval = ratedEntries.length ? ratedEntries.reduce((s, e) => s + Number(e.eval), 0) / ratedEntries.length : null;
   const totalDuree = entries.reduce((s, e) => s + (Number(e.duree) || 0), 0);
   const dureeByTheme = (t) => entries.filter(e => e.thematique === t).reduce((s, e) => s + (Number(e.duree) || 0), 0);
   const realDistribution = themes.map(t => ({
@@ -4636,7 +4787,8 @@ function TrainingLog({ playerName, isCoach }) {
             </div>
             <div style={{ width: 130 }}>
               <label style={labelStyle}>Rating /5</label>
-              <select value={form.eval} onChange={e => setForm(f => ({ ...f, eval: Number(e.target.value) }))} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", color: ratingColor(form.eval), fontWeight: 700 }}>
+              <select value={form.eval ?? ""} onChange={e => setForm(f => ({ ...f, eval: e.target.value === "" ? null : Number(e.target.value) }))} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", color: form.eval ? ratingColor(form.eval) : "#5C6470", fontWeight: 700 }}>
+                <option value="">No rating</option>
                 {[1, 2, 3, 4, 5].map(v => <option key={v} value={v}>{v}</option>)}
               </select>
             </div>
@@ -5220,8 +5372,10 @@ function TeamAdvancedStats({ advanced }) {
     const vals = advanced.perMatch.map(m => m[key]).filter(v => v !== null && v !== undefined);
     return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
   };
-  const ortg = avg("ortg"), drtg = avg("drtg"), poss = avg("poss"), efg = avg("efg"), tovPct = avg("tovPct"), ftRate = avg("ftRate"), oreb = avg("oreb"), reb = avg("reb");
-  const dreb = avg("dreb"), pct2 = avg("pct2"), pct3 = avg("pct3"), pctFT = avg("pctFT"), ast = avg("ast"), pts = avg("pts"), ptse = advanced.perMatch.some(m => m.opponentScore !== null && m.opponentScore !== undefined)
+  const weighted = computeWeightedTeamPercentages(advanced.perMatch);
+  const ortg = avg("ortg"), drtg = avg("drtg"), poss = avg("poss"), ftRate = avg("ftRate"), oreb = avg("oreb"), reb = avg("reb");
+  const { pct2, pct3, pctFT, efg, tovPct, orebPct, astPct } = weighted;
+  const dreb = avg("dreb"), ast = avg("ast"), pts = avg("pts"), ptse = advanced.perMatch.some(m => m.opponentScore !== null && m.opponentScore !== undefined)
     ? advanced.perMatch.map(m => m.opponentScore).filter(v => v !== null && v !== undefined).reduce((s, v, _, arr) => s + v / arr.length, 0) : null;
   const net = ortg !== null && drtg !== null ? ortg - drtg : null;
   const approxPoss = advanced.perMatch.some(m => m.approxPoss);
@@ -5265,13 +5419,18 @@ function TeamAdvancedStats({ advanced }) {
 
       <SectionTitle eyebrow="Four Factors" title="Offensive factors" />
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 26 }}>
-        <StatPill label="eFG%" value={efg !== null ? (efg * 100).toFixed(1) + "%" : "–"} />
-        <StatPill label="TOV%" value={tovPct !== null ? (tovPct * 100).toFixed(1) + "%" : "–"} tone="red" />
-        <StatPill label="Off. rebounds / game" value={oreb !== null ? oreb.toFixed(1) : "–"} sub="ORB% not calculable (opponent defensive rebounds not imported)" />
+        <StatPill label="eFG%" value={efg !== null ? efg.toFixed(1) + "%" : "–"} />
+        <StatPill label="TOV%" value={tovPct !== null ? tovPct.toFixed(1) + "%" : "–"} tone="red" />
+        <StatPill label="OREB%" value={orebPct !== null ? orebPct.toFixed(1) + "%" : "–"} sub="off. rebounds ÷ (missed shots + 0.44 × missed FT)" />
         <StatPill label="FTA/FGA" value={ftRate !== null ? ftRate.toFixed(2) : "–"} />
       </div>
       <div style={{ fontSize: 11.5, color: "#5C6470", marginBottom: 26 }}>
         Defensive Four Factors (same factors on the opponent's side) can't be calculated: they require the opponent's full box score, which isn't imported today.
+      </div>
+
+      <SectionTitle eyebrow="Playmaking" title="Assist %" />
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 26 }}>
+        <StatPill label="AST%" value={astPct !== null ? astPct.toFixed(1) + "%" : "–"} sub="assists ÷ (made shots + 0.44 × made FT)" tone="teal" />
       </div>
 
       <SectionTitle eyebrow="Detail" title="Shots, rebounds, team play" />
@@ -5371,21 +5530,22 @@ function ourTeamAsScoutStats(advanced, box) {
     const vals = advanced.perMatch.map(m => m[key]).filter(v => v !== null && v !== undefined);
     return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : undefined;
   };
+  const weighted = computeWeightedTeamPercentages(advanced.perMatch);
   const stats = {
     mj: advanced.perMatch.length || undefined,
     poss: avg("poss"), ortg: avg("ortg"), drtg: avg("drtg"),
-    efg: avg("efg") !== undefined ? avg("efg") * 100 : undefined,
-    pctbp: avg("tovPct") !== undefined ? avg("tovPct") * 100 : undefined,
+    efg: weighted.efg ?? undefined,
+    pctbp: weighted.tovPct ?? undefined,
     ftafga: avg("ftRate") !== undefined ? avg("ftRate") * 100 : undefined,
     pts: avg("pts"),
     ptse: advanced.perMatch.some(m => m.opponentScore !== null && m.opponentScore !== undefined)
       ? advanced.perMatch.map(m => m.opponentScore).filter(v => v !== null && v !== undefined).reduce((s, v, _, arr) => s + v / arr.length, 0) : undefined,
     r2: avg("made2"), t2: (avg("made2") !== undefined && avg("missed2") !== undefined) ? avg("made2") + avg("missed2") : undefined,
-    pct2: avg("pct2"),
+    pct2: weighted.pct2 ?? undefined,
     r3: avg("made3"), t3: (avg("made3") !== undefined && avg("missed3") !== undefined) ? avg("made3") + avg("missed3") : undefined,
-    pct3: avg("pct3"),
+    pct3: weighted.pct3 ?? undefined,
     lfr: avg("madeFT"), lft: (avg("madeFT") !== undefined && avg("missedFT") !== undefined) ? avg("madeFT") + avg("missedFT") : undefined,
-    pctlf: avg("pctFT"),
+    pctlf: weighted.pctFT ?? undefined,
     ro: avg("oreb"), rd: avg("dreb"), rt: avg("reb"),
     pd: avg("ast"), bp: avg("tov"),
   };
@@ -5411,7 +5571,7 @@ const CLOSEOUT_LEVELS = [
   { key: "medium", label: "Medium", color: AMBER },
   { key: "hard", label: "Hard", color: RED },
 ];
-function ratingColor(v) { return (RATING_LEVELS.find(l => l.value === v) || RATING_LEVELS[2]).color; }
+function ratingColor(v) { return v === null || v === undefined ? "#5C6470" : (RATING_LEVELS.find(l => l.value === v) || RATING_LEVELS[2]).color; }
 
 // Roue à secteurs colorés (façon PDF) — pas un radar classique à polygone : chaque
 // compétence est un secteur indépendant, sa couleur ET sa taille reflètent la note 1-5.
@@ -6900,12 +7060,12 @@ function CollectiveTraining({ roster }) {
 
   function toggle(id) {
     setSelected(s => s.includes(id) ? s.filter(x => x !== id) : [...s, id]);
-    setNotes(n => (id in n ? n : { ...n, [id]: 3 }));
+    setNotes(n => (id in n ? n : { ...n, [id]: null }));
     setComments(c => (id in c ? c : { ...c, [id]: "" }));
   }
   function selectAll() {
     setSelected(roster.map(p => p.id));
-    setNotes(Object.fromEntries(roster.map(p => [p.id, 3])));
+    setNotes(Object.fromEntries(roster.map(p => [p.id, null])));
     setComments(c => Object.fromEntries(roster.map(p => [p.id, c[p.id] || ""])));
   }
   function selectNone() { setSelected([]); }
@@ -6922,7 +7082,7 @@ function CollectiveTraining({ roster }) {
         const existing = (await storeGet("training:" + player.name)) || [];
         const individualComment = (comments[id] || "").trim();
         const fullComment = [commentaire, individualComment].filter(Boolean).join(commentaire && individualComment ? "\n\n" : "");
-        const entry = { id: uid(), date, thematique, theme, objectif, duree, commentaire: fullComment, eval: notes[id] ?? 3 };
+        const entry = { id: uid(), date, thematique, theme, objectif, duree, commentaire: fullComment, eval: notes[id] ?? null };
         await storeSet("training:" + player.name, [entry, ...existing]);
       }
       setStatus(`Session added to ${selected.length} player${selected.length !== 1 ? "s" : ""} — saved under: ${selected.map(id => { const p = roster.find(pl => pl.id === id); return p ? `"${p.name}"` : "?"; }).join(", ")}.`);
@@ -6973,8 +7133,9 @@ function CollectiveTraining({ roster }) {
                   <span style={{ fontSize: 13.5 }}>{p.name}</span>
                 </label>
                 {selected.includes(p.id) && (
-                  <select value={notes[p.id] ?? 3} onChange={e => setNotes(n => ({ ...n, [p.id]: Number(e.target.value) }))}
-                    style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 90, padding: "6px 10px", fontSize: 13, color: ratingColor(notes[p.id] ?? 3), fontWeight: 700 }}>
+                  <select value={notes[p.id] ?? ""} onChange={e => setNotes(n => ({ ...n, [p.id]: e.target.value === "" ? null : Number(e.target.value) }))}
+                    style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 100, padding: "6px 10px", fontSize: 13, color: ratingColor(notes[p.id] ?? null), fontWeight: 700 }}>
+                    <option value="">No rating</option>
                     {[1, 2, 3, 4, 5].map(v => <option key={v} value={v}>Rating {v}</option>)}
                   </select>
                 )}
@@ -7012,7 +7173,8 @@ function TeamPrintReport({ team, rows, otherLabels, advanced, teamOff, teamDef, 
       const summary = [];
       for (const p of roster || []) {
         const entries = (await storeGet("training:" + p.name)) || [];
-        const avg = entries.length ? entries.reduce((s, e) => s + (Number(e.eval) || 0), 0) / entries.length : null;
+        const rated = entries.filter(e => e.eval !== null && e.eval !== undefined);
+        const avg = rated.length ? rated.reduce((s, e) => s + Number(e.eval), 0) / rated.length : null;
         summary.push({ name: p.name, sessions: entries.length, avg });
       }
       setTrainingSummary(summary);
@@ -7025,22 +7187,22 @@ function TeamPrintReport({ team, rows, otherLabels, advanced, teamOff, teamDef, 
       <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 20 }}>Report generated on {new Date().toLocaleDateString("en-US")}</div>
 
       <h2 style={{ fontSize: 16, marginBottom: 8 }}>Standings</h2>
-      <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 12, marginBottom: 20 }}>
+      <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 10, marginBottom: 20, tableLayout: "fixed" }}>
         <thead><tr>
-          <th style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>#</th>
-          <th style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>Player</th>
-          <th style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>Games</th>
-          <th style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>Pts/game</th>
-          {otherLabels.map(l => <th key={l} style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>{l}</th>)}
+          <th style={{ border: `1px solid ${LINE}`, padding: "3px 4px", textAlign: "left" }}>#</th>
+          <th style={{ border: `1px solid ${LINE}`, padding: "3px 4px", textAlign: "left" }}>Player</th>
+          <th style={{ border: `1px solid ${LINE}`, padding: "3px 4px", textAlign: "left" }}>Games</th>
+          <th style={{ border: `1px solid ${LINE}`, padding: "3px 4px", textAlign: "left" }}>Pts/game</th>
+          {otherLabels.map(l => <th key={l} style={{ border: `1px solid ${LINE}`, padding: "3px 4px", textAlign: "left" }}>{l}</th>)}
         </tr></thead>
         <tbody>
           {rows.map((r, i) => (
             <tr key={r.name}>
-              <td style={{ border: `1px solid ${LINE}`, padding: 4 }}>{i + 1}</td>
-              <td style={{ border: `1px solid ${LINE}`, padding: 4 }}>{r.name}</td>
-              <td style={{ border: `1px solid ${LINE}`, padding: 4 }}>{r.games}</td>
-              <td style={{ border: `1px solid ${LINE}`, padding: 4 }}>{r.ppg !== null ? r.ppg.toFixed(1) : "–"}</td>
-              {r.others.map((v, j) => <td key={j} style={{ border: `1px solid ${LINE}`, padding: 4 }}>{formatStatValue(otherLabels[j], v)}</td>)}
+              <td style={{ border: `1px solid ${LINE}`, padding: "3px 4px" }}>{i + 1}</td>
+              <td style={{ border: `1px solid ${LINE}`, padding: "3px 4px" }}>{r.name}</td>
+              <td style={{ border: `1px solid ${LINE}`, padding: "3px 4px" }}>{r.games}</td>
+              <td style={{ border: `1px solid ${LINE}`, padding: "3px 4px" }}>{r.ppg !== null ? r.ppg.toFixed(1) : "–"}</td>
+              {r.others.map((v, j) => <td key={j} style={{ border: `1px solid ${LINE}`, padding: "3px 4px" }}>{formatStatValue(otherLabels[j], v)}</td>)}
             </tr>
           ))}
         </tbody>
