@@ -470,7 +470,7 @@ const SCOUT_STAT_SCHEMA = [
   { key: "pctlf", label: "% LF", pct: true, group: "Shooting" },
   { key: "efg", label: "eFG%", pct: true, group: "Shooting" },
   { key: "ts", label: "TS%", pct: true, group: "Shooting" },
-  { key: "ftafga", label: "FTA/FGA", pct: true, group: "Shooting" },
+  { key: "ftafga", label: "FTA/FGA", group: "Shooting" },
   { key: "ro", label: "Off. rebounds", group: "Rebounds & Ball" },
   { key: "rd", label: "Def. rebounds", group: "Rebounds & Ball" },
   { key: "rt", label: "Total rebounds", group: "Rebounds & Ball" },
@@ -506,7 +506,7 @@ const SCOUT_STAT_SCHEMA = [
   { key: "dPct3", label: "% 3pt allowed", pct: true, lowerBetter: true, group: "Defense (opponent)" },
   { key: "dEfg", label: "eFG% allowed", pct: true, lowerBetter: true, group: "Defense (opponent)" },
   { key: "dPctbp", label: "% Turnovers forced", pct: true, group: "Defense (opponent)" },
-  { key: "dFtafga", label: "FTA/FGA allowed", pct: true, lowerBetter: true, group: "Defense (opponent)" },
+  { key: "dFtafga", label: "FTA/FGA allowed", lowerBetter: true, group: "Defense (opponent)" },
 ];
 const SCOUT_KEY_BY_LABEL = {};
 SCOUT_STAT_SCHEMA.forEach(s => { SCOUT_KEY_BY_LABEL[normTag(s.label)] = s.key; });
@@ -684,6 +684,23 @@ async function loadTagCategories() {
 async function saveTagCategories(cats) {
   TAG_CATEGORIES = cats;
   await storeSet("tag_categories", cats);
+}
+
+// BUG RÉEL CORRIGÉ : la catégorie "Player" (Settings) est une liste SÉPARÉE du roster, qui
+// pouvait se désynchroniser silencieusement (joueur renommé, nouveau joueur ajouté, sans
+// jamais rouvrir Settings pour la resynchroniser). Un joueur pourtant bien enregistré était
+// alors traité comme "non reconnu" à l'import d'un fichier de coding, et son nom brut de
+// colonne devenait sa nouvelle identité au lieu de son vrai nom — donnant l'impression qu'un
+// nouveau joueur avait été "créé" (doublon). On resynchronise donc TOUJOURS cette liste
+// depuis le roster actuel juste avant de lire un fichier de coding, plutôt que de compter sur
+// une synchronisation manuelle que le coach pourrait oublier.
+async function syncPlayerCategoryFromRoster(roster) {
+  const cats = currentTagCategories();
+  const rosterNames = roster.map(p => p.name);
+  const existing = cats["Player"] || [];
+  const merged = Array.from(new Set([...rosterNames, ...existing]));
+  if (merged.length === existing.length && merged.every((n, i) => n === existing[i])) return; // déjà à jour
+  await saveTagCategories({ ...cats, Player: merged });
 }
 
 // Deuxième jeu de catégories, totalement indépendant du premier — utilisé uniquement par
@@ -2156,6 +2173,7 @@ export default function App() {
               const id = uid();
               const record = { id, date: meta.date, opponent: meta.opponent, season: currentSeason, plays: parsed.plays };
               await storeSet("match:" + id, record);
+              if (parsed.fileDataUrl) await storeSet("match_file:" + id, { name: parsed.fileName || "match.xlsx", dataUrl: parsed.fileDataUrl });
               const newIdx = [...matchesIndex, { id, date: meta.date, opponent: meta.opponent, season: currentSeason, playsCount: parsed.plays.length }]
                 .sort((a, b) => a.date.localeCompare(b.date));
               await storeSet("match_index", newIdx);
@@ -2192,6 +2210,7 @@ export default function App() {
               const id = uid();
               const record = { id, date: meta.date, opponent: meta.opponent, season: currentSeason, opponentScore: meta.opponentScore ?? null, teamRow: parsed.teamRow || null, rows: parsed.rows };
               await storeSet("boxscore:" + id, record);
+              if (parsed.fileDataUrl) await storeSet("boxscore_file:" + id, { name: parsed.fileName || "boxscore.xlsx", dataUrl: parsed.fileDataUrl });
               const newIdx = [...boxScoreIndex, { id, date: meta.date, opponent: meta.opponent, season: currentSeason, matchedCount: parsed.matchedCount }]
                 .sort((a, b) => a.date.localeCompare(b.date));
               await storeSet("boxscore_index", newIdx);
@@ -2455,10 +2474,12 @@ async function approveDeletion(req) {
     const idx = (await rawGet(p + "match_index")) || [];
     await rawSet(p + "match_index", idx.filter(m => m.id !== req.meta.id));
     await rawDelete(p + "match:" + req.meta.id);
+    await rawDelete(p + "match_file:" + req.meta.id);
   } else if (req.type === "boxscore") {
     const idx = (await rawGet(p + "boxscore_index")) || [];
     await rawSet(p + "boxscore_index", idx.filter(m => m.id !== req.meta.id));
     await rawDelete(p + "boxscore:" + req.meta.id);
+    await rawDelete(p + "boxscore_file:" + req.meta.id);
   } else if (req.type === "player") {
     const roster = (await rawGet(p + "roster")) || [];
     await rawSet(p + "roster", roster.filter(pl => pl.id !== req.meta.id));
@@ -3343,10 +3364,19 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch }) {
     if (!file) return;
     setFileErr(""); setPreview(null);
     try {
+      await syncPlayerCategoryFromRoster(roster);
       const buf = await file.arrayBuffer();
       const parsed = parseMatchFile(buf);
       if (!parsed.plays.length) throw new Error("No action attributed to a roster player was found.");
-      setPreview(parsed);
+      // Garde une copie du fichier original en base64, pour pouvoir le rouvrir plus tard —
+      // taille raisonnable pour un fichier de coding (quelques dizaines de Ko en général).
+      const fileDataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      setPreview({ ...parsed, fileName: file.name, fileDataUrl });
     } catch (err) {
       setFileErr(err.message || "Error reading the file.");
     }
@@ -3359,6 +3389,18 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch }) {
     setBusy(false);
     setPreview(null); setOpponent("");
     if (fileRef.current) fileRef.current.value = "";
+  }
+
+  async function openFile(id) {
+    const f = await storeGet("match_file:" + id);
+    if (!f) return;
+    const a = document.createElement("a");
+    a.href = f.dataUrl;
+    a.download = f.name;
+    a.target = "_blank";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
   }
 
   return (
@@ -3427,7 +3469,10 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch }) {
                   <button onClick={() => setConfirmDeleteId(null)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Cancel</button>
                 </div>
               ) : (
-                <button onClick={() => setConfirmDeleteId(m.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
+                <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                  <button onClick={() => openFile(m.id)} title="Open the original file" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Download size={15} /></button>
+                  <button onClick={() => setConfirmDeleteId(m.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
+                </div>
               )}
             </div>
           ))}
@@ -3868,19 +3913,30 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
           <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Match by match</h2>
           {/* Police et espacement volontairement compacts pour que le tableau tienne sur la
               largeur de la page à l'export — un tableau "overflow-x: auto" comme à l'écran ne
-              fonctionne pas dans un PDF statique, il serait simplement coupé sans possibilité de défiler. */}
-          <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 9.5, marginBottom: 12, tableLayout: "fixed" }}>
-            <thead><tr>
-              <th style={{ border: `1px solid ${LINE}`, padding: "3px 4px", textAlign: "left" }}>Date</th>
-              <th style={{ border: `1px solid ${LINE}`, padding: "3px 4px", textAlign: "left" }}>Opponent</th>
-              {box.statLabels.map(l => <th key={l} style={{ border: `1px solid ${LINE}`, padding: "3px 4px", textAlign: "left" }}>{friendlyStatLabel(l)}</th>)}
+              fonctionne pas dans un PDF statique, il serait simplement coupé sans possibilité de défiler.
+              Titres tournés à 90° (lus de bas en haut, comme un tableur) pour libérer beaucoup
+              plus de largeur par colonne — les valeurs peuvent aussi revenir à la ligne si besoin
+              (sinon un nombre comme "-18.0" ou "25.0%" déborde visuellement sur la colonne suivante). */}
+          <table style={{ borderCollapse: "collapse", width: "100%", marginBottom: 12, tableLayout: "fixed" }}>
+            <thead><tr style={{ height: 110 }}>
+              <th style={{ border: `1px solid ${LINE}`, padding: "4px 3px", verticalAlign: "bottom" }}>
+                <div style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", fontSize: 9, fontWeight: 700, whiteSpace: "nowrap" }}>Date</div>
+              </th>
+              <th style={{ border: `1px solid ${LINE}`, padding: "4px 3px", verticalAlign: "bottom" }}>
+                <div style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", fontSize: 9, fontWeight: 700, whiteSpace: "nowrap" }}>Opponent</div>
+              </th>
+              {box.statLabels.map(l => (
+                <th key={l} style={{ border: `1px solid ${LINE}`, padding: "4px 3px", verticalAlign: "bottom" }}>
+                  <div style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", fontSize: 9, fontWeight: 700, whiteSpace: "nowrap" }}>{friendlyStatLabel(l)}</div>
+                </th>
+              ))}
             </tr></thead>
             <tbody>
               {box.entries.map((e, i) => (
                 <tr key={i}>
-                  <td style={{ border: `1px solid ${LINE}`, padding: "3px 4px" }}>{e.date}</td>
-                  <td style={{ border: `1px solid ${LINE}`, padding: "3px 4px" }}>{e.opponent}</td>
-                  {box.statLabels.map(l => <td key={l} style={{ border: `1px solid ${LINE}`, padding: "3px 4px", fontFamily: "ui-monospace, monospace" }}>{formatStatValue(l, e.stats[l])}</td>)}
+                  <td style={{ border: `1px solid ${LINE}`, padding: "4px 3px", fontSize: 8.5, lineHeight: 1.2, whiteSpace: "normal", wordBreak: "break-word", overflow: "hidden" }}>{e.date}</td>
+                  <td style={{ border: `1px solid ${LINE}`, padding: "4px 3px", fontSize: 8.5, lineHeight: 1.2, whiteSpace: "normal", wordBreak: "break-word", overflow: "hidden" }}>{e.opponent}</td>
+                  {box.statLabels.map(l => <td key={l} style={{ border: `1px solid ${LINE}`, padding: "4px 3px", fontFamily: "ui-monospace, monospace", fontSize: 8.5, lineHeight: 1.2, whiteSpace: "normal", wordBreak: "break-word", overflow: "hidden" }}>{formatStatValue(l, e.stats[l])}</td>)}
                 </tr>
               ))}
             </tbody>
@@ -4285,6 +4341,18 @@ function BoxScoreTab({ roster, index, onImported, onDelete }) {
     setConfirmDeleteId(null);
   }
 
+  async function openFile(id) {
+    const f = await storeGet("boxscore_file:" + id);
+    if (!f) return;
+    const a = document.createElement("a");
+    a.href = f.dataUrl;
+    a.download = f.name;
+    a.target = "_blank";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  }
+
   useEffect(() => { storeGet("team_name").then(v => { if (v) setTeamName(v); }); }, []);
   async function saveTeamName(v) { setTeamName(v); await storeSet("team_name", v); }
 
@@ -4296,7 +4364,13 @@ function BoxScoreTab({ roster, index, onImported, onDelete }) {
       const buf = await file.arrayBuffer();
       const parsed = parseBoxScoreFile(buf, roster, teamName);
       if (!parsed.matchedCount) throw new Error("No row could be matched to a roster player (the 1st column must contain the player's name).");
-      setPreview(parsed);
+      const fileDataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      setPreview({ ...parsed, fileName: file.name, fileDataUrl });
     } catch (err) { setFileErr(err.message || "Error reading the file."); }
   }
 
@@ -4386,7 +4460,10 @@ function BoxScoreTab({ roster, index, onImported, onDelete }) {
                   <button onClick={() => setConfirmDeleteId(null)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Cancel</button>
                 </div>
               ) : (
-                <button onClick={() => setConfirmDeleteId(m.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
+                <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                  <button onClick={() => openFile(m.id)} title="Open the original file" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Download size={15} /></button>
+                  <button onClick={() => setConfirmDeleteId(m.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
+                </div>
               )}
             </div>
           ))}
@@ -5576,7 +5653,7 @@ function ourTeamAsScoutStats(advanced, box) {
     poss: avg("poss"), ortg: avg("ortg"), drtg: avg("drtg"),
     efg: weighted.efg ?? undefined,
     pctbp: weighted.tovPct ?? undefined,
-    ftafga: avg("ftRate") !== undefined ? avg("ftRate") * 100 : undefined,
+    ftafga: avg("ftRate"),
     pts: avg("pts"),
     ptse: advanced.perMatch.some(m => m.opponentScore !== null && m.opponentScore !== undefined)
       ? advanced.perMatch.map(m => m.opponentScore).filter(v => v !== null && v !== undefined).reduce((s, v, _, arr) => s + v / arr.length, 0) : undefined,
@@ -7205,21 +7282,10 @@ function CollectiveTraining({ roster }) {
 
 function TeamPrintReport({ team, rows, otherLabels, advanced, teamOff, teamDef, roster }) {
   const [resources, setResources] = useState([]);
-  const [trainingSummary, setTrainingSummary] = useState([]);
 
   useEffect(() => {
     storeGet("team_resources").then(r => setResources(((r || []).sort((a, b) => b.addedAt.localeCompare(a.addedAt)))));
-    (async () => {
-      const summary = [];
-      for (const p of roster || []) {
-        const entries = (await storeGet("training:" + p.name)) || [];
-        const rated = entries.filter(e => e.eval !== null && e.eval !== undefined);
-        const avg = rated.length ? rated.reduce((s, e) => s + Number(e.eval), 0) / rated.length : null;
-        summary.push({ name: p.name, sessions: entries.length, avg });
-      }
-      setTrainingSummary(summary);
-    })();
-  }, [roster]);
+  }, []);
 
   return (
     <div style={{ padding: 24, background: INK, color: PAPER }}>
@@ -7259,26 +7325,6 @@ function TeamPrintReport({ team, rows, otherLabels, advanced, teamOff, teamDef, 
         <ul style={{ fontSize: 12.5, paddingLeft: 18 }}>
           {resources.map(r => <li key={r.id} style={{ marginBottom: 4 }}>{r.title} — {r.type} — {r.url}</li>)}
         </ul>
-      )}
-
-      <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Team Training</h2>
-      {trainingSummary.length === 0 ? <p>No player recorded.</p> : (
-        <table style={{ borderCollapse: "collapse", width: "100%", fontSize: 12 }}>
-          <thead><tr>
-            <th style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>Player</th>
-            <th style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>Sessions</th>
-            <th style={{ border: `1px solid ${LINE}`, padding: 4, textAlign: "left" }}>Average rating</th>
-          </tr></thead>
-          <tbody>
-            {trainingSummary.map(t => (
-              <tr key={t.name}>
-                <td style={{ border: `1px solid ${LINE}`, padding: 4 }}>{t.name}</td>
-                <td style={{ border: `1px solid ${LINE}`, padding: 4 }}>{t.sessions}</td>
-                <td style={{ border: `1px solid ${LINE}`, padding: 4 }}>{t.avg !== null ? t.avg.toFixed(1) + "/5" : "–"}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
       )}
     </div>
   );
