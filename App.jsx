@@ -3916,18 +3916,22 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
               fonctionne pas dans un PDF statique, il serait simplement coupé sans possibilité de défiler.
               Titres tournés à 90° (lus de bas en haut, comme un tableur) pour libérer beaucoup
               plus de largeur par colonne — les valeurs peuvent aussi revenir à la ligne si besoin
-              (sinon un nombre comme "-18.0" ou "25.0%" déborde visuellement sur la colonne suivante). */}
+              (sinon un nombre comme "-18.0" ou "25.0%" déborde visuellement sur la colonne suivante).
+              CORRECTIF : writing-mode (utilisé précédemment) n'est pas fiable avec html2canvas
+              (moteur de rendu utilisé pour l'export PDF, différent d'un vrai navigateur) — le texte
+              apparaissait à l'envers. Une simple rotation CSS (transform: rotate) est la technique
+              standard, bien mieux supportée par ce type de moteur de rendu vers canevas. */}
           <table style={{ borderCollapse: "collapse", width: "100%", marginBottom: 12, tableLayout: "fixed" }}>
             <thead><tr style={{ height: 110 }}>
               <th style={{ border: `1px solid ${LINE}`, padding: "4px 3px", verticalAlign: "bottom" }}>
-                <div style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", fontSize: 9, fontWeight: 700, whiteSpace: "nowrap" }}>Date</div>
+                <div style={{ transform: "rotate(-90deg)", transformOrigin: "center", fontSize: 9, fontWeight: 700, whiteSpace: "nowrap", width: 20 }}>Date</div>
               </th>
               <th style={{ border: `1px solid ${LINE}`, padding: "4px 3px", verticalAlign: "bottom" }}>
-                <div style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", fontSize: 9, fontWeight: 700, whiteSpace: "nowrap" }}>Opponent</div>
+                <div style={{ transform: "rotate(-90deg)", transformOrigin: "center", fontSize: 9, fontWeight: 700, whiteSpace: "nowrap", width: 20 }}>Opponent</div>
               </th>
               {box.statLabels.map(l => (
                 <th key={l} style={{ border: `1px solid ${LINE}`, padding: "4px 3px", verticalAlign: "bottom" }}>
-                  <div style={{ writingMode: "vertical-rl", transform: "rotate(180deg)", fontSize: 9, fontWeight: 700, whiteSpace: "nowrap" }}>{friendlyStatLabel(l)}</div>
+                  <div style={{ transform: "rotate(-90deg)", transformOrigin: "center", fontSize: 9, fontWeight: 700, whiteSpace: "nowrap", width: 20 }}>{friendlyStatLabel(l)}</div>
                 </th>
               ))}
             </tr></thead>
