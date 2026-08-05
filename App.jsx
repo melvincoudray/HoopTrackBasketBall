@@ -119,6 +119,14 @@ function tryDownload(full, filename) {
 // html2canvas — bibliothèques disponibles uniquement sur le site déployé (Netlify), pas dans
 // l'artifact Claude. Si l'import échoue (contexte Claude), renvoie null pour que l'appelant
 // retombe sur l'export HTML existant, qui lui fonctionne partout.
+// Réglages volontairement choisis pour un fichier LÉGER : scale 1.5 (au lieu de 2 — le texte
+// reste net pour un rapport, alors que l'ancien réglage visait une netteté "impression photo"
+// inutile ici) et JPEG compressé (au lieu de PNG sans perte, bien plus lourd pour ce type de
+// contenu texte + aplats de couleur).
+// Pagination "intelligente" : les éléments marqués data-no-split (cartes de graphiques) ne
+// sont jamais coupés par un saut de page — si une coupure "naturelle" tomberait au milieu
+// d'un graphique, on la déplace juste avant lui, quitte à créer une page plus courte (et donc
+// plus de pages au total, ce qui est très bien) plutôt que de couper un graphique en deux.
 async function tryExportPdf(elementId, filename, theme = "light") {
   const el = document.getElementById(elementId);
   if (!el) return false;
@@ -128,21 +136,52 @@ async function tryExportPdf(elementId, filename, theme = "light") {
       import("html2canvas"),
     ]);
     const bg = theme === "dark" ? INK : "#ffffff";
-    const canvas = await html2canvas(el, { backgroundColor: bg, scale: 2, useCORS: true });
-    const imgData = canvas.toDataURL("image/png");
+
+    // Repère chaque élément "à ne pas couper" AVANT la capture, en pixels DOM relatifs au
+    // haut de l'élément exporté.
+    const elTop = el.getBoundingClientRect().top;
+    const noSplitEls = Array.from(el.querySelectorAll('[data-no-split="true"]')).map(node => {
+      const r = node.getBoundingClientRect();
+      return { top: r.top - elTop, bottom: r.bottom - elTop };
+    });
+
+    const canvas = await html2canvas(el, { backgroundColor: bg, scale: 1.5, useCORS: true });
+    const imgData = canvas.toDataURL("image/jpeg", 0.88);
     const pageWidth = 595.28; // A4 en points (72dpi)
     const pageHeight = 841.89;
     const imgWidth = pageWidth;
     const imgHeight = (canvas.height * imgWidth) / canvas.width;
-    const pdf = new jsPDF({ unit: "pt", format: "a4" });
-    let heightLeft = imgHeight, position = 0;
-    pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
-    heightLeft -= pageHeight;
-    while (heightLeft > 0) {
-      position = heightLeft - imgHeight;
-      pdf.addPage();
-      pdf.addImage(imgData, "PNG", 0, position, imgWidth, imgHeight);
-      heightLeft -= pageHeight;
+    // Conversion des rectangles DOM (px) vers l'échelle de l'image finale dans le PDF (pt) :
+    // même ratio que celui utilisé pour convertir la hauteur totale de l'image.
+    const domToImgRatio = imgWidth / el.getBoundingClientRect().width;
+    const noSplitRanges = noSplitEls.map(r => ({ top: r.top * domToImgRatio, bottom: r.bottom * domToImgRatio }));
+
+    const pdf = new jsPDF({ unit: "pt", format: "a4", compress: true });
+    let pageTop = 0; // position (en pt, dans l'image totale) du haut de la page courante
+    let firstPage = true;
+    while (pageTop < imgHeight - 0.5) {
+      let pageBottom = Math.min(pageTop + pageHeight, imgHeight);
+      // Si un élément protégé chevauche cette limite de page (commence avant, finit après),
+      // on raccourcit la page pour s'arrêter juste avant lui — il passera entièrement sur la
+      // page suivante. On ignore les éléments plus grands qu'une page entière : rien à faire
+      // dans ce cas, ils seront coupés de toute façon faute de place, mais c'est un cas limite.
+      for (const r of noSplitRanges) {
+        const spansBreak = r.top < pageBottom - 0.5 && r.bottom > pageBottom + 0.5;
+        const fitsOnOnePage = (r.bottom - r.top) <= pageHeight;
+        if (spansBreak && fitsOnOnePage && r.top > pageTop + 0.5) {
+          pageBottom = r.top;
+        }
+      }
+      if (!firstPage) pdf.addPage();
+      pdf.addImage(imgData, "JPEG", 0, -pageTop, imgWidth, imgHeight);
+      // Masque tout ce qui dépasse de la page courante avec un rectangle de la couleur de
+      // fond, pour que le contenu des pages suivantes n'apparaisse pas en dessous.
+      if (pageBottom < imgHeight - 0.5) {
+        pdf.setFillColor(bg);
+        pdf.rect(0, pageBottom - pageTop, pageWidth, pageHeight - (pageBottom - pageTop), "F");
+      }
+      pageTop = pageBottom;
+      firstPage = false;
     }
     pdf.save(filename.replace(/\.html$/, ".pdf"));
     return true;
@@ -1130,7 +1169,7 @@ function BreakdownChart({ title, data }) {
 function MetricBarList({ title, items, color = AMBER }) {
   if (!items.length) return null;
   return (
-    <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, flex: "1 1 320px" }}>
+    <div data-no-split="true" style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, flex: "1 1 320px" }}>
       <div style={{ fontSize: 13, fontWeight: 700, color: PAPER, marginBottom: 4 }}>{title}</div>
       <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 0.55fr 0.55fr", padding: "8px 0 6px", fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.05em", color: "#5C6470", borderBottom: `1px solid ${LINE}` }}>
         <div>Name</div><div>Frequency</div><div>PPPP</div><div>Open</div>
@@ -1154,7 +1193,7 @@ function SimpleBarChart({ title, data, color = AMBER }) {
   if (!data.length) return null;
   const chartData = data.map(d => ({ name: d.name, "Frequency %": Number((d.freq ?? (100 * d.value)).toFixed(1)) }));
   return (
-    <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: "18px 10px 8px 0", flex: "1 1 320px" }}>
+    <div data-no-split="true" style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: "18px 10px 8px 0", flex: "1 1 320px" }}>
       <div style={{ fontSize: 13, fontWeight: 700, color: PAPER, padding: "0 18px 12px" }}>{title}</div>
       <ResponsiveContainer width="100%" height={Math.max(160, chartData.length * 36)}>
         <ComposedChart data={chartData} layout="vertical" margin={{ top: 0, right: 24, left: 0, bottom: 0 }}>
@@ -1171,7 +1210,7 @@ function SimpleBarChart({ title, data, color = AMBER }) {
 
 function DonutCard({ title, data, note, unit }) {
   return (
-    <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, display: "flex", gap: 18, alignItems: "center", flex: "1 1 280px" }}>
+    <div data-no-split="true" style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, display: "flex", gap: 18, alignItems: "center", flex: "1 1 280px" }}>
       <DonutChart data={data} unit={unit} />
       <div style={{ flex: 1 }}>
         <div style={{ fontSize: 12, color: "#5C6470", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>{title}</div>
@@ -3887,7 +3926,7 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
     .map(e => ({ match: e.date + " " + (WELLNESS_SLOTS.find(s => s.key === e.slot)?.label || e.slot).slice(0, 3), physical: e.physical, mental: e.mental }));
 
   return (
-    <div style={{ padding: 24, background: INK, color: PAPER }}>
+    <div style={{ padding: 24, background: "#ffffff", color: "#1A1D24" }}>
       <h1 style={{ fontSize: 24, marginBottom: 4 }}>{playerName}</h1>
       <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 20 }}>{position || "Position not set"} · Report generated on {new Date().toLocaleDateString("en-US")}</div>
 
@@ -4097,9 +4136,9 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
           <div style={{ fontSize: 12.5, color: "#5C6470" }}>{games.length} match{games.length !== 1 ? "s" : ""} coded · {box.entries.length} box score{box.entries.length !== 1 ? "s" : ""}</div>
           <button onClick={async () => {
             const filename = `fiche_${playerName}_${todayLocal()}.html`;
-            const pdfOk = await tryExportPdf("player-print-content", filename, "dark");
+            const pdfOk = await tryExportPdf("player-print-content", filename, "light");
             if (pdfOk) return;
-            const r = buildReportHtml("player-print-content", filename, "dark");
+            const r = buildReportHtml("player-print-content", filename, "light");
             if (!r) { alert("Content not found — try again after the page has fully loaded."); return; }
             tryDownload(r.full, r.filename);
             setExportReport(r);
@@ -4581,18 +4620,18 @@ function ObjectiveForm({ initial, linkableStats, onSave, onCancel, busy }) {
           <input value={description} onChange={e => setDescription(e.target.value)} placeholder="e.g. Increase % Open on PnR" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
         </div>
         <div style={{ width: 160 }}>
-          <label style={labelStyle}>Sens souhaité</label>
+          <label style={labelStyle}>Desired direction</label>
           <select value={direction} onChange={e => setDirection(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }}>
-            <option value="up">Augmenter ↑</option>
-            <option value="down">Diminuer ↓</option>
+            <option value="up">Increase ↑</option>
+            <option value="down">Decrease ↓</option>
           </select>
         </div>
       </div>
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 12 }}>
         <div style={{ width: 320 }}>
-          <label style={labelStyle}>Stat liée (mise à jour automatique)</label>
+          <label style={labelStyle}>Linked stat (updates automatically)</label>
           <select value={linkedStat} onChange={e => handleLinkedStatChange(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }}>
-            <option value="">— Saisie manuelle —</option>
+            <option value="">— Manual entry —</option>
             {boxKeys.length > 0 && (
               <optgroup label="Box score">
                 {boxKeys.map(l => <option key={l} value={l}>{l}</option>)}
@@ -4615,7 +4654,7 @@ function ObjectiveForm({ initial, linkableStats, onSave, onCancel, busy }) {
         </div>
         {!linkedStat && (
           <div style={{ width: 150 }}>
-            <label style={labelStyle}>Stat actuelle (manuelle)</label>
+            <label style={labelStyle}>Current stat (manual)</label>
             <input type="number" value={manualCurrent} onChange={e => setManualCurrent(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
           </div>
         )}
@@ -5710,7 +5749,7 @@ const RATING_LEVELS = [
   { value: 4, label: "Under control", color: "#8BC34A" },
   { value: 5, label: "Master", color: "#2D6A1F" },
 ];
-const SKILL_CATEGORIES = ["Finishing", "Shooting", "Drive", "Perimeter defense", "Inside defense", "Jeu sans Ballon", "Rebound", "Speed", "Force", "Passing"];
+const SKILL_CATEGORIES = ["Finishing", "Shooting", "Drive", "Perimeter defense", "Inside defense", "Off ball", "Rebound", "Speed", "Force", "Passing"];
 const CLOSEOUT_LEVELS = [
   { key: "easy", label: "Control the Drive", color: TEAL },
   { key: "medium", label: "Medium", color: AMBER },
@@ -5729,6 +5768,29 @@ function RoseChart({ ratings, categories = SKILL_CATEGORIES, size = 420, emphasi
   const sorted = [...categories].sort((a, b) => (ratings[b] || 1) - (ratings[a] || 1));
   const topStrengths = emphasizeExtremes ? new Set(sorted.slice(0, 2)) : new Set();
   const worstWeakness = emphasizeExtremes ? sorted[sorted.length - 1] : null;
+  // BUG RÉEL CORRIGÉ : quand deux catégories mises en avant (force/faiblesse, texte agrandi)
+  // sont adjacentes sur la roue, leurs libellés se chevauchaient. Un premier correctif les
+  // éloignait bien trop (l'un se retrouvait quasiment à l'opposé de la roue) — on utilise
+  // maintenant un léger décalage angulaire (les deux mots s'écartent un peu l'un de l'autre,
+  // tangentiellement) combiné à un tout petit décalage de rayon, pour qu'ils restent proches
+  // de la roue sans jamais se toucher.
+  const emphasizedIndices = categories.map((cat, i) => ({ cat, i, emphasized: topStrengths.has(cat) || cat === worstWeakness })).filter(x => x.emphasized);
+  const staggerExtra = {}, angleNudge = {};
+  emphasizedIndices.forEach((entry, idx) => {
+    const conflict = emphasizedIndices.slice(0, idx).find(other => {
+      const diff = Math.min(Math.abs(entry.i - other.i), n - Math.abs(entry.i - other.i));
+      return diff <= 2; // catégories voisines ou quasi-voisines sur la roue
+    });
+    if (conflict) {
+      staggerExtra[entry.cat] = 34;
+      // S'écarte du côté opposé à l'autre libellé en conflit, le long du cercle.
+      const forward = (entry.i - conflict.i + n) % n <= n / 2;
+      angleNudge[entry.cat] = forward ? 0.16 : -0.16;
+    } else {
+      staggerExtra[entry.cat] = 14;
+      angleNudge[entry.cat] = 0;
+    }
+  });
 
   function wedgePath(i, value) {
     const r = Math.max(14, (maxR * value) / 5);
@@ -5738,8 +5800,8 @@ function RoseChart({ ratings, categories = SKILL_CATEGORIES, size = 420, emphasi
     const x1 = cx + r * Math.cos(a1), y1 = cy + r * Math.sin(a1);
     return `M ${cx} ${cy} L ${x0} ${y0} A ${r} ${r} 0 0 1 ${x1} ${y1} Z`;
   }
-  function labelPos(i, extra) {
-    const a = -Math.PI / 2 + (i + 0.5) * angleStep;
+  function labelPos(i, extra, nudge = 0) {
+    const a = -Math.PI / 2 + (i + 0.5) * angleStep + nudge;
     const r = maxR + 30 + extra;
     return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
   }
@@ -5754,11 +5816,11 @@ function RoseChart({ ratings, categories = SKILL_CATEGORIES, size = 420, emphasi
         const isStrength = topStrengths.has(cat);
         const isWeakness = cat === worstWeakness;
         const emphasis = isStrength || isWeakness;
-        const fontSize = emphasis ? 32 : 11.5;
+        const fontSize = emphasis ? 26 : 11.5;
         const color = isStrength ? "#3DDC6F" : isWeakness ? "#FF5C4D" : "#C9CFD8";
         const weight = emphasis ? 800 : 400;
         const words = cat.split(" ");
-        const p = labelPos(i, emphasis ? 26 : 0);
+        const p = labelPos(i, emphasis ? staggerExtra[cat] : 0, emphasis ? angleNudge[cat] : 0);
         return (
           <text key={cat} x={p.x} y={p.y} fill={color} fontSize={fontSize} fontWeight={weight} textAnchor="middle" dominantBaseline="middle" style={{ fontFamily: "Inter, sans-serif" }}>
             {words.map((w, wi) => (
@@ -5789,7 +5851,19 @@ function useScoutingReport(teamName) {
     setCollective(c || { videoUrl: "", notes: "" });
     const ids = (await storeGet("scouting_players:" + teamName)) || [];
     const out = [];
-    for (const id of ids) { const p = await storeGet("scouting_player:" + teamName + ":" + id); if (p) out.push(p); }
+    for (const id of ids) {
+      const p = await storeGet("scouting_player:" + teamName + ":" + id);
+      if (!p) continue;
+      // Migration silencieuse : "Force" a été traduit par erreur en "Strength" ("force
+      // physique" n'a pas le même sens que "Strength" en anglais) — les notes déjà données
+      // sous l'ancien nom sont reprises sous le bon, pour ne rien perdre.
+      if (p.ratings && p.ratings.Strength !== undefined && p.ratings.Force === undefined) {
+        const { Strength, ...rest } = p.ratings;
+        p.ratings = { ...rest, Force: Strength };
+        await storeSet("scouting_player:" + teamName + ":" + id, p);
+      }
+      out.push(p);
+    }
     setPlayers(out);
     setLoading(false);
   }
@@ -5954,8 +6028,8 @@ function ScoutingPlayerForm({ initial, onSave, onCancel, busy }) {
         </div>
         <div style={{ display: "flex", gap: 10, flexWrap: "wrap", flex: 1 }}>
           <div style={{ width: 160 }}><label style={labelStyle}>First name</label><input value={firstName} onChange={e => setFirstName(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} /></div>
-          <div style={{ width: 160 }}><label style={labelStyle}>Nom</label><input value={lastName} onChange={e => setLastName(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} /></div>
-          <div style={{ width: 90 }}><label style={labelStyle}>N°</label><input value={jersey} onChange={e => setJersey(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} /></div>
+          <div style={{ width: 160 }}><label style={labelStyle}>Last name</label><input value={lastName} onChange={e => setLastName(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} /></div>
+          <div style={{ width: 90 }}><label style={labelStyle}>No.</label><input value={jersey} onChange={e => setJersey(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} /></div>
           <div style={{ width: 140 }}>
             <label style={labelStyle}>Position</label>
             <select value={position} onChange={e => setPosition(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }}>
@@ -6008,10 +6082,35 @@ function ScoutingPlayerForm({ initial, onSave, onCancel, busy }) {
       <div style={{ marginBottom: 14 }}>
         <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: "#5C6470", marginBottom: 8 }}>Stats to highlight (e.g. "9.0" / "Pts")</div>
         {highlights.map((h, i) => (
-          <div key={i} style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "center" }}>
-            <input value={h.value} onChange={e => updateHighlight(i, "value", e.target.value)} placeholder="9.0 / 40%" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 110 }} />
-            <input value={h.label} onChange={e => updateHighlight(i, "label", e.target.value)} placeholder="Pts / % on PnR" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", flex: 1 }} />
-            <button onClick={() => removeHighlight(i)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer" }}><X size={14} /></button>
+          <div key={i} style={{ marginBottom: 10, padding: "8px 10px", background: PANEL2, borderRadius: 8 }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "center" }}>
+              <input value={h.value} onChange={e => updateHighlight(i, "value", e.target.value)} placeholder="9.0 / 40%" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 110 }} />
+              <input value={h.label} onChange={e => updateHighlight(i, "label", e.target.value)} placeholder="Pts / % on PnR" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", flex: 1 }} />
+              <button onClick={() => removeHighlight(i)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer" }}><X size={14} /></button>
+            </div>
+            <div style={{ display: "flex", gap: 14, alignItems: "center", fontSize: 11.5, color: "#8B93A1", flexWrap: "wrap" }}>
+              <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                Shape size
+                <input type="number" min={40} max={160} step={2} value={h.size ?? 74} onChange={e => updateHighlight(i, "size", Number(e.target.value))}
+                  style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 64, padding: "4px 8px", fontSize: 12 }} />
+                px
+              </label>
+              <label style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                Text size
+                <input type="number" min={0.6} max={2.5} step={0.1} value={h.fontScale ?? 1} onChange={e => updateHighlight(i, "fontScale", Number(e.target.value))}
+                  style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 64, padding: "4px 8px", fontSize: 12 }} />
+                ×
+              </label>
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                Color
+                {Array.from(new Set([TEAL, ...PLANNING_COLORS])).map(c => (
+                  <button key={c} type="button" onClick={() => updateHighlight(i, "color", c)} style={{
+                    width: 18, height: 18, borderRadius: "50%", background: c, cursor: "pointer", padding: 0,
+                    border: (h.color ?? TEAL) === c ? `2px solid ${PAPER}` : "2px solid transparent",
+                  }} />
+                ))}
+              </div>
+            </div>
           </div>
         ))}
         <button onClick={addHighlight} style={{ display: "flex", alignItems: "center", gap: 6, background: "none", border: `1px dashed ${LINE}`, borderRadius: 8, color: "#8B93A1", fontSize: 12.5, padding: "6px 12px", cursor: "pointer" }}>
@@ -6034,7 +6133,7 @@ function shapeForLabel(label) {
   for (const c of String(label || "")) h = (h * 31 + c.charCodeAt(0)) >>> 0;
   return STAT_SHAPES[h % STAT_SHAPES.length];
 }
-function StatShapeBadge({ label, value, size = 74 }) {
+function StatShapeBadge({ label, value, size = 74, fontScale = 1, color = TEAL }) {
   const shape = shapeForLabel(label);
   const c = size / 2;
   const shapes = {
@@ -6047,11 +6146,11 @@ function StatShapeBadge({ label, value, size = 74 }) {
   return (
     <div style={{ position: "relative", width: size, height: size, flexShrink: 0 }}>
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ position: "absolute", inset: 0 }}>
-        <g fill={TEAL} stroke="#03231F" strokeWidth={1.5}>{shapes[shape]}</g>
+        <g fill={color} stroke="#03231F" strokeWidth={1.5}>{shapes[shape]}</g>
       </svg>
       <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center", padding: 6 }}>
-        <div style={{ fontWeight: 800, fontSize: 14, color: "#03231F", lineHeight: 1.1 }}>{value}</div>
-        <div style={{ fontSize: 8, fontWeight: 700, color: "#03231F", lineHeight: 1.1 }}>{label}</div>
+        <div style={{ fontWeight: 800, fontSize: 14 * fontScale, color: "#03231F", lineHeight: 1.1 }}>{value}</div>
+        <div style={{ fontSize: 8 * fontScale, fontWeight: 700, color: "#03231F", lineHeight: 1.1 }}>{label}</div>
       </div>
     </div>
   );
@@ -6086,7 +6185,7 @@ function ScoutingPlayerCard({ player, isCoach, onEdit, onDelete }) {
           )}
 
           {player.plan && (
-            <div style={{ fontSize: 12.5, color: "#D8DCE2", marginBottom: 10, lineHeight: 1.5 }}>
+            <div style={{ fontSize: 12.5, color: "#D8DCE2", marginBottom: 10, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
               <div style={{ fontSize: 10.5, textTransform: "uppercase", color: "#5C6470", marginBottom: 4 }}>Game plan</div>
               {player.plan}
             </div>
@@ -6095,7 +6194,7 @@ function ScoutingPlayerCard({ player, isCoach, onEdit, onDelete }) {
           {player.highlights?.length > 0 && (
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
               {player.highlights.map((h, i) => (
-                <StatShapeBadge key={i} label={h.label} value={h.value} />
+                <StatShapeBadge key={i} label={h.label} value={h.value} size={h.size ?? 74} fontScale={h.fontScale ?? 1} color={h.color ?? TEAL} />
               ))}
             </div>
           )}
@@ -6160,9 +6259,9 @@ function ScoutingReportTab({ isCoach, teamNames, initialTeam }) {
                 {report.players.length > 0 && (
                   <button onClick={async () => {
                     const filename = `scouting_${selectedTeam}_${todayLocal()}.html`;
-                    const pdfOk = await tryExportPdf("scouting-print-content", filename, "dark");
+                    const pdfOk = await tryExportPdf("scouting-print-content", filename, "light");
                     if (pdfOk) return;
-                    const r = buildReportHtml("scouting-print-content", filename, "dark");
+                    const r = buildReportHtml("scouting-print-content", filename, "light");
                     if (!r) { alert("Content not found — try again after the page has fully loaded."); return; }
                     tryDownload(r.full, r.filename);
                     setExportReport(r);
@@ -6191,7 +6290,7 @@ function ScoutingReportTab({ isCoach, teamNames, initialTeam }) {
               )}
               {report.players.length > 0 && (
                 <div className="print-only" id="scouting-print-content">
-                  <div style={{ padding: 24, background: INK }}>
+                  <div style={{ padding: 24, background: "#ffffff", color: "#1A1D24" }}>
                     <h1 style={{ fontSize: 22, marginBottom: 16 }}>Scouting individuel — {selectedTeam}</h1>
                     {report.players.map(p => (
                       <div key={p.id} style={{ marginBottom: 28, pageBreakInside: "avoid" }}>
@@ -7316,7 +7415,7 @@ function TeamPrintReport({ team, rows, otherLabels, advanced, teamOff, teamDef, 
   }, []);
 
   return (
-    <div style={{ padding: 24, background: INK, color: PAPER }}>
+    <div style={{ padding: 24, background: "#ffffff", color: "#1A1D24" }}>
       <h1 style={{ fontSize: 22, marginBottom: 4 }}>{team?.name || "Team"}</h1>
       <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 20 }}>Report generated on {new Date().toLocaleDateString("en-US")}</div>
 
@@ -7766,9 +7865,9 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
         {rows.length > 0 && (
           <button onClick={async () => {
             const filename = `team_${team?.name || "export"}_${todayLocal()}.html`;
-            const pdfOk = await tryExportPdf("team-print-content", filename, "dark");
+            const pdfOk = await tryExportPdf("team-print-content", filename, "light");
             if (pdfOk) return;
-            const r = buildReportHtml("team-print-content", filename, "dark");
+            const r = buildReportHtml("team-print-content", filename, "light");
             if (!r) { alert("Content not found — try again after the page has fully loaded."); return; }
             tryDownload(r.full, r.filename);
             setExportReport(r);
