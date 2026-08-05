@@ -4576,16 +4576,32 @@ function BoxScoreTab({ roster, index, onImported, onDelete }) {
 
 // Construit la liste des stats "de coding" reliables à un objectif (fréquence, PPPP,
 // % Ouvert par playtype/play, attaque et défense) — en plus des stats de box score.
-function buildCodingStatOptions(off, def) {
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur) : seules les catégories "Playtypes" et "Plays"
+// étaient proposées comme stats liables pour un objectif — même côté défense. Ça excluait
+// toute la catégorie "Shot selection" (ex. "% tir contesté"), "Results & misc." (ex. pertes
+// de balle provoquées), "Screen defense", "Spacing", et toute catégorie personnalisée —
+// rendant impossible de fixer un objectif défensif basé sur ces stats. On parcourt maintenant
+// TOUTES les catégories (les mêmes que celles affichées dans Offense/Defense), les mêmes deux
+// côtés (attaque/défense), pour que n'importe quel tag configuré dans Settings soit liable.
+function buildCodingStatOptions(off, def, cats) {
+  const c = cats || currentTagCategories();
   const out = {};
+  const BUILTIN_CATEGORIES = ["Playtypes", "Plays", "Shot selection", "Defensive mistakes", "Screen defense", "Spacing", "Shot zone", "Results & misc."];
+  const customCategoryNames = Object.keys(c).filter(n => n !== "Player" && !BUILTIN_CATEGORIES.includes(n));
+  const allCategoryNames = [...BUILTIN_CATEGORIES, ...customCategoryNames];
+
   const addSide = (plays, sideLabel) => {
-    [...groupBreakdown(plays, PLAYTYPES_LIST()), ...groupBreakdown(plays, PLAYS_LIST())].forEach(item => {
-      out[`[${sideLabel}] ${item.label} — Fréquence`] = item.freq;
-      out[`[${sideLabel}] ${item.label} — PPPP`] = item.pppp;
-      if (item.open !== null && item.open !== undefined) out[`[${sideLabel}] ${item.label} — % Ouvert`] = item.open;
-    });
+    for (const categoryName of allCategoryNames) {
+      const tags = categoryTags(categoryName, c);
+      if (!tags.length) continue;
+      topCategoryBucket(plays, tags, tags.length).forEach(item => {
+        out[`[${sideLabel}] ${categoryName} — ${item.name} (Frequency)`] = item.freq;
+        if (item.pppp !== null && item.pppp !== undefined) out[`[${sideLabel}] ${categoryName} — ${item.name} (PPPP)`] = item.pppp;
+        if (item.open !== null && item.open !== undefined) out[`[${sideLabel}] ${categoryName} — ${item.name} (% Open)`] = item.open;
+      });
+    }
   };
-  addSide(off, "Attaque");
+  addSide(off, "Offense");
   addSide(def, "Defense");
   return out;
 }
