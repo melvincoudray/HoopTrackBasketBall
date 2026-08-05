@@ -1633,7 +1633,11 @@ function derivedMatchStats(statsObj, teamPossessions, teamMinutes) {
   if (directPctFT !== undefined) derived["% LF"] = directPctFT;
   else if (madeFT !== undefined && missedFT !== undefined && madeFT + missedFT > 0)
     derived["% LF (calculated)"] = (100 * madeFT) / (madeFT + missedFT);
-  const fgm = (made2 || 0) + (made3 || 0), fga = get(STAT_PATTERNS.fga) ?? ((made2 || 0) + (missed2 || 0) + (made3 || 0) + (missed3 || 0));
+  // BUG RÉEL CORRIGÉ (même incohérence que dans computeWeightedPlayerPercentages) : le
+  // numérateur (tirs réussis) est dérivé de "2pts/3pts Made", donc le dénominateur doit venir
+  // de la même décomposition — pas de la colonne "FG Attempted" du fichier, qui peut différer.
+  const hasBreakdown2 = made2 !== undefined || missed2 !== undefined || made3 !== undefined || missed3 !== undefined;
+  const fgm = (made2 || 0) + (made3 || 0), fga = hasBreakdown2 ? (made2 || 0) + (missed2 || 0) + (made3 || 0) + (missed3 || 0) : get(STAT_PATTERNS.fga);
   if (fga > 0) derived["eFG% (calculated)"] = (100 * (fgm + 0.5 * (made3 || 0))) / fga;
 
   // Possessions terminées par le joueur : tirs tentés + pertes de balle + 0.44 × lancers francs
@@ -1711,8 +1715,16 @@ function computeWeightedPlayerPercentages(entries) {
     const made2 = get(s, STAT_PATTERNS.made2), missed2 = get(s, STAT_PATTERNS.missed2);
     const made3 = get(s, STAT_PATTERNS.made3), missed3 = get(s, STAT_PATTERNS.missed3);
     const madeFT = get(s, STAT_PATTERNS.madeFT), missedFT = get(s, STAT_PATTERNS.missedFT);
-    const fga = get(s, STAT_PATTERNS.fga) ?? ((made2 !== undefined || missed2 !== undefined || made3 !== undefined || missed3 !== undefined)
-      ? (made2 || 0) + (missed2 || 0) + (made3 || 0) + (missed3 || 0) : undefined);
+    // BUG RÉEL CORRIGÉ (eFG% incohérent avec %2pts/%3pts, constaté sur une vraie fiche joueur) :
+    // le numérateur (tirs réussis) est TOUJOURS dérivé de "2pts/3pts Made", mais le
+    // dénominateur (tirs tentés) préférait la colonne "FG Attempted" du fichier quand elle
+    // existait — si cette colonne ne correspond pas exactement à (2pts tentés + 3pts tentés)
+    // dans le fichier d'origine, le eFG% se retrouve calculé avec un numérateur et un
+    // dénominateur incohérents entre eux. On priorise maintenant la somme dérivée de la même
+    // décomposition que le numérateur, et on ne retombe sur la colonne directe du fichier que
+    // si cette décomposition est totalement absente.
+    const hasBreakdown = made2 !== undefined || missed2 !== undefined || made3 !== undefined || missed3 !== undefined;
+    const fga = hasBreakdown ? (made2 || 0) + (missed2 || 0) + (made3 || 0) + (missed3 || 0) : get(s, STAT_PATTERNS.fga);
     if (made2 !== undefined) { sumMade2 += made2; hasMade2 = true; }
     if (missed2 !== undefined) { sumMissed2 += missed2; hasMissed2 = true; }
     if (made3 !== undefined) { sumMade3 += made3; hasMade3 = true; }
