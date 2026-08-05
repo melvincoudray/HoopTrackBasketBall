@@ -4614,7 +4614,29 @@ function useObjectives(playerName) {
 
   async function load() {
     setLoading(true);
-    setObjectives((await storeGet("objectives:" + playerName)) || []);
+    const raw = (await storeGet("objectives:" + playerName)) || [];
+    // BUG RÉEL CORRIGÉ : le format des clés de stats liées au fichier de coding a changé
+    // (ancien : "[Attaque] PNR — Fréquence", nouveau : "[Offense] Playtypes — PNR
+    // (Frequency)", pour couvrir toutes les catégories et pas seulement Playtypes/Plays) —
+    // les objectifs déjà enregistrés avec l'ancien format ne retrouvaient plus leur valeur
+    // actuelle, l'app affichait "–" pour eux. On migre silencieusement au chargement.
+    const cats = currentTagCategories();
+    let changed = false;
+    const migrated = raw.map(o => {
+      if (!o.linkedStat) return o;
+      const m = o.linkedStat.match(/^\[(Attaque|Offense|Defense)\] (.+) — (Fréquence|Frequency|PPPP|% Ouvert|% Open)$/);
+      if (!m) return o;
+      const [, oldSide, tagName, oldMetric] = m;
+      const newSide = oldSide === "Attaque" ? "Offense" : oldSide;
+      const metricLabel = { "Fréquence": "Frequency", "Frequency": "Frequency", "PPPP": "PPPP", "% Ouvert": "% Open", "% Open": "% Open" }[oldMetric];
+      const categoryName = ["Playtypes", "Plays"].find(cat => categoryTags(cat, cats).some(t => normTag(t) === normTag(tagName)));
+      if (!categoryName) return o; // tag introuvable dans ces deux catégories, on ne migre pas à l'aveugle
+      const newKey = `[${newSide}] ${categoryName} — ${tagName} (${metricLabel})`;
+      changed = true;
+      return { ...o, linkedStat: newKey };
+    });
+    if (changed) await storeSet("objectives:" + playerName, migrated);
+    setObjectives(migrated);
     setLoading(false);
   }
 
