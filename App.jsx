@@ -772,7 +772,17 @@ async function saveCategoryChartStyles(styles) {
   await storeSet("category_chart_styles", styles);
 }
 
-function parseMatchFile(arrayBuffer, cats) {
+// unknownColumnDefault : que faire d'une colonne qui n'est reconnue ni comme tag connu, ni
+// comme joueur déjà confirmé dans les paramètres.
+// - "player" (par défaut, utilisé par Import Match) : la traite comme un joueur potentiel à
+//   confirmer — utile quand le fichier vient de NOTRE équipe et qu'un joueur a pu être ajouté
+//   sans être encore synchronisé dans "Player" (Settings).
+// - "tag" (utilisé par Observation) : la traite comme un tag supplémentaire au lieu d'un faux
+//   joueur — BUG RÉEL CORRIGÉ : un fichier de scouting d'équipe adverse n'a souvent AUCUN nom
+//   de joueur individuel (juste des tags d'équipe comme systèmes de jeu ou types de défense) ;
+//   avec l'ancien comportement, chaque tag non reconnu (ex. "UCLA", "Corner Flare", "Follow")
+//   devenait un faux "joueur", donnant des actions du type player:"UCLA" — n'ayant aucun sens.
+function parseMatchFile(arrayBuffer, cats, unknownColumnDefault = "player") {
   const wb = XLSX.read(arrayBuffer, { type: "array" });
   const sheetName = wb.SheetNames.find(n => n.toLowerCase().includes("base") || n.toLowerCase().includes("data")) || wb.SheetNames[0];
   const ws = wb.Sheets[sheetName];
@@ -805,6 +815,7 @@ function parseMatchFile(arrayBuffer, cats) {
     if (knownPlayers.has(normTag(c))) { playerColIdx.push(i); return; } // in the "Player" list → confirmed
     if (allKnownTagsSet(cats).has(normTag(c))) { tagColIdx.push(i); return; }
     if (/^\d+$/.test(trimmed)) return; // en-tête purement numérique (ex. "0") = ligne d'équipe, pas un joueur
+    if (unknownColumnDefault === "tag") { tagColIdx.push(i); return; }
     playerColIdx.push(i); // neither a known tag nor in the "Player" list → treated as a player by default, to confirm
   });
   const detectedPlayers = playerColIdx.map(i => cols[i]);
@@ -824,7 +835,10 @@ function parseMatchFile(arrayBuffer, cats) {
     // Une ligne peut concerner plusieurs joueurs à la fois (ex. porteur de balle + écran
     // sur la même possession) : on crée une action par joueur marqué "1", pour ne perdre
     // aucune donnée — c'était la cause des actions manquantes constatées.
+    // Si AUCUN joueur n'est marqué (ex. scouting d'équipe adverse sans suivi individuel), on
+    // garde quand même l'action au niveau de l'équipe plutôt que de la perdre silencieusement.
     const flaggedPlayers = playerColIdx.filter(i => Number(r[i]) === 1).map(i => cols[i]);
+    if (flaggedPlayers.length === 0) return [{ category: String(category), button: String(button), player: null, tags }];
     return flaggedPlayers.map(player => ({ category: String(category), button: String(button), player, tags }));
   });
 
@@ -6545,7 +6559,7 @@ function ObservationTab() {
     setFileErr(""); setPreview(null);
     try {
       const buf = await file.arrayBuffer();
-      const parsed = parseMatchFile(buf, currentObservationTagCategories());
+      const parsed = parseMatchFile(buf, currentObservationTagCategories(), "tag");
       if (!parsed.plays.length) throw new Error("No action attributed to a player was found.");
       setPreview(parsed);
     } catch (err) { setFileErr(err.message || "Error reading the file."); }
