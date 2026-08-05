@@ -6561,20 +6561,51 @@ function ObservationTab() {
       const buf = await file.arrayBuffer();
       const parsed = parseMatchFile(buf, currentObservationTagCategories(), "tag");
       if (!parsed.plays.length) throw new Error("No action attributed to a player was found.");
-      setPreview(parsed);
+      setPreview({ ...parsed, fileName: file.name });
     } catch (err) { setFileErr(err.message || "Error reading the file."); }
   }
 
+  // BUG RÉEL CORRIGÉ : importer un deuxième fichier pour une équipe déjà observée écrasait
+  // complètement le premier import au lieu de s'y ajouter — impossible de combiner plusieurs
+  // matchs observés de la même équipe adverse. Chaque import garde maintenant un identifiant,
+  // pour pouvoir les combiner (et, si besoin, en retirer un seul plus tard) sans tout perdre.
   async function confirmImport() {
     if (!teamName.trim()) { setFileErr("Enter the observed team's name before confirming."); return; }
     setBusy(true);
-    const next = { ...observed, [teamName.trim()]: { plays: preview.plays, importedAt: new Date().toISOString() } };
+    const name = teamName.trim();
+    const existing = observed[name] || { plays: [], imports: [] };
+    const importId = uid();
+    const taggedPlays = preview.plays.map(p => ({ ...p, importId }));
+    const next = {
+      ...observed,
+      [name]: {
+        plays: [...(existing.plays || []), ...taggedPlays],
+        imports: [...(existing.imports || []), { id: importId, fileName: preview.fileName || "file.xlsx", importedAt: new Date().toISOString(), playsCount: taggedPlays.length }],
+        importedAt: new Date().toISOString(), // dernier import, pour l'affichage rétrocompatible
+      },
+    };
     await storeSet("scouting_observations", next);
     setObserved(next);
-    setSelected(teamName.trim());
+    setSelected(name);
     setPreview(null); setTeamName("");
     if (fileRef.current) fileRef.current.value = "";
     setBusy(false);
+  }
+
+  // Retire un seul import (un seul fichier) d'une équipe observée, sans toucher aux autres.
+  async function removeImport(name, importId) {
+    const existing = observed[name];
+    if (!existing) return;
+    const next = {
+      ...observed,
+      [name]: {
+        ...existing,
+        plays: (existing.plays || []).filter(p => p.importId !== importId),
+        imports: (existing.imports || []).filter(imp => imp.id !== importId),
+      },
+    };
+    await storeSet("scouting_observations", next);
+    setObserved(next);
   }
 
   async function removeObserved(name) {
@@ -6602,7 +6633,15 @@ function ObservationTab() {
         </p>
         <div style={{ marginBottom: 14 }}>
           <label style={labelStyle}>Observed team name</label>
-          <input type="text" placeholder="e.g. Zalgiris U16" value={teamName} onChange={e => setTeamName(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", maxWidth: 320 }} />
+          <input type="text" list="observed-team-names" placeholder="e.g. Zalgiris U16" value={teamName} onChange={e => setTeamName(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", maxWidth: 320 }} />
+          <datalist id="observed-team-names">
+            {Object.keys(observed).map(name => <option key={name} value={name} />)}
+          </datalist>
+          {teamName.trim() && observed[teamName.trim()] && (
+            <div style={{ fontSize: 11.5, color: TEAL, marginTop: 6 }}>
+              This team already has {observed[teamName.trim()].imports?.length ?? 1} file(s) imported ({observed[teamName.trim()].plays.length} actions) — this new file will be added to them, not replace them.
+            </div>
+          )}
         </div>
         <input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
         {fileErr && <div style={{ color: RED, fontSize: 13, marginTop: 10 }}>{fileErr}</div>}
@@ -6633,6 +6672,21 @@ function ObservationTab() {
       {current && (
         <div>
           <SectionTitle eyebrow="Breakdown" title={selected} />
+          {current.imports?.length > 0 && (
+            <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 14, marginBottom: 20 }}>
+              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 8 }}>
+                Files combined for this team ({current.imports.length})
+              </div>
+              {current.imports.map(imp => (
+                <div key={imp.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderTop: `1px solid ${LINE}` }}>
+                  <div style={{ fontSize: 12.5, color: "#D8DCE2" }}>
+                    {imp.fileName} <span style={{ color: "#5C6470" }}>· {new Date(imp.importedAt).toLocaleDateString()} · {imp.playsCount} actions</span>
+                  </div>
+                  <button onClick={() => removeImport(selected, imp.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }} title="Remove this file only"><X size={14} /></button>
+                </div>
+              ))}
+            </div>
+          )}
           <OffenseDefenseBreakdown off={off} def={def} categories={currentObservationTagCategories()} />
         </div>
       )}
