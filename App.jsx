@@ -139,7 +139,12 @@ async function tryExportPdf(elementId, filename, theme = "light", orientation = 
   const el = document.getElementById(elementId);
   if (!el) return false;
   try {
-    const [{ default: jsPDF }, { default: html2canvas }] = await Promise.all([
+    // BUG RÉEL CORRIGÉ : la bibliothèque jsPDF (v2.x) exporte "jsPDF" en export NOMMÉ, pas en
+    // export par défaut — importer "{ default: jsPDF }" donnait silencieusement "undefined",
+    // ce qui faisait échouer "new jsPDF(...)" et basculait systématiquement vers le repli
+    // HTML, même quand la bibliothèque était correctement installée. C'est pour ça que l'export
+    // donnait toujours du HTML au lieu d'un vrai PDF.
+    const [{ jsPDF }, { default: html2canvas }] = await Promise.all([
       import("jspdf"),
       import("html2canvas"),
     ]);
@@ -3195,7 +3200,7 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
             </select>
           )}
           {nextGame && scouting.teams[nextGame] && (
-            <button onClick={() => goToScouting("collectif", nextGame)} style={{ display: "flex", alignItems: "center", gap: 14, width: "100%", maxWidth: 320, padding: "14px 16px", background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 10, color: PAPER, cursor: "pointer", textAlign: "left", fontFamily: "inherit" }}>
+            <button onClick={() => goToScouting("rapport", nextGame)} style={{ display: "flex", alignItems: "center", gap: 14, width: "100%", maxWidth: 320, padding: "14px 16px", background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 10, color: PAPER, cursor: "pointer", textAlign: "left", fontFamily: "inherit" }}>
               <div style={{ width: 44, height: 44, borderRadius: 8, background: PANEL2, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
                 {scouting.teams[nextGame].logo ? <img src={scouting.teams[nextGame].logo} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }} /> : <span style={{ fontSize: 18, fontWeight: 800, color: AMBER }}>{nextGame[0]}</span>}
               </div>
@@ -6268,10 +6273,10 @@ function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, teamLogo, on
   const darkness = Math.max(0, Math.min(100, bgDarkness ?? 70)) / 100;
   // Mode export : la fiche doit remplir toute une page A4 paysage, avec TOUS les éléments
   // bien visibles (photo, stats, chiffres) — pas la version compacte utilisée à l'écran.
-  const photoW = printMode ? 220 : 130, photoH = printMode ? 250 : 130;
+  const photoW = printMode ? 220 : 150, photoH = printMode ? 250 : 150;
   const sidebarW = printMode ? 260 : 200;
   const nameSize = printMode ? 23 : 15, subSize = printMode ? 14 : 11.5;
-  const chartSize = printMode ? 420 : 420;
+  const chartSize = printMode ? 420 : 445;
   const badgeMinSize = printMode ? 78 : 56;
   return (
     <div data-no-split="true" style={{
