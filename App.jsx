@@ -73,10 +73,12 @@ function defaultSeasonLabel(d = new Date()) {
 // bloqué par le bac à sable de l'iframe — c'est le même mécanisme que la Sauvegarde.
 // Le fichier obtenu s'ouvre dans n'importe quel navigateur normal, où l'impression en
 // PDF (Ctrl+P) fonctionne sans restriction.
-function buildReportHtml(elementId, filename, theme = "light") {
+function buildReportHtml(elementId, filename, theme = "light", orientation = "portrait") {
   const el = document.getElementById(elementId);
   if (!el) return null;
+  const pageRule = `@page { size: A4 ${orientation}; margin: 16mm; }`;
   const lightStyle = `
+  ${pageRule}
   body { font-family: -apple-system, "Segoe UI", Arial, sans-serif; background: #fff; padding: 24px; max-width: 900px; margin: 0 auto; }
   table { border-collapse: collapse; width: 100%; margin-bottom: 12px; }
   td, th { border: 1px solid #ccc; padding: 5px 8px; text-align: left; font-size: 13px; }
@@ -87,12 +89,15 @@ function buildReportHtml(elementId, filename, theme = "light") {
      de fréquence) pour ne pas les rendre invisibles (blanc sur blanc). */
   .printable-root *:not(.keep-color) { background: #fff !important; color: #111 !important; border-color: #ddd !important; }
   svg { overflow: visible; }
-  img { max-width: 100%; }`;
+  img { max-width: 100%; }
+  [data-new-page="true"] { page-break-before: always; }`;
   const darkStyle = `
+  ${pageRule}
   body { font-family: -apple-system, "Segoe UI", Arial, sans-serif; background: ${INK}; color: ${PAPER}; padding: 24px; max-width: 900px; margin: 0 auto; }
   h1 { color: ${PAPER}; }
   svg { overflow: visible; }
-  img { max-width: 100%; }`;
+  img { max-width: 100%; }
+  [data-new-page="true"] { page-break-before: always; }`;
   const styleTag = theme === "dark" ? darkStyle : lightStyle;
   const full = `<!doctype html><html><head><meta charset="utf-8"><title>${filename}</title>
 <style>${styleTag}</style>
@@ -119,15 +124,18 @@ function tryDownload(full, filename) {
 // html2canvas — bibliothèques disponibles uniquement sur le site déployé (Netlify), pas dans
 // l'artifact Claude. Si l'import échoue (contexte Claude), renvoie null pour que l'appelant
 // retombe sur l'export HTML existant, qui lui fonctionne partout.
-// Réglages volontairement choisis pour un fichier LÉGER : scale 1.5 (au lieu de 2 — le texte
-// reste net pour un rapport, alors que l'ancien réglage visait une netteté "impression photo"
-// inutile ici) et JPEG compressé (au lieu de PNG sans perte, bien plus lourd pour ce type de
-// contenu texte + aplats de couleur).
+// Réglages volontairement choisis pour un fichier LÉGER, encore réduits sur retour de
+// l'utilisateur (poids toujours trop lourd malgré un premier passage) : scale 1.15 (au lieu
+// de 1.5, lui-même déjà réduit depuis 2) et JPEG à 72% de qualité (au lieu de 88%) — le texte
+// reste lisible pour un rapport à consulter à l'écran ou imprimer, sans viser une netteté
+// "impression photo" qui n'a pas lieu d'être ici.
 // Pagination "intelligente" : les éléments marqués data-no-split (cartes de graphiques) ne
 // sont jamais coupés par un saut de page — si une coupure "naturelle" tomberait au milieu
 // d'un graphique, on la déplace juste avant lui, quitte à créer une page plus courte (et donc
 // plus de pages au total, ce qui est très bien) plutôt que de couper un graphique en deux.
-async function tryExportPdf(elementId, filename, theme = "light") {
+// Les éléments marqués data-new-page="true" démarrent TOUJOURS une nouvelle page (même s'il
+// restait de la place sur la précédente) — utilisé pour garantir une page par joueur.
+async function tryExportPdf(elementId, filename, theme = "light", orientation = "portrait") {
   const el = document.getElementById(elementId);
   if (!el) return false;
   try {
@@ -137,26 +145,32 @@ async function tryExportPdf(elementId, filename, theme = "light") {
     ]);
     const bg = theme === "dark" ? INK : "#ffffff";
 
-    // Repère chaque élément "à ne pas couper" AVANT la capture, en pixels DOM relatifs au
-    // haut de l'élément exporté.
+    // Repère chaque élément "à ne pas couper" et chaque élément "nouvelle page forcée" AVANT
+    // la capture, en pixels DOM relatifs au haut de l'élément exporté.
     const elTop = el.getBoundingClientRect().top;
     const noSplitEls = Array.from(el.querySelectorAll('[data-no-split="true"]')).map(node => {
       const r = node.getBoundingClientRect();
       return { top: r.top - elTop, bottom: r.bottom - elTop };
     });
+    const newPageEls = Array.from(el.querySelectorAll('[data-new-page="true"]')).map(node => {
+      const r = node.getBoundingClientRect();
+      return { top: r.top - elTop, bottom: r.bottom - elTop };
+    });
 
-    const canvas = await html2canvas(el, { backgroundColor: bg, scale: 1.5, useCORS: true });
-    const imgData = canvas.toDataURL("image/jpeg", 0.88);
-    const pageWidth = 595.28; // A4 en points (72dpi)
-    const pageHeight = 841.89;
+    const canvas = await html2canvas(el, { backgroundColor: bg, scale: 1.15, useCORS: true });
+    const imgData = canvas.toDataURL("image/jpeg", 0.72);
+    // A4 en points (72dpi) — inversé en paysage (largeur/hauteur permutées).
+    const pageWidth = orientation === "landscape" ? 841.89 : 595.28;
+    const pageHeight = orientation === "landscape" ? 595.28 : 841.89;
     const imgWidth = pageWidth;
     const imgHeight = (canvas.height * imgWidth) / canvas.width;
     // Conversion des rectangles DOM (px) vers l'échelle de l'image finale dans le PDF (pt) :
     // même ratio que celui utilisé pour convertir la hauteur totale de l'image.
     const domToImgRatio = imgWidth / el.getBoundingClientRect().width;
     const noSplitRanges = noSplitEls.map(r => ({ top: r.top * domToImgRatio, bottom: r.bottom * domToImgRatio }));
+    const newPageRanges = newPageEls.map(r => ({ top: r.top * domToImgRatio, bottom: r.bottom * domToImgRatio }));
 
-    const pdf = new jsPDF({ unit: "pt", format: "a4", compress: true });
+    const pdf = new jsPDF({ unit: "pt", format: "a4", orientation, compress: true });
     let pageTop = 0; // position (en pt, dans l'image totale) du haut de la page courante
     let firstPage = true;
     while (pageTop < imgHeight - 0.5) {
@@ -169,6 +183,14 @@ async function tryExportPdf(elementId, filename, theme = "light") {
         const spansBreak = r.top < pageBottom - 0.5 && r.bottom > pageBottom + 0.5;
         const fitsOnOnePage = (r.bottom - r.top) <= pageHeight;
         if (spansBreak && fitsOnOnePage && r.top > pageTop + 0.5) {
+          pageBottom = r.top;
+        }
+      }
+      // Une "nouvelle page forcée" qui commence APRÈS le haut de la page courante coupe la
+      // page ici, même s'il restait de la place — chaque joueur démarre ainsi toujours une
+      // page fraîche, plutôt que de s'enchaîner à la suite du précédent.
+      for (const r of newPageRanges) {
+        if (r.top > pageTop + 0.5 && r.top < pageBottom - 0.5) {
           pageBottom = r.top;
         }
       }
@@ -5837,7 +5859,11 @@ function RoseChart({ ratings, categories = SKILL_CATEGORIES, size = 420, emphasi
   // éloignait bien trop (l'un se retrouvait quasiment à l'opposé de la roue) — on utilise
   // maintenant un léger décalage angulaire (les deux mots s'écartent un peu l'un de l'autre,
   // tangentiellement) combiné à un tout petit décalage de rayon, pour qu'ils restent proches
-  // de la roue sans jamais se toucher.
+  // de la roue sans jamais se toucher. BUG RÉEL CORRIGÉ : ce décalage était en pixels fixes,
+  // calibré pour une roue de 480px — à une taille plus petite (ex. 420px pour l'export en
+  // page pleine), le chevauchement revenait. Le décalage est maintenant proportionnel à la
+  // taille réelle de la roue, pour rester efficace à n'importe quelle taille.
+  const sizeScale = size / 480;
   const emphasizedIndices = categories.map((cat, i) => ({ cat, i, emphasized: topStrengths.has(cat) || cat === worstWeakness })).filter(x => x.emphasized);
   const staggerExtra = {}, angleNudge = {};
   emphasizedIndices.forEach((entry, idx) => {
@@ -5846,12 +5872,12 @@ function RoseChart({ ratings, categories = SKILL_CATEGORIES, size = 420, emphasi
       return diff <= 2; // catégories voisines ou quasi-voisines sur la roue
     });
     if (conflict) {
-      staggerExtra[entry.cat] = 34;
+      staggerExtra[entry.cat] = 34 * sizeScale;
       // S'écarte du côté opposé à l'autre libellé en conflit, le long du cercle.
       const forward = (entry.i - conflict.i + n) % n <= n / 2;
-      angleNudge[entry.cat] = forward ? 0.16 : -0.16;
+      angleNudge[entry.cat] = forward ? 0.22 : -0.22;
     } else {
-      staggerExtra[entry.cat] = 14;
+      staggerExtra[entry.cat] = 14 * sizeScale;
       angleNudge[entry.cat] = 0;
     }
   });
@@ -5950,7 +5976,24 @@ function useScoutingReport(teamName) {
     setPlayers(ps => ps.filter(p => p.id !== id));
   }
 
-  return { collective, players, loading, saveCollective, savePlayer, deletePlayer };
+  // Réordonne les joueurs scoutés selon l'envie du coach — l'ordre est celui du tableau
+  // d'identifiants, donc on n'a qu'à échanger deux positions adjacentes puis le persister.
+  async function movePlayer(id, direction) {
+    const ids = (await storeGet("scouting_players:" + teamName)) || [];
+    const i = ids.indexOf(id);
+    if (i === -1) return;
+    const j = direction === "up" ? i - 1 : i + 1;
+    if (j < 0 || j >= ids.length) return; // déjà en haut/en bas, rien à faire
+    const next = [...ids];
+    [next[i], next[j]] = [next[j], next[i]];
+    await storeSet("scouting_players:" + teamName, next);
+    setPlayers(ps => {
+      const byId = Object.fromEntries(ps.map(p => [p.id, p]));
+      return next.map(pid => byId[pid]).filter(Boolean);
+    });
+  }
+
+  return { collective, players, loading, saveCollective, savePlayer, deletePlayer, movePlayer };
 }
 
 function embedUrl(url) {
@@ -6220,71 +6263,213 @@ function StatShapeBadge({ label, value, size = 74, fontScale = 1, color = TEAL }
   );
 }
 
-function ScoutingPlayerCard({ player, isCoach, onEdit, onDelete }) {
+function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, onEdit, onDelete, printMode, onMoveUp, onMoveDown, isFirst, isLast }) {
+  // 0 = aucun voile (photo visible à 100%), 100 = fond entièrement noir (photo invisible).
+  const darkness = Math.max(0, Math.min(100, bgDarkness ?? 70)) / 100;
+  // Mode export : la fiche doit remplir toute une page A4 paysage, avec TOUS les éléments
+  // bien visibles (photo, stats, chiffres) — pas la version compacte utilisée à l'écran.
+  const photoW = printMode ? 220 : 220, photoH = printMode ? 250 : 220;
+  const sidebarW = printMode ? 260 : 260;
+  const nameSize = printMode ? 23 : 18, subSize = printMode ? 14 : 13;
+  const chartSize = printMode ? 420 : 480;
+  const badgeMinSize = printMode ? 78 : 74;
   return (
-    <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 14, padding: 24, marginBottom: 20 }}>
-      <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
-        <div style={{ width: 260, flexShrink: 0 }}>
-          <div style={{ width: 220, height: 220, borderRadius: 12, background: PANEL2, border: `1px solid ${LINE}`, overflow: "hidden", marginBottom: 12 }}>
+    <div style={{
+      background: bgPhoto
+        ? `linear-gradient(rgba(22,27,34,${darkness}), rgba(22,27,34,${darkness})), url(${bgPhoto})`
+        : PANEL,
+      backgroundSize: "cover", backgroundPosition: "center",
+      border: `1px solid ${LINE}`, borderRadius: 14, padding: printMode ? 28 : 24, marginBottom: 20,
+    }}>
+      <div style={{ display: "flex", gap: printMode ? 36 : 24, flexWrap: "wrap", width: "100%" }}>
+        <div style={{ width: sidebarW, flexShrink: 0 }}>
+          <div style={{ width: photoW, height: photoH, borderRadius: 12, background: PANEL2, border: `1px solid ${LINE}`, overflow: "hidden", marginBottom: printMode ? 12 : 12 }}>
             {player.photo && <img src={player.photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />}
           </div>
-          <div style={{ fontSize: 18, fontWeight: 800, color: PAPER }}>{player.jersey ? `#${player.jersey} ` : ""}{player.lastName?.toUpperCase()}</div>
-          <div style={{ fontSize: 13, color: "#8B93A1", marginBottom: 10 }}>{player.firstName}{player.position ? ` · Position ${player.position}` : ""}</div>
+          <div style={{ fontSize: nameSize, fontWeight: 800, color: PAPER }}>{player.jersey ? `#${player.jersey} ` : ""}{player.lastName?.toUpperCase()}</div>
+          <div style={{ fontSize: subSize, color: "#8B93A1", marginBottom: printMode ? 10 : 10 }}>{player.firstName}{player.position ? ` · Position ${player.position}` : ""}</div>
 
           {(player.height || player.handedness) && (
-            <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <div style={{ display: "flex", gap: 8, marginBottom: printMode ? 10 : 12 }}>
               {player.height && (
-                <div style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 12px", flex: 1, textAlign: "center" }}>
-                  <div style={{ fontWeight: 800, fontSize: 16, color: PAPER }}>{player.height} cm</div>
-                  <div style={{ fontSize: 9.5, color: "#5C6470", textTransform: "uppercase" }}>Height</div>
+                <div style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: printMode ? "12px 16px" : "8px 12px", flex: 1, textAlign: "center" }}>
+                  <div style={{ fontWeight: 800, fontSize: printMode ? 22 : 16, color: PAPER }}>{player.height} cm</div>
+                  <div style={{ fontSize: printMode ? 12 : 9.5, color: "#5C6470", textTransform: "uppercase" }}>Height</div>
                 </div>
               )}
               {player.handedness && (
-                <div style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 12px", flex: 1, textAlign: "center" }}>
-                  <div style={{ fontWeight: 800, fontSize: 16, color: PAPER }}>{player.handedness}</div>
-                  <div style={{ fontSize: 9.5, color: "#5C6470", textTransform: "uppercase" }}>Dominant hand</div>
+                <div style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: printMode ? "12px 16px" : "8px 12px", flex: 1, textAlign: "center" }}>
+                  <div style={{ fontWeight: 800, fontSize: printMode ? 22 : 16, color: PAPER }}>{player.handedness}</div>
+                  <div style={{ fontSize: printMode ? 12 : 9.5, color: "#5C6470", textTransform: "uppercase" }}>Dominant hand</div>
                 </div>
               )}
             </div>
           )}
 
           {player.plan && (
-            <div style={{ fontSize: 12.5, color: "#D8DCE2", marginBottom: 10, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>
-              <div style={{ fontSize: 10.5, textTransform: "uppercase", color: "#5C6470", marginBottom: 4 }}>Game plan</div>
+            <div style={{ fontSize: printMode ? 13.5 : 12.5, color: "#D8DCE2", marginBottom: printMode ? 10 : 10, lineHeight: 1.4, whiteSpace: "pre-wrap" }}>
+              <div style={{ fontSize: printMode ? 13 : 10.5, textTransform: "uppercase", color: "#5C6470", marginBottom: 4 }}>Game plan</div>
               {player.plan}
             </div>
           )}
-          <div style={{ fontSize: 12.5, marginBottom: 10 }}>Close Out : <CloseOutBadge level={player.closeOut} /></div>
+          <div style={{ fontSize: printMode ? 13.5 : 12.5, marginBottom: printMode ? 10 : 10 }}>Close Out : <CloseOutBadge level={player.closeOut} /></div>
           {player.highlights?.length > 0 && (
-            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: printMode ? 14 : 10, flexWrap: "wrap" }}>
               {player.highlights.map((h, i) => (
-                <StatShapeBadge key={i} label={h.label} value={h.value} size={h.size ?? 74} fontScale={h.fontScale ?? 1} color={h.color ?? TEAL} />
+                <StatShapeBadge key={i} label={h.label} value={h.value} size={printMode ? Math.max(badgeMinSize, h.size ?? 74) : (h.size ?? 74)} fontScale={(h.fontScale ?? 1) * (printMode ? 1.15 : 1)} color={h.color ?? TEAL} />
               ))}
             </div>
           )}
-          {isCoach && (
-            <div style={{ display: "flex", gap: 10, marginTop: 14 }}>
+          {isCoach && !printMode && (
+            <div style={{ display: "flex", gap: 10, marginTop: 14, alignItems: "center" }}>
               <button onClick={onEdit} style={{ fontSize: 12, color: AMBER, background: "none", border: "none", cursor: "pointer" }}>Edit</button>
               <button onClick={onDelete} style={{ fontSize: 12, color: RED, background: "none", border: "none", cursor: "pointer" }}>Delete</button>
+              {(onMoveUp || onMoveDown) && (
+                <div style={{ display: "flex", gap: 4, marginLeft: "auto" }}>
+                  <button onClick={onMoveUp} disabled={isFirst} title="Move up" style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: isFirst ? "#3A414C" : "#8B93A1", cursor: isFirst ? "default" : "pointer", padding: 4, display: "flex" }}><ChevronLeft size={14} style={{ transform: "rotate(90deg)" }} /></button>
+                  <button onClick={onMoveDown} disabled={isLast} title="Move down" style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: isLast ? "#3A414C" : "#8B93A1", cursor: isLast ? "default" : "pointer", padding: 4, display: "flex" }}><ChevronLeft size={14} style={{ transform: "rotate(-90deg)" }} /></button>
+                </div>
+              )}
             </div>
           )}
         </div>
 
         <div style={{ flex: "1 1 420px", display: "flex", justifyContent: "center" }}>
-          <RoseChart ratings={player.ratings} size={480} />
+          <RoseChart ratings={player.ratings} size={chartSize} />
         </div>
       </div>
     </div>
   );
 }
 
-function ScoutingReportTab({ isCoach, teamNames, initialTeam }) {
+// Onglet "Staff" du Scouting Report : fichiers déposés par le staff (PDF, images) pour cette
+// équipe précise, et reprise automatique des stats/graphiques d'Observation pour la MÊME
+// équipe si elle a déjà été observée — pas besoin de redupliquer l'information ailleurs.
+function ScoutingStaffPanel({ teamName, isCoach }) {
+  const [files, setFiles] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [observation, setObservation] = useState(null); // { plays, imports } | null
+  const fileRef = useRef();
+
+  useEffect(() => { load(); }, [teamName]);
+  async function load() {
+    setLoading(true);
+    setFiles((await storeGet("scouting_staff_files:" + teamName)) || []);
+    const allObserved = (await storeGet("scouting_observations")) || {};
+    setObservation(allObserved[teamName] || null);
+    setLoading(false);
+  }
+
+  async function handleUpload(e) {
+    const picked = Array.from(e.target.files || []);
+    if (!picked.length) return;
+    const added = [];
+    for (const file of picked) {
+      const dataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      added.push({ id: uid(), name: file.name, type: file.type, dataUrl, addedAt: new Date().toISOString() });
+    }
+    const next = [...files, ...added];
+    await storeSet("scouting_staff_files:" + teamName, next);
+    setFiles(next);
+    if (fileRef.current) fileRef.current.value = "";
+  }
+
+  async function removeFile(id) {
+    const next = files.filter(f => f.id !== id);
+    await storeSet("scouting_staff_files:" + teamName, next);
+    setFiles(next);
+  }
+
+  function openFile(f) {
+    const a = document.createElement("a");
+    a.href = f.dataUrl; a.download = f.name; a.target = "_blank";
+    document.body.appendChild(a); a.click(); a.remove();
+  }
+
+  if (loading) return <EmptyState text="Loading…" />;
+
+  const off = (observation?.plays || []).filter(isOffense);
+  const def = (observation?.plays || []).filter(isDefense);
+
+  return (
+    <div>
+      {isCoach && (
+        <div style={{ marginBottom: 20 }}>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, padding: "9px 16px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: AMBER, fontSize: 13, fontWeight: 600, cursor: "pointer" }}>
+            <Upload size={14} /> Add PDF or image files
+            <input ref={fileRef} type="file" accept="application/pdf,image/*" multiple onChange={handleUpload} style={{ display: "none" }} />
+          </label>
+        </div>
+      )}
+
+      {files.length === 0 ? (
+        <EmptyState text="No file shared by the staff yet." />
+      ) : (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 12, marginBottom: 28 }}>
+          {files.map(f => (
+            <div key={f.id} style={{ width: 160, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 10 }}>
+              <button onClick={() => openFile(f)} style={{ width: "100%", height: 90, borderRadius: 6, background: PANEL2, border: "none", cursor: "pointer", overflow: "hidden", marginBottom: 8, padding: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                {f.type?.startsWith("image/") ? <img src={f.dataUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <ClipboardList size={26} color="#5C6470" />}
+              </button>
+              <div style={{ fontSize: 11.5, color: "#D8DCE2", wordBreak: "break-word", marginBottom: 6 }}>{f.name}</div>
+              {isCoach && <button onClick={() => removeFile(f.id)} style={{ fontSize: 11, color: RED, background: "none", border: "none", cursor: "pointer" }}>Remove</button>}
+            </div>
+          ))}
+        </div>
+      )}
+
+      <SectionTitle eyebrow="Observation" title="Stats & charts for this team" />
+      {!observation || (off.length === 0 && def.length === 0) ? (
+        <EmptyState text="This team hasn't been observed yet (Observation tab) — its stats and charts will appear here automatically once it has." />
+      ) : (
+        <OffenseDefenseBreakdown off={off} def={def} categories={currentObservationTagCategories()} />
+      )}
+    </div>
+  );
+}
+
+function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, initialTeam }) {
   const [selectedTeam, setSelectedTeam] = useState(initialTeam || "");
   const [exportReport, setExportReport] = useState(null);
   const report = useScoutingReport(selectedTeam || null);
   const [subtab, setSubtab] = useState("collectif");
   const [editing, setEditing] = useState(null); // null | "new" | player object
   const [busy, setBusy] = useState(false);
+  // Le logo est le MÊME que celui déjà géré dans "Manage teams" (pas une copie séparée) — on
+  // le lit directement depuis là, pour que le mettre à jour ici ou là-bas revienne au même.
+  const teamLogo = selectedTeam ? scoutingTeams?.[selectedTeam]?.logo : null;
+  // La photo de fond des fiches joueurs, elle, est propre à ce nouvel usage (pas de champ
+  // équivalent dans "Manage teams") — reste stockée séparément par équipe, avec un réglage de
+  // luminosité (0 = aucun voile, la photo est visible à 100% ; 100 = fond entièrement noir).
+  const [teamBg, setTeamBg] = useState(null); // { photo, darkness } | null
+  useEffect(() => {
+    if (!selectedTeam) { setTeamBg(null); return; }
+    storeGet("scouting_team_bg:" + selectedTeam).then(v => setTeamBg(v || null));
+  }, [selectedTeam]);
+  async function handleLogoUpload(e) {
+    const file = e.target.files[0];
+    if (!file || !selectedTeam) return;
+    await onSaveLogo(selectedTeam, await fileToResizedDataURL(file, 200, 0.9));
+  }
+  async function handleBgUpload(e) {
+    const file = e.target.files[0];
+    if (!file || !selectedTeam) return;
+    const dataUrl = await fileToResizedDataURL(file, 900, 0.85);
+    const next = { photo: dataUrl, darkness: teamBg?.darkness ?? 70 };
+    await storeSet("scouting_team_bg:" + selectedTeam, next);
+    setTeamBg(next);
+  }
+  async function handleBgDarknessChange(darkness) {
+    if (!teamBg || !selectedTeam) return;
+    const next = { ...teamBg, darkness };
+    setTeamBg(next); // réponse immédiate au curseur, sans attendre l'écriture
+    await storeSet("scouting_team_bg:" + selectedTeam, next);
+  }
 
   return (
     <div>
@@ -6301,7 +6486,7 @@ function ScoutingReportTab({ isCoach, teamNames, initialTeam }) {
       ) : (
         <>
       <div style={{ display: "flex", gap: 8, marginBottom: 20, borderBottom: `1px solid ${LINE}`, paddingBottom: 10 }}>
-        {[["collectif", "Collective"], ["individuel", "Individual"]].map(([id, label]) => (
+        {[["collectif", "Collective"], ["individuel", "Individual"], ["staff", "Staff"]].map(([id, label]) => (
           <button key={id} onClick={() => setSubtab(id)} style={{
             padding: "7px 12px", borderRadius: 7, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit",
             background: subtab === id ? PANEL2 : "transparent", color: subtab === id ? AMBER : "#8B93A1"
@@ -6320,19 +6505,46 @@ function ScoutingReportTab({ isCoach, teamNames, initialTeam }) {
                     <Plus size={14} /> Add a player
                   </button>
                 ) : <div />}
-                {report.players.length > 0 && (
-                  <button onClick={async () => {
-                    const filename = `scouting_${selectedTeam}_${todayLocal()}.html`;
-                    const pdfOk = await tryExportPdf("scouting-print-content", filename, "light");
-                    if (pdfOk) return;
-                    const r = buildReportHtml("scouting-print-content", filename, "light");
-                    if (!r) { alert("Content not found — try again after the page has fully loaded."); return; }
-                    tryDownload(r.full, r.filename);
-                    setExportReport(r);
-                  }} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
-                    <Download size={14} /> Export ({report.players.length} player{report.players.length !== 1 ? "s" : ""}) — HTML → PDF
-                  </button>
-                )}
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  {report.players.length > 0 && (
+                    <button onClick={async () => {
+                      const filename = `scouting_${selectedTeam}_${todayLocal()}.html`;
+                      const pdfOk = await tryExportPdf("scouting-print-content", filename, "light", "landscape");
+                      if (pdfOk) return;
+                      const r = buildReportHtml("scouting-print-content", filename, "light", "landscape");
+                      if (!r) { alert("Content not found — try again after the page has fully loaded."); return; }
+                      tryDownload(r.full, r.filename);
+                      setExportReport(r);
+                    }} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+                      <Download size={14} /> Export ({report.players.length} player{report.players.length !== 1 ? "s" : ""}) — HTML → PDF
+                    </button>
+                  )}
+                  {/* Logo de l'équipe scoutée, en haut à droite, à la même taille que les onglets Collective/Individual. */}
+                  {isCoach && (
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 11, color: "#8B93A1" }}>
+                      {teamLogo ? <img src={teamLogo} alt="" style={{ width: 26, height: 26, borderRadius: 6, objectFit: "cover" }} /> : <span style={{ width: 26, height: 26, borderRadius: 6, border: `1px dashed ${LINE}`, display: "flex", alignItems: "center", justifyContent: "center" }}><Camera size={12} /></span>}
+                      Team logo
+                      <input type="file" accept="image/*" onChange={handleLogoUpload} style={{ display: "none" }} />
+                    </label>
+                  )}
+                  {!isCoach && teamLogo && <img src={teamLogo} alt="" style={{ width: 26, height: 26, borderRadius: 6, objectFit: "cover" }} />}
+                  {isCoach && (
+                    <>
+                      <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 11, color: "#8B93A1" }}>
+                        <span style={{ width: 26, height: 26, borderRadius: 6, border: `1px dashed ${LINE}`, display: "flex", alignItems: "center", justifyContent: "center", backgroundImage: teamBg?.photo ? `url(${teamBg.photo})` : "none", backgroundSize: "cover" }}>{!teamBg?.photo && <Camera size={12} />}</span>
+                        Card background
+                        <input type="file" accept="image/*" onChange={handleBgUpload} style={{ display: "none" }} />
+                      </label>
+                      {teamBg?.photo && (
+                        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#8B93A1" }}>
+                          Darkness
+                          <input type="range" min={0} max={100} value={teamBg.darkness ?? 70} onChange={e => handleBgDarknessChange(Number(e.target.value))} style={{ width: 90 }} />
+                          <span style={{ width: 26, textAlign: "right", fontFamily: "ui-monospace, monospace" }}>{teamBg.darkness ?? 70}</span>
+                        </label>
+                      )}
+                    </>
+                  )}
+                </div>
               </div>
               {editing && (
                 <ScoutingPlayerForm
@@ -6346,19 +6558,24 @@ function ScoutingReportTab({ isCoach, teamNames, initialTeam }) {
                 <EmptyState text="No player scouted yet." />
               ) : (
                 <div className="screen-only">
-                  {report.players.map(p => (
-                    <ScoutingPlayerCard key={p.id} player={p} isCoach={isCoach}
-                      onEdit={() => setEditing(p)} onDelete={() => report.deletePlayer(p.id)} />
+                  {report.players.map((p, i) => (
+                    <ScoutingPlayerCard key={p.id} player={p} isCoach={isCoach} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness}
+                      onEdit={() => setEditing(p)} onDelete={() => report.deletePlayer(p.id)}
+                      onMoveUp={() => report.movePlayer(p.id, "up")} onMoveDown={() => report.movePlayer(p.id, "down")}
+                      isFirst={i === 0} isLast={i === report.players.length - 1} />
                   ))}
                 </div>
               )}
               {report.players.length > 0 && (
                 <div className="print-only" id="scouting-print-content">
-                  <div style={{ padding: 24, background: "#ffffff", color: "#1A1D24" }}>
-                    <h1 style={{ fontSize: 22, marginBottom: 16 }}>Scouting individuel — {selectedTeam}</h1>
+                  <div style={{ padding: 18, background: "#ffffff", color: "#1A1D24", width: 1080 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                      <h1 style={{ fontSize: 22, margin: 0 }}>Scouting individuel — {selectedTeam}</h1>
+                      {teamLogo && <img src={teamLogo} alt="" style={{ width: 32, height: 32, borderRadius: 6, objectFit: "cover" }} />}
+                    </div>
                     {report.players.map(p => (
-                      <div key={p.id} style={{ marginBottom: 28, pageBreakInside: "avoid" }}>
-                        <ScoutingPlayerCard player={p} isCoach={false} onEdit={() => {}} onDelete={() => {}} />
+                      <div key={p.id} data-new-page="true" style={{ marginBottom: 28, pageBreakInside: "avoid", pageBreakBefore: "always" }}>
+                        <ScoutingPlayerCard player={p} isCoach={false} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness} onEdit={() => {}} onDelete={() => {}} printMode />
                       </div>
                     ))}
                   </div>
@@ -6366,6 +6583,7 @@ function ScoutingReportTab({ isCoach, teamNames, initialTeam }) {
               )}
             </div>
           )}
+          {subtab === "staff" && <ScoutingStaffPanel teamName={selectedTeam} isCoach={isCoach} />}
         </>
       )}
         </>
@@ -6846,7 +7064,7 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam })
       </div>
 
       {subtab === "comparaison" && (scouting.loading ? <EmptyState text="Loading…" /> : <ScoutingComparison teams={allTeams} />)}
-      {subtab === "rapport" && <ScoutingReportTab isCoach={isCoach} teamNames={Object.keys(scouting.teams)} initialTeam={initialReportTeam} />}
+      {subtab === "rapport" && <ScoutingReportTab isCoach={isCoach} teamNames={Object.keys(scouting.teams)} scoutingTeams={scouting.teams} onSaveLogo={scouting.saveLogo} initialTeam={initialReportTeam} />}
       {subtab === "observation" && isCoach && <ObservationTab />}
 
       {subtab === "gerer" && isCoach && (
