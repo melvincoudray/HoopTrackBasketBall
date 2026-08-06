@@ -5875,7 +5875,7 @@ function RoseChart({ ratings, categories = SKILL_CATEGORIES, size = 420, emphasi
       staggerExtra[entry.cat] = 34 * sizeScale;
       // S'écarte du côté opposé à l'autre libellé en conflit, le long du cercle.
       const forward = (entry.i - conflict.i + n) % n <= n / 2;
-      angleNudge[entry.cat] = forward ? 0.22 : -0.22;
+      angleNudge[entry.cat] = forward ? 0.28 : -0.28;
     } else {
       staggerExtra[entry.cat] = 14 * sizeScale;
       angleNudge[entry.cat] = 0;
@@ -6263,24 +6263,31 @@ function StatShapeBadge({ label, value, size = 74, fontScale = 1, color = TEAL }
   );
 }
 
-function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, onEdit, onDelete, printMode, onMoveUp, onMoveDown, isFirst, isLast }) {
+function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, teamLogo, onEdit, onDelete, printMode, onMoveUp, onMoveDown, isFirst, isLast }) {
   // 0 = aucun voile (photo visible à 100%), 100 = fond entièrement noir (photo invisible).
   const darkness = Math.max(0, Math.min(100, bgDarkness ?? 70)) / 100;
   // Mode export : la fiche doit remplir toute une page A4 paysage, avec TOUS les éléments
   // bien visibles (photo, stats, chiffres) — pas la version compacte utilisée à l'écran.
-  const photoW = printMode ? 220 : 220, photoH = printMode ? 250 : 220;
-  const sidebarW = printMode ? 260 : 260;
-  const nameSize = printMode ? 23 : 18, subSize = printMode ? 14 : 13;
-  const chartSize = printMode ? 420 : 480;
-  const badgeMinSize = printMode ? 78 : 74;
+  const photoW = printMode ? 220 : 130, photoH = printMode ? 250 : 130;
+  const sidebarW = printMode ? 260 : 200;
+  const nameSize = printMode ? 23 : 15, subSize = printMode ? 14 : 11.5;
+  const chartSize = printMode ? 420 : 420;
+  const badgeMinSize = printMode ? 78 : 56;
   return (
-    <div style={{
+    <div data-no-split="true" style={{
+      position: "relative",
       background: bgPhoto
         ? `linear-gradient(rgba(22,27,34,${darkness}), rgba(22,27,34,${darkness})), url(${bgPhoto})`
         : PANEL,
-      backgroundSize: "cover", backgroundPosition: "center",
-      border: `1px solid ${LINE}`, borderRadius: 14, padding: printMode ? 28 : 24, marginBottom: 20,
+      // "100% 100%" (au lieu de "cover") étire la photo pour remplir tout le cadre sans jamais
+      // la couper ni la répéter en mosaïque — quitte à légèrement déformer l'image si ses
+      // proportions ne correspondent pas exactement à celles du cadre.
+      backgroundSize: "100% 100%", backgroundPosition: "center", backgroundRepeat: "no-repeat",
+      border: `1px solid ${LINE}`, borderRadius: 14, padding: printMode ? 28 : 16, marginBottom: 14,
     }}>
+      {/* Logo de l'équipe scoutée, à l'intérieur du cadre de la fiche (pas en dehors, sur le
+          document partagé) — demandé par l'utilisateur, à la même taille que les onglets. */}
+      {teamLogo && <img src={teamLogo} alt="" style={{ position: "absolute", top: 16, right: 16, width: 30, height: 30, borderRadius: 6, objectFit: "cover" }} />}
       <div style={{ display: "flex", gap: printMode ? 36 : 24, flexWrap: "wrap", width: "100%" }}>
         <div style={{ width: sidebarW, flexShrink: 0 }}>
           <div style={{ width: photoW, height: photoH, borderRadius: 12, background: PANEL2, border: `1px solid ${LINE}`, overflow: "hidden", marginBottom: printMode ? 12 : 12 }}>
@@ -6509,9 +6516,9 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
                   {report.players.length > 0 && (
                     <button onClick={async () => {
                       const filename = `scouting_${selectedTeam}_${todayLocal()}.html`;
-                      const pdfOk = await tryExportPdf("scouting-print-content", filename, "light", "landscape");
+                      const pdfOk = await tryExportPdf("scouting-print-content", filename, "light");
                       if (pdfOk) return;
-                      const r = buildReportHtml("scouting-print-content", filename, "light", "landscape");
+                      const r = buildReportHtml("scouting-print-content", filename, "light");
                       if (!r) { alert("Content not found — try again after the page has fully loaded."); return; }
                       tryDownload(r.full, r.filename);
                       setExportReport(r);
@@ -6559,7 +6566,7 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
               ) : (
                 <div className="screen-only">
                   {report.players.map((p, i) => (
-                    <ScoutingPlayerCard key={p.id} player={p} isCoach={isCoach} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness}
+                    <ScoutingPlayerCard key={p.id} player={p} isCoach={isCoach} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness} teamLogo={teamLogo}
                       onEdit={() => setEditing(p)} onDelete={() => report.deletePlayer(p.id)}
                       onMoveUp={() => report.movePlayer(p.id, "up")} onMoveDown={() => report.movePlayer(p.id, "down")}
                       isFirst={i === 0} isLast={i === report.players.length - 1} />
@@ -6568,14 +6575,11 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
               )}
               {report.players.length > 0 && (
                 <div className="print-only" id="scouting-print-content">
-                  <div style={{ padding: 18, background: "#ffffff", color: "#1A1D24", width: 1080 }}>
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-                      <h1 style={{ fontSize: 22, margin: 0 }}>Scouting individuel — {selectedTeam}</h1>
-                      {teamLogo && <img src={teamLogo} alt="" style={{ width: 32, height: 32, borderRadius: 6, objectFit: "cover" }} />}
-                    </div>
-                    {report.players.map(p => (
-                      <div key={p.id} data-new-page="true" style={{ marginBottom: 28, pageBreakInside: "avoid", pageBreakBefore: "always" }}>
-                        <ScoutingPlayerCard player={p} isCoach={false} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness} onEdit={() => {}} onDelete={() => {}} printMode />
+                  <div style={{ padding: 24, background: "#ffffff", color: "#1A1D24" }}>
+                    <h1 style={{ fontSize: 18, marginBottom: 8 }}>Scouting individuel — {selectedTeam}</h1>
+                    {report.players.map((p, i) => (
+                      <div key={p.id} data-new-page={i % 2 === 0 ? "true" : undefined} style={{ marginBottom: 0, pageBreakInside: "avoid", pageBreakBefore: i % 2 === 0 ? "always" : "auto" }}>
+                        <ScoutingPlayerCard player={p} isCoach={false} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness} teamLogo={teamLogo} onEdit={() => {}} onDelete={() => {}} />
                       </div>
                     ))}
                   </div>
