@@ -4637,8 +4637,21 @@ function buildCodingStatOptions(off, def, cats) {
         });
         continue;
       }
-      topCategoryBucket(plays, tags, tags.length).forEach(item => {
-        out[`[${sideLabel}] ${categoryName} — ${item.name} (Frequency)`] = item.freq;
+      // BUG RÉEL CORRIGÉ (signalé par l'utilisateur) : un tag jamais utilisé par le joueur
+      // (0 occurrence, ex. "Cut" en attaque) n'apparaissait pas du tout dans la liste des
+      // stats liables — "groupBreakdown" (utilisée en interne) exclut délibérément les tags à
+      // 0 occurrence, pratique pour l'affichage normal (éviter des lignes vides dans la
+      // répartition à l'écran) mais ça empêchait justement de fixer un objectif "faire
+      // progresser depuis 0". On calcule donc ici SANS cette exclusion, pour que tous les
+      // tags configurés restent sélectionnables, même à 0%.
+      const allEntries = tags.map(label => {
+        const matching = plays.filter(p => tagIsSet(p.tags, label));
+        const pts = matching.reduce((s, p) => s + playPoints(p.tags), 0);
+        return { name: label, count: matching.length, pppp: matching.length ? pts / matching.length : 0, open: openPct(matching) };
+      });
+      const categoryTotal = allEntries.reduce((s, e) => s + e.count, 0);
+      allEntries.forEach(item => {
+        out[`[${sideLabel}] ${categoryName} — ${item.name} (Frequency)`] = categoryTotal ? (100 * item.count) / categoryTotal : 0;
         if (item.pppp !== null && item.pppp !== undefined) out[`[${sideLabel}] ${categoryName} — ${item.name} (PPPP)`] = item.pppp;
         if (item.open !== null && item.open !== undefined) out[`[${sideLabel}] ${categoryName} — ${item.name} (% Open)`] = item.open;
       });
@@ -4681,6 +4694,26 @@ function useObjectives(playerName) {
     if (changed) await storeSet("objectives:" + playerName, migrated);
     setObjectives(migrated);
     setLoading(false);
+
+    // Deuxième migration, ciblée : la catégorie "Shot selection" a d'abord utilisé le calcul
+    // générique (clés du type "[Defense] Shot selection — Open (% Open)" ou "Contested (% Open)"),
+    // avant d'être remplacée par la vraie formule officielle du classeur (shootingSelection),
+    // qui n'expose plus que "(Frequency)" avec le nom "Contested / Turnover" (pas "Contested"
+    // seul). Les objectifs créés entre-temps pointaient vers une clé qui n'existe plus — l'app
+    // affichait "–" pour eux, même après la première migration ci-dessus (qui ne couvre que
+    // l'ANCIEN format pré-catégories, pas celui-ci).
+    const migrated2 = migrated.map(o => {
+      if (!o.linkedStat) return o;
+      const m2 = o.linkedStat.match(/^\[(Offense|Defense)\] Shot selection — (Open|Contested)(?:\s*\/\s*Turnover)? \([^)]+\)$/);
+      if (!m2) return o;
+      const [, side, tagName] = m2;
+      const newTagName = tagName === "Contested" ? "Contested / Turnover" : "Open";
+      return { ...o, linkedStat: `[${side}] Shot selection — ${newTagName} (Frequency)` };
+    });
+    if (JSON.stringify(migrated2) !== JSON.stringify(migrated)) {
+      await storeSet("objectives:" + playerName, migrated2);
+      setObjectives(migrated2);
+    }
   }
 
   async function save(obj) {
