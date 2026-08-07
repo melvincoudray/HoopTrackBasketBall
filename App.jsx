@@ -2086,16 +2086,40 @@ export default function App() {
     let effectiveRoster = [];
     if (r) {
       const cleaned = r.filter(p => !/^\d+$/.test(String(p.first).trim()));
-      setRoster(cleaned);
-      effectiveRoster = cleaned;
-      if (cleaned.length !== r.length) await storeSet("roster", cleaned); // purge un ancien "joueur" numérique (ligne d'équipe)
+      // BUG RÉEL CORRIGÉ (signalé par l'utilisateur, capture à l'appui) : le roster contenait
+      // deux entrées pour le même joueur (ex. "Aaron Roberto" en double) — la cause racine
+      // était un réamorçage accidentel du roster par défaut (voir plus bas, ROSTER_SEEDED_KEY)
+      // qui pouvait coexister avec le vrai roster déjà construit. On fusionne ici toute
+      // entrée en double partageant le même nom, en gardant celle qui a une photo enregistrée
+      // (signe qu'elle est la "vraie", construite manuellement) ou, à défaut, la première.
+      const seenNames = new Map();
+      for (const p of cleaned) {
+        const key = normTag(p.name || "");
+        if (!key) continue;
+        if (!seenNames.has(key)) { seenNames.set(key, p); continue; }
+        const existing = seenNames.get(key);
+        const existingHasPhoto = await storeGet("photo:" + existing.name);
+        if (!existingHasPhoto) seenNames.set(key, p); // remplace par le doublon suivant, au cas où LUI a la photo
+      }
+      const deduped = [...seenNames.values()];
+      setRoster(deduped);
+      effectiveRoster = deduped;
+      if (deduped.length !== r.length) await storeSet("roster", deduped); // purge doublons + anciennes lignes numériques
     } else {
       // Seule l'équipe nationale suisse démarre avec le roster pré-rempli — les autres
       // équipes (ex. Aurore Vitré) démarrent vides, à construire via "Add a player".
-      const seed = team.id === "u16-sui" ? DEFAULT_ROSTER : [];
+      // BUG RÉEL CORRIGÉ : ce réamorçage se déclenchait à chaque fois que la lecture du
+      // roster stocké renvoyait vide/absente — y compris de façon TRANSITOIRE (ex. lecture
+      // réseau qui échoue une fois), sans jamais vérifier si un vrai roster avait déjà été
+      // construit auparavant. Un indicateur séparé ("roster_seeded") empêche maintenant tout
+      // réamorçage une fois qu'il a eu lieu une première fois, même si une lecture ultérieure
+      // du roster lui-même échoue transitoirement.
+      const alreadySeeded = await storeGet("roster_seeded");
+      const seed = (!alreadySeeded && team.id === "u16-sui") ? DEFAULT_ROSTER : [];
       setRoster(seed);
       effectiveRoster = seed;
       await storeSet("roster", seed);
+      await storeSet("roster_seeded", true);
     }
     const savedSession = await loadLocalSession();
     if (savedSession) {
@@ -3872,7 +3896,7 @@ function PlayersList({ roster, allPlays, onSelect, isCoach, onlyOwn, matchFilter
           ) : (
             <div key={p.id} style={{ ...btnRow, cursor: "default" }}>
               <button onClick={() => onSelect(p.name)} style={{ display: "flex", alignItems: "center", gap: 14, background: "none", border: "none", cursor: "pointer", padding: 0, flex: 1, textAlign: "left", fontFamily: "inherit", color: "inherit" }}>
-                <PlayerAvatar playerName={p.first} size={34} />
+                <PlayerAvatar playerName={p.name} size={34} />
                 <div>
                   <div style={{ fontWeight: 600, fontSize: 14.5 }}>{p.name}</div>
                   <div style={{ fontSize: 12, color: "#5C6470" }}>{p.position ? p.position + " · " : ""}{p.boxGames} box score{p.boxGames !== 1 ? "s" : ""} · {p.codedGames} match{p.codedGames !== 1 ? "s" : ""} coded</div>
