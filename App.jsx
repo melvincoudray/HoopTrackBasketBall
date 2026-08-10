@@ -6120,7 +6120,7 @@ function RoseChart({ ratings, categories = SKILL_CATEGORIES, size = 420, emphasi
   // soit la taille de la roue — il grossit maintenant proportionnellement, comme celui des
   // catégories mises en avant (qui restent toujours en couleur et plus grosses que les autres).
   const sizeScale = size / 480;
-  const baseGap = 30 * sizeScale;
+  const baseGap = 14 * sizeScale;
   const emphasizedIndices = categories.map((cat, i) => ({ cat, i, emphasized: topStrengths.has(cat) || cat === worstWeakness })).filter(x => x.emphasized);
   const staggerExtra = {};
   emphasizedIndices.forEach((entry) => {
@@ -6128,7 +6128,7 @@ function RoseChart({ ratings, categories = SKILL_CATEGORIES, size = 420, emphasi
       const diff = Math.min(Math.abs(entry.i - other.i), n - Math.abs(entry.i - other.i));
       return diff <= 1; // catégorie immédiatement voisine (mise en avant ou non)
     });
-    staggerExtra[entry.cat] = (conflict ? 100 : 14) * sizeScale;
+    staggerExtra[entry.cat] = (conflict ? 78 : 6) * sizeScale;
   });
 
   function wedgePath(i, value) {
