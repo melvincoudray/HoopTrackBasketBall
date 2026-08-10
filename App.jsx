@@ -6110,24 +6110,25 @@ function RoseChart({ ratings, categories = SKILL_CATEGORIES, size = 420, emphasi
   // libellés était en pixels fixes, donnant une impression de "trou"/catégorie sans nom à
   // grande taille — il est maintenant proportionnel à la taille réelle de la roue, comme le
   // décalage anti-chevauchement l'était déjà.
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur, à grande taille de roue) : le décalage
+  // ANGULAIRE utilisé pour séparer deux libellés en conflit désalignait le texte de sa propre
+  // catégorie — un libellé pouvait se retrouver à côté d'une AUTRE part que la sienne. On ne
+  // décale plus JAMAIS l'angle : chaque libellé reste exactement en face de sa propre part, et
+  // la séparation entre voisins en conflit se fait uniquement par la DISTANCE (l'un est plus
+  // loin du centre que l'autre), jamais par un changement de direction.
+  // BUG RÉEL CORRIGÉ : le texte des catégories normales restait à une taille fixe quelle que
+  // soit la taille de la roue — il grossit maintenant proportionnellement, comme celui des
+  // catégories mises en avant (qui restent toujours en couleur et plus grosses que les autres).
   const sizeScale = size / 480;
   const baseGap = 30 * sizeScale;
   const emphasizedIndices = categories.map((cat, i) => ({ cat, i, emphasized: topStrengths.has(cat) || cat === worstWeakness })).filter(x => x.emphasized);
-  const staggerExtra = {}, angleNudge = {};
-  emphasizedIndices.forEach((entry, idx) => {
+  const staggerExtra = {};
+  emphasizedIndices.forEach((entry) => {
     const conflict = categories.map((cat, i) => ({ cat, i })).filter(x => x.i !== entry.i).find(other => {
       const diff = Math.min(Math.abs(entry.i - other.i), n - Math.abs(entry.i - other.i));
       return diff <= 1; // catégorie immédiatement voisine (mise en avant ou non)
     });
-    if (conflict) {
-      staggerExtra[entry.cat] = 64 * sizeScale;
-      // S'écarte du côté opposé à l'autre libellé en conflit, le long du cercle.
-      const forward = (entry.i - conflict.i + n) % n <= n / 2;
-      angleNudge[entry.cat] = forward ? 0.5 : -0.5;
-    } else {
-      staggerExtra[entry.cat] = 14 * sizeScale;
-      angleNudge[entry.cat] = 0;
-    }
+    staggerExtra[entry.cat] = (conflict ? 100 : 14) * sizeScale;
   });
 
   function wedgePath(i, value) {
@@ -6138,8 +6139,8 @@ function RoseChart({ ratings, categories = SKILL_CATEGORIES, size = 420, emphasi
     const x1 = cx + r * Math.cos(a1), y1 = cy + r * Math.sin(a1);
     return `M ${cx} ${cy} L ${x0} ${y0} A ${r} ${r} 0 0 1 ${x1} ${y1} Z`;
   }
-  function labelPos(i, extra, nudge = 0) {
-    const a = -Math.PI / 2 + (i + 0.5) * angleStep + nudge;
+  function labelPos(i, extra) {
+    const a = -Math.PI / 2 + (i + 0.5) * angleStep; // toujours l'angle exact de la catégorie
     const r = maxR + baseGap + extra;
     return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
   }
@@ -6154,11 +6155,11 @@ function RoseChart({ ratings, categories = SKILL_CATEGORIES, size = 420, emphasi
         const isStrength = topStrengths.has(cat);
         const isWeakness = cat === worstWeakness;
         const emphasis = isStrength || isWeakness;
-        const fontSize = emphasis ? 26 : 11.5;
+        const fontSize = (emphasis ? 26 : 11.5) * sizeScale;
         const color = isStrength ? "#3DDC6F" : isWeakness ? "#FF5C4D" : "#C9CFD8";
         const weight = emphasis ? 800 : 400;
         const words = cat.split(" ");
-        const p = labelPos(i, emphasis ? staggerExtra[cat] : 0, emphasis ? angleNudge[cat] : 0);
+        const p = labelPos(i, emphasis ? staggerExtra[cat] : 0);
         return (
           <text key={cat} x={p.x} y={p.y} fill={color} fontSize={fontSize} fontWeight={weight} textAnchor="middle" dominantBaseline="middle" style={{ fontFamily: "Inter, sans-serif" }}>
             {words.map((w, wi) => (
