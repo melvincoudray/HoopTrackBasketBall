@@ -4340,6 +4340,8 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
               </>
             )}
 
+            {box.entries.length > 0 && <CustomStatsPanel statsObj={box.averages} isCoach={isCoach} />}
+
             {position && (
               <>
                 <SectionTitle eyebrow={`Position : ${position}`} title="Position Comparison" />
@@ -5704,7 +5706,158 @@ function MatchSelector({ options, selectedKeys, onChange }) {
   );
 }
 
-function TeamAdvancedStats({ advanced }) {
+// Stats calculées personnalisées : le coach combine des stats existantes avec +, -, ×, ÷ et
+// des parenthèses, pour créer sa propre stat (ex. "(PTS + AST) / TOV"). Utilisable à la fois
+// sur la fiche d'un joueur (Players) et sur les stats d'équipe (Team) — le stockage est
+// automatiquement propre à chaque équipe (comme tout le reste via storeGet/storeSet), et
+// chaque définition précise si elle s'applique aux joueurs, à l'équipe, ou aux deux.
+function useCustomStats() {
+  const [customStats, setCustomStats] = useState([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => { load(); }, []);
+  async function load() {
+    setLoading(true);
+    setCustomStats((await storeGet("custom_stats")) || []);
+    setLoading(false);
+  }
+  async function saveStat(stat) {
+    const next = customStats.some(s => s.id === stat.id)
+      ? customStats.map(s => s.id === stat.id ? stat : s)
+      : [...customStats, { ...stat, id: stat.id || uid() }];
+    await storeSet("custom_stats", next);
+    setCustomStats(next);
+  }
+  async function deleteStat(id) {
+    const next = customStats.filter(s => s.id !== id);
+    await storeSet("custom_stats", next);
+    setCustomStats(next);
+  }
+  return { customStats, loading, saveStat, deleteStat };
+}
+
+// La formule est stockée comme une chaîne utilisant des jetons entre crochets pour les stats,
+// ex. "([Pts] + [Ast]) / [Turnovers]" — on remplace chaque jeton par sa valeur numérique, puis
+// on évalue le résultat. Le résultat après substitution ne peut contenir QUE des chiffres,
+// espaces, points et les caractères +-*/() — jamais évalué si autre chose s'y trouve, pour
+// empêcher toute exécution de code arbitraire (pas de vrai risque ici puisque la formule est
+// écrite par le coach lui-même, mais on reste rigoureux par principe).
+function evaluateCustomStatFormula(formula, statsObj) {
+  if (!formula) return null;
+  let substituted = formula.replace(/\[([^\]]+)\]/g, (_, label) => {
+    const v = statsObj[label];
+    return typeof v === "number" && isFinite(v) ? String(v) : "NaN";
+  });
+  if (substituted.includes("NaN")) return null; // une stat référencée est absente pour ce joueur/cette équipe
+  if (!/^[\d\s+\-*/().]+$/.test(substituted)) return null; // caractère inattendu -> on n'évalue jamais
+  try {
+    // eslint-disable-next-line no-new-func
+    const result = Function(`"use strict"; return (${substituted});`)();
+    return typeof result === "number" && isFinite(result) ? result : null;
+  } catch { return null; }
+}
+
+// Formulaire de création/édition d'une stat personnalisée : construit la formule pas à pas
+// (choisir une stat existante dans le menu, l'insérer, ajouter un opérateur ou une parenthèse)
+// plutôt que de demander au coach de taper une expression à la main, plus sûr et plus rapide.
+function CustomStatForm({ initial, availableStats, onSave, onCancel }) {
+  const [name, setName] = useState(initial?.name || "");
+  const [formula, setFormula] = useState(initial?.formula || "");
+  const [pickerValue, setPickerValue] = useState("");
+  const preview = evaluateCustomStatFormula(formula, Object.fromEntries(availableStats.map(s => [s, 1])));
+
+  function insertStat() {
+    if (!pickerValue) return;
+    setFormula(f => f + `[${pickerValue}]`);
+    setPickerValue("");
+  }
+  function insertToken(tok) { setFormula(f => f + tok); }
+
+  return (
+    <div style={{ background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 10, padding: 16, marginBottom: 16 }}>
+      <div style={{ marginBottom: 10 }}>
+        <label style={labelStyle}>Custom stat name</label>
+        <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. AST/TO Ratio" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+      </div>
+      <div style={{ marginBottom: 10 }}>
+        <label style={labelStyle}>Formula</label>
+        <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+          <select value={pickerValue} onChange={e => setPickerValue(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 220 }}>
+            <option value="">Select a stat…</option>
+            {availableStats.map(s => <option key={s} value={s}>{s}</option>)}
+          </select>
+          <button type="button" onClick={insertStat} disabled={!pickerValue} style={{ padding: "8px 14px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: pickerValue ? AMBER : "#5C6470", cursor: pickerValue ? "pointer" : "default", fontFamily: "inherit" }}>+ Insert</button>
+          {["+", "-", "×", "÷", "(", ")"].map(tok => (
+            <button key={tok} type="button" onClick={() => insertToken(tok === "×" ? "*" : tok === "÷" ? "/" : tok)}
+              style={{ width: 36, padding: "8px 0", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, cursor: "pointer", fontFamily: "inherit", fontSize: 15 }}>{tok}</button>
+          ))}
+          <button type="button" onClick={() => setFormula("")} style={{ padding: "8px 14px", background: "none", border: "none", color: "#5C6470", cursor: "pointer", fontFamily: "inherit" }}>Clear</button>
+        </div>
+        <textarea value={formula} onChange={e => setFormula(e.target.value)} rows={2} placeholder="e.g. ([Ast] + [Pts]) / [Turnovers]"
+          style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "ui-monospace, monospace", fontSize: 13, resize: "vertical" }} />
+        <div style={{ fontSize: 11.5, color: preview !== null ? TEAL : "#5C6470", marginTop: 6 }}>
+          {formula.trim() === "" ? "Empty formula" : preview !== null ? "Formula looks valid (tested with sample values)" : "Formula not valid yet — check parentheses and stat names"}
+        </div>
+      </div>
+      <div style={{ display: "flex", gap: 10 }}>
+        <button onClick={() => name.trim() && formula.trim() && onSave({ id: initial?.id, name: name.trim(), formula: formula.trim() })}
+          disabled={!name.trim() || !formula.trim() || preview === null}
+          style={{ padding: "9px 18px", background: AMBER, border: "none", borderRadius: 8, color: "#1a1200", fontWeight: 700, cursor: (!name.trim() || !formula.trim() || preview === null) ? "default" : "pointer", opacity: (!name.trim() || !formula.trim() || preview === null) ? 0.5 : 1, fontFamily: "inherit" }}>Save</button>
+        <button onClick={onCancel} style={{ padding: "9px 18px", background: "none", border: `1px solid ${LINE}`, borderRadius: 8, color: "#8B93A1", cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+// Affiche chaque stat personnalisée calculée pour le joueur/l'équipe fourni(e), avec
+// possibilité pour le coach d'en ajouter, modifier, ou supprimer.
+function CustomStatsPanel({ statsObj, isCoach }) {
+  const { customStats, loading, saveStat, deleteStat } = useCustomStats();
+  const [editing, setEditing] = useState(null); // null | "new" | stat object
+  const availableStats = Object.keys(statsObj).filter(k => typeof statsObj[k] === "number");
+
+  if (loading) return null;
+  if (!customStats.length && !isCoach) return null;
+
+  return (
+    <div style={{ marginTop: 16, marginBottom: 16 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+        <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470" }}>Custom stats</div>
+        {isCoach && !editing && (
+          <button onClick={() => setEditing("new")} style={{ display: "flex", alignItems: "center", gap: 5, background: "none", border: "none", color: AMBER, cursor: "pointer", fontSize: 12.5, fontFamily: "inherit" }}><Plus size={13} /> Add stat</button>
+        )}
+      </div>
+      {editing && (
+        <CustomStatForm
+          initial={editing === "new" ? null : editing}
+          availableStats={availableStats}
+          onSave={async (s) => { await saveStat(s); setEditing(null); }}
+          onCancel={() => setEditing(null)}
+        />
+      )}
+      {customStats.length > 0 && (
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          {customStats.map(s => {
+            const value = evaluateCustomStatFormula(s.formula, statsObj);
+            return (
+              <div key={s.id} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: "12px 16px", minWidth: 120 }}>
+                <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 20, fontWeight: 800, color: value !== null ? AMBER : "#5C6470" }}>{value !== null ? (Number.isInteger(value) ? value : value.toFixed(2)) : "–"}</div>
+                <div style={{ fontSize: 11, color: "#8B93A1", marginBottom: 6 }}>{s.name}</div>
+                {isCoach && (
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={() => setEditing(s)} style={{ fontSize: 11, color: AMBER, background: "none", border: "none", cursor: "pointer" }}>Edit</button>
+                    <button onClick={() => deleteStat(s.id)} style={{ fontSize: 11, color: RED, background: "none", border: "none", cursor: "pointer" }}>Delete</button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TeamAdvancedStats({ advanced, isCoach }) {
   const STAT_LABELS_FR = { fgm: "Shots made (FGM)", fga: "Shots attempted (FGA)", tpm: "3pt made", fta: "FT attempted", ftm: "FT made", oreb: "Off. rebounds", tov: "Turnovers", pts: "Points" };
 
   if (advanced.loading) return <EmptyState text="Loading…" />;
@@ -5727,9 +5880,16 @@ function TeamAdvancedStats({ advanced }) {
     ? advanced.perMatch.map(m => m.opponentScore).filter(v => v !== null && v !== undefined).reduce((s, v, _, arr) => s + v / arr.length, 0) : null;
   const net = ortg !== null && drtg !== null ? ortg - drtg : null;
   const approxPoss = advanced.perMatch.some(m => m.approxPoss);
+  const customStatsObj = Object.fromEntries(Object.entries({
+    ORTG: ortg, DRTG: drtg, "Net rating": net, Possessions: poss, "FT Rate": ftRate,
+    "Off. rebounds": oreb, "Def. rebounds": dreb, Rebounds: reb, Assists: ast, Points: pts,
+    "Opponent points": ptse, "% 2pts": pct2, "% 3pts": pct3, "% FT": pctFT, eFG: efg,
+    "TOV%": tovPct, "OREB%": orebPct, "AST%": astPct,
+  }).filter(([, v]) => v !== null && v !== undefined));
 
   return (
     <div>
+      <CustomStatsPanel statsObj={customStatsObj} isCoach={isCoach} />
       <div style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: 12, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, marginBottom: 20 }}>
         <ClipboardList size={15} color={TEAL} style={{ marginTop: 2, flexShrink: 0 }} />
         <div style={{ fontSize: 12.5, color: "#8B93A1", lineHeight: 1.6 }}>
@@ -5941,19 +6101,29 @@ function RoseChart({ ratings, categories = SKILL_CATEGORIES, size = 420, emphasi
   // calibré pour une roue de 480px — à une taille plus petite (ex. 420px pour l'export en
   // page pleine), le chevauchement revenait. Le décalage est maintenant proportionnel à la
   // taille réelle de la roue, pour rester efficace à n'importe quelle taille.
+  // BUG RÉEL CORRIGÉ (capture d'écran) : "Perimeter defense" (mis en avant, texte large)
+  // chevauchait sa voisine normale "Inside defense" (texte petit) — mon détecteur de conflit
+  // ne comparait les catégories mises en avant qu'ENTRE ELLES, jamais avec une voisine
+  // normale, qui peut pourtant se faire recouvrir par un texte large juste à côté. On vérifie
+  // maintenant les conflits avec TOUTES les catégories voisines, pas seulement celles mises en
+  // avant. BUG RÉEL CORRIGÉ (deuxième capture) : l'espacement de base entre la roue et les
+  // libellés était en pixels fixes, donnant une impression de "trou"/catégorie sans nom à
+  // grande taille — il est maintenant proportionnel à la taille réelle de la roue, comme le
+  // décalage anti-chevauchement l'était déjà.
   const sizeScale = size / 480;
+  const baseGap = 30 * sizeScale;
   const emphasizedIndices = categories.map((cat, i) => ({ cat, i, emphasized: topStrengths.has(cat) || cat === worstWeakness })).filter(x => x.emphasized);
   const staggerExtra = {}, angleNudge = {};
   emphasizedIndices.forEach((entry, idx) => {
-    const conflict = emphasizedIndices.slice(0, idx).find(other => {
+    const conflict = categories.map((cat, i) => ({ cat, i })).filter(x => x.i !== entry.i).find(other => {
       const diff = Math.min(Math.abs(entry.i - other.i), n - Math.abs(entry.i - other.i));
-      return diff <= 2; // catégories voisines ou quasi-voisines sur la roue
+      return diff <= 1; // catégorie immédiatement voisine (mise en avant ou non)
     });
     if (conflict) {
-      staggerExtra[entry.cat] = 34 * sizeScale;
+      staggerExtra[entry.cat] = 64 * sizeScale;
       // S'écarte du côté opposé à l'autre libellé en conflit, le long du cercle.
       const forward = (entry.i - conflict.i + n) % n <= n / 2;
-      angleNudge[entry.cat] = forward ? 0.28 : -0.28;
+      angleNudge[entry.cat] = forward ? 0.5 : -0.5;
     } else {
       staggerExtra[entry.cat] = 14 * sizeScale;
       angleNudge[entry.cat] = 0;
@@ -5970,7 +6140,7 @@ function RoseChart({ ratings, categories = SKILL_CATEGORIES, size = 420, emphasi
   }
   function labelPos(i, extra, nudge = 0) {
     const a = -Math.PI / 2 + (i + 0.5) * angleStep + nudge;
-    const r = maxR + 30 + extra;
+    const r = maxR + baseGap + extra;
     return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
   }
 
@@ -6341,16 +6511,27 @@ function StatShapeBadge({ label, value, size = 74, fontScale = 1, color = TEAL }
   );
 }
 
-function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, teamLogo, onEdit, onDelete, printMode, onMoveUp, onMoveDown, isFirst, isLast }) {
+function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, teamLogo, onEdit, onDelete, printMode, onMoveUp, onMoveDown, isFirst, isLast, chartScale }) {
   // 0 = aucun voile (photo visible à 100%), 100 = fond entièrement noir (photo invisible).
   const darkness = Math.max(0, Math.min(100, bgDarkness ?? 70)) / 100;
+  // Étirement optionnel (activé par défaut, comme avant) : "100% 100%" remplit tout le cadre
+  // sans jamais couper la photo (au prix d'une légère déformation si les proportions ne
+  // correspondent pas) ; désactivé, on repasse en "cover" classique (recadrage, sans
+  // déformation). Choix laissé au coach, propre à chaque équipe.
+  const stretch = bgStretch ?? true;
   // Mode export : la fiche doit remplir toute une page A4 paysage, avec TOUS les éléments
   // bien visibles (photo, stats, chiffres) — pas la version compacte utilisée à l'écran.
-  const photoW = printMode ? 220 : 150, photoH = printMode ? 250 : 150;
-  const sidebarW = printMode ? 260 : 200;
-  const nameSize = printMode ? 23 : 15, subSize = printMode ? 14 : 11.5;
-  const chartSize = printMode ? 420 : 445;
-  const badgeMinSize = printMode ? 78 : 56;
+  // BUG RÉEL CORRIGÉ : l'export n'activait jamais réellement "printMode" (le call site ne le
+  // passait pas) — il utilisait donc la même branche que l'écran. En agrandissant la roue à
+  // l'écran, on aurait aussi cassé le "2 joueurs par page" déjà validé pour le PDF. Les deux
+  // sont maintenant bien séparés : printMode (export) garde les tailles déjà vérifiées pour
+  // tenir à 2 par page en portrait ; l'écran (sans contrainte de page) peut être bien plus
+  // grand pour utiliser tout l'espace disponible.
+  const photoW = printMode ? 150 : 260, photoH = printMode ? 150 : 260;
+  const sidebarW = printMode ? 200 : 300;
+  const nameSize = printMode ? 15 : 26, subSize = printMode ? 11.5 : 16;
+  const chartSize = printMode ? 445 : Math.round(640 * Math.max(0.75, Math.min(1.8, chartScale ?? 1)));
+  const badgeMinSize = printMode ? 56 : 90;
   return (
     <div data-no-split="true" style={{
       position: "relative",
@@ -6360,48 +6541,48 @@ function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, teamLogo, on
       // "100% 100%" (au lieu de "cover") étire la photo pour remplir tout le cadre sans jamais
       // la couper ni la répéter en mosaïque — quitte à légèrement déformer l'image si ses
       // proportions ne correspondent pas exactement à celles du cadre.
-      backgroundSize: "100% 100%", backgroundPosition: "center", backgroundRepeat: "no-repeat",
-      border: `1px solid ${LINE}`, borderRadius: 14, padding: printMode ? 28 : 16, marginBottom: 14,
+      backgroundSize: stretch ? "100% 100%" : "cover", backgroundPosition: "center", backgroundRepeat: "no-repeat",
+      border: `1px solid ${LINE}`, borderRadius: 14, padding: printMode ? 16 : 28, marginBottom: 14,
     }}>
       {/* Logo de l'équipe scoutée, à l'intérieur du cadre de la fiche (pas en dehors, sur le
           document partagé) — demandé par l'utilisateur, à la même taille que les onglets. */}
       {teamLogo && <img src={teamLogo} alt="" style={{ position: "absolute", top: 16, right: 16, width: 30, height: 30, borderRadius: 6, objectFit: "cover" }} />}
-      <div style={{ display: "flex", gap: printMode ? 36 : 24, flexWrap: "wrap", width: "100%" }}>
+      <div style={{ display: "flex", gap: printMode ? 24 : 36, flexWrap: "wrap", width: "100%" }}>
         <div style={{ width: sidebarW, flexShrink: 0 }}>
-          <div style={{ width: photoW, height: photoH, borderRadius: 12, background: PANEL2, border: `1px solid ${LINE}`, overflow: "hidden", marginBottom: printMode ? 12 : 12 }}>
+          <div style={{ width: photoW, height: photoH, borderRadius: 12, background: PANEL2, border: `1px solid ${LINE}`, overflow: "hidden", marginBottom: 12 }}>
             {player.photo && <img src={player.photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />}
           </div>
           <div style={{ fontSize: nameSize, fontWeight: 800, color: PAPER }}>{player.jersey ? `#${player.jersey} ` : ""}{player.lastName?.toUpperCase()}</div>
-          <div style={{ fontSize: subSize, color: "#8B93A1", marginBottom: printMode ? 10 : 10 }}>{player.firstName}{player.position ? ` · Position ${player.position}` : ""}</div>
+          <div style={{ fontSize: subSize, color: "#8B93A1", marginBottom: 10 }}>{player.firstName}{player.position ? ` · Position ${player.position}` : ""}</div>
 
           {(player.height || player.handedness) && (
             <div style={{ display: "flex", gap: 8, marginBottom: printMode ? 10 : 12 }}>
               {player.height && (
-                <div style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: printMode ? "12px 16px" : "8px 12px", flex: 1, textAlign: "center" }}>
-                  <div style={{ fontWeight: 800, fontSize: printMode ? 22 : 16, color: PAPER }}>{player.height} cm</div>
-                  <div style={{ fontSize: printMode ? 12 : 9.5, color: "#5C6470", textTransform: "uppercase" }}>Height</div>
+                <div style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: printMode ? "8px 12px" : "12px 16px", flex: 1, textAlign: "center" }}>
+                  <div style={{ fontWeight: 800, fontSize: printMode ? 16 : 22, color: PAPER }}>{player.height} cm</div>
+                  <div style={{ fontSize: printMode ? 9.5 : 12, color: "#5C6470", textTransform: "uppercase" }}>Height</div>
                 </div>
               )}
               {player.handedness && (
-                <div style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: printMode ? "12px 16px" : "8px 12px", flex: 1, textAlign: "center" }}>
-                  <div style={{ fontWeight: 800, fontSize: printMode ? 22 : 16, color: PAPER }}>{player.handedness}</div>
-                  <div style={{ fontSize: printMode ? 12 : 9.5, color: "#5C6470", textTransform: "uppercase" }}>Dominant hand</div>
+                <div style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: printMode ? "8px 12px" : "12px 16px", flex: 1, textAlign: "center" }}>
+                  <div style={{ fontWeight: 800, fontSize: printMode ? 16 : 22, color: PAPER }}>{player.handedness}</div>
+                  <div style={{ fontSize: printMode ? 9.5 : 12, color: "#5C6470", textTransform: "uppercase" }}>Dominant hand</div>
                 </div>
               )}
             </div>
           )}
 
           {player.plan && (
-            <div style={{ fontSize: printMode ? 13.5 : 12.5, color: "#D8DCE2", marginBottom: printMode ? 10 : 10, lineHeight: 1.4, whiteSpace: "pre-wrap" }}>
-              <div style={{ fontSize: printMode ? 13 : 10.5, textTransform: "uppercase", color: "#5C6470", marginBottom: 4 }}>Game plan</div>
+            <div style={{ fontSize: printMode ? 12.5 : 15, color: "#D8DCE2", marginBottom: 10, lineHeight: 1.4, whiteSpace: "pre-wrap" }}>
+              <div style={{ fontSize: printMode ? 10.5 : 13, textTransform: "uppercase", color: "#5C6470", marginBottom: 4 }}>Game plan</div>
               {player.plan}
             </div>
           )}
-          <div style={{ fontSize: printMode ? 13.5 : 12.5, marginBottom: printMode ? 10 : 10 }}>Close Out : <CloseOutBadge level={player.closeOut} /></div>
+          <div style={{ fontSize: printMode ? 12.5 : 15, marginBottom: 10 }}>Close Out : <CloseOutBadge level={player.closeOut} /></div>
           {player.highlights?.length > 0 && (
-            <div style={{ display: "flex", gap: printMode ? 14 : 10, flexWrap: "wrap" }}>
+            <div style={{ display: "flex", gap: printMode ? 10 : 14, flexWrap: "wrap" }}>
               {player.highlights.map((h, i) => (
-                <StatShapeBadge key={i} label={h.label} value={h.value} size={printMode ? Math.max(badgeMinSize, h.size ?? 74) : (h.size ?? 74)} fontScale={(h.fontScale ?? 1) * (printMode ? 1.15 : 1)} color={h.color ?? TEAL} />
+                <StatShapeBadge key={i} label={h.label} value={h.value} size={printMode ? (h.size ?? 74) : Math.max(badgeMinSize, h.size ?? 74)} fontScale={(h.fontScale ?? 1) * (printMode ? 1 : 1.15)} color={h.color ?? TEAL} />
               ))}
             </div>
           )}
@@ -6531,11 +6712,27 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
   // La photo de fond des fiches joueurs, elle, est propre à ce nouvel usage (pas de champ
   // équivalent dans "Manage teams") — reste stockée séparément par équipe, avec un réglage de
   // luminosité (0 = aucun voile, la photo est visible à 100% ; 100 = fond entièrement noir).
-  const [teamBg, setTeamBg] = useState(null); // { photo, darkness } | null
+  const [teamBg, setTeamBg] = useState(null); // { photo, darkness, stretch } | null
   useEffect(() => {
     if (!selectedTeam) { setTeamBg(null); return; }
     storeGet("scouting_team_bg:" + selectedTeam).then(v => setTeamBg(v || null));
   }, [selectedTeam]);
+  // Réglage "Display" : permet d'agrandir/réduire la roue à l'écran d'un simple curseur
+  // (demandé par l'utilisateur — plus rapide que de régler chaque élément un par un). Propre
+  // à chaque équipe, comme le reste. N'affecte que l'affichage à l'écran, pas l'export PDF qui
+  // garde sa taille déjà calibrée pour tenir à 2 joueurs par page.
+  const [displaySettings, setDisplaySettings] = useState(null); // { chartScale } | null
+  const [showDisplayPanel, setShowDisplayPanel] = useState(false);
+  useEffect(() => {
+    if (!selectedTeam) { setDisplaySettings(null); return; }
+    storeGet("scouting_display:" + selectedTeam).then(v => setDisplaySettings(v || { chartScale: 1 }));
+  }, [selectedTeam]);
+  async function handleChartScaleChange(chartScale) {
+    if (!selectedTeam) return;
+    const next = { ...(displaySettings || {}), chartScale };
+    setDisplaySettings(next);
+    await storeSet("scouting_display:" + selectedTeam, next);
+  }
   async function handleLogoUpload(e) {
     const file = e.target.files[0];
     if (!file || !selectedTeam) return;
@@ -6545,7 +6742,7 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
     const file = e.target.files[0];
     if (!file || !selectedTeam) return;
     const dataUrl = await fileToResizedDataURL(file, 900, 0.85);
-    const next = { photo: dataUrl, darkness: teamBg?.darkness ?? 70 };
+    const next = { photo: dataUrl, darkness: teamBg?.darkness ?? 70, stretch: teamBg?.stretch ?? true };
     await storeSet("scouting_team_bg:" + selectedTeam, next);
     setTeamBg(next);
   }
@@ -6553,6 +6750,15 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
     if (!teamBg || !selectedTeam) return;
     const next = { ...teamBg, darkness };
     setTeamBg(next); // réponse immédiate au curseur, sans attendre l'écriture
+    await storeSet("scouting_team_bg:" + selectedTeam, next);
+  }
+  // Étirement optionnel : activé, la photo remplit tout le cadre sans être coupée (peut se
+  // déformer légèrement) ; désactivé, elle garde ses proportions d'origine et est recadrée
+  // pour remplir le cadre (comportement "cover" classique).
+  async function handleBgStretchToggle() {
+    if (!teamBg || !selectedTeam) return;
+    const next = { ...teamBg, stretch: !(teamBg.stretch ?? true) };
+    setTeamBg(next);
     await storeSet("scouting_team_bg:" + selectedTeam, next);
   }
 
@@ -6621,16 +6827,38 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
                         <input type="file" accept="image/*" onChange={handleBgUpload} style={{ display: "none" }} />
                       </label>
                       {teamBg?.photo && (
-                        <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#8B93A1" }}>
-                          Darkness
-                          <input type="range" min={0} max={100} value={teamBg.darkness ?? 70} onChange={e => handleBgDarknessChange(Number(e.target.value))} style={{ width: 90 }} />
-                          <span style={{ width: 26, textAlign: "right", fontFamily: "ui-monospace, monospace" }}>{teamBg.darkness ?? 70}</span>
-                        </label>
+                        <>
+                          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#8B93A1" }}>
+                            Darkness
+                            <input type="range" min={0} max={100} value={teamBg.darkness ?? 70} onChange={e => handleBgDarknessChange(Number(e.target.value))} style={{ width: 90 }} />
+                            <span style={{ width: 26, textAlign: "right", fontFamily: "ui-monospace, monospace" }}>{teamBg.darkness ?? 70}</span>
+                          </label>
+                          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, color: "#8B93A1", cursor: "pointer" }}>
+                            <input type="checkbox" checked={teamBg.stretch ?? true} onChange={handleBgStretchToggle} />
+                            Stretch to fill (no crop)
+                          </label>
+                        </>
                       )}
                     </>
                   )}
+                  {isCoach && (
+                    <button onClick={() => setShowDisplayPanel(v => !v)} style={{ display: "flex", alignItems: "center", gap: 6, background: showDisplayPanel ? PANEL2 : "none", border: `1px solid ${showDisplayPanel ? AMBER : LINE}`, borderRadius: 8, padding: "6px 10px", cursor: "pointer", fontSize: 11, color: showDisplayPanel ? AMBER : "#8B93A1", fontFamily: "inherit" }}>
+                      <LayoutGrid size={12} /> Display
+                    </button>
+                  )}
                 </div>
               </div>
+              {isCoach && showDisplayPanel && (
+                <div style={{ background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 10, padding: 16, marginBottom: 20 }}>
+                  <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 10 }}>Display — on-screen wheel size</div>
+                  <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12.5, color: "#D8DCE2" }}>
+                    Wheel size
+                    <input type="range" min={0.75} max={1.8} step={0.05} value={displaySettings?.chartScale ?? 1} onChange={e => handleChartScaleChange(Number(e.target.value))} style={{ width: 220 }} />
+                    <span style={{ width: 40, textAlign: "right", fontFamily: "ui-monospace, monospace" }}>{Math.round((displaySettings?.chartScale ?? 1) * 100)}%</span>
+                  </label>
+                  <div style={{ fontSize: 11, color: "#5C6470", marginTop: 6 }}>Only affects the on-screen display — the PDF export keeps its own size, already set to fit 2 players per page.</div>
+                </div>
+              )}
               {editing && (
                 <ScoutingPlayerForm
                   initial={editing === "new" ? null : editing}
@@ -6644,7 +6872,7 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
               ) : (
                 <div className="screen-only">
                   {report.players.map((p, i) => (
-                    <ScoutingPlayerCard key={p.id} player={p} isCoach={isCoach} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness} teamLogo={teamLogo}
+                    <ScoutingPlayerCard key={p.id} player={p} isCoach={isCoach} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness} bgStretch={teamBg?.stretch} teamLogo={teamLogo} chartScale={displaySettings?.chartScale}
                       onEdit={() => setEditing(p)} onDelete={() => report.deletePlayer(p.id)}
                       onMoveUp={() => report.movePlayer(p.id, "up")} onMoveDown={() => report.movePlayer(p.id, "down")}
                       isFirst={i === 0} isLast={i === report.players.length - 1} />
@@ -6657,7 +6885,7 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
                     <h1 style={{ fontSize: 18, marginBottom: 8 }}>Scouting individuel — {selectedTeam}</h1>
                     {report.players.map((p, i) => (
                       <div key={p.id} data-new-page={i % 2 === 0 ? "true" : undefined} style={{ marginBottom: 0, pageBreakInside: "avoid", pageBreakBefore: i % 2 === 0 ? "always" : "auto" }}>
-                        <ScoutingPlayerCard player={p} isCoach={false} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness} teamLogo={teamLogo} onEdit={() => {}} onDelete={() => {}} />
+                        <ScoutingPlayerCard player={p} isCoach={false} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness} bgStretch={teamBg?.stretch} teamLogo={teamLogo} onEdit={() => {}} onDelete={() => {}} printMode />
                       </div>
                     ))}
                   </div>
@@ -7860,7 +8088,7 @@ function TeamPrintReport({ team, rows, otherLabels, advanced, teamOff, teamDef, 
       </table>
 
       <h2 style={{ fontSize: 16, marginBottom: 8 }}>Advanced — Four Factors & Ratings</h2>
-      <TeamAdvancedStats advanced={advanced} />
+      <TeamAdvancedStats advanced={advanced} isCoach={false} />
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Team Play — Offense / Defense</h2>
       <OffenseDefenseBreakdown off={teamOff} def={teamDef} />
@@ -8342,7 +8570,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
 
       {subtab === "collectif" && (isCoach || v.teamPlay) && <OffenseDefenseBreakdown off={teamOff} def={teamDef} detailTables={false} />}
 
-      {subtab === "avance" && (isCoach || v.advanced) && <TeamAdvancedStats advanced={advanced} />}
+      {subtab === "avance" && (isCoach || v.advanced) && <TeamAdvancedStats advanced={advanced} isCoach={isCoach} />}
       {subtab === "resources" && (isCoach || v.resources) && <TeamResourcesTab isCoach={isCoach} team={team} />}
       {subtab === "entrainement" && isCoach && <CollectiveTraining roster={roster} />}
 
