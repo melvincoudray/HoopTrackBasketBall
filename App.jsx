@@ -4414,7 +4414,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
             {plays.length > 0 && (
               <div style={{ marginTop: 16, marginBottom: 16 }}>
                 <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 10 }}>Shot chart</div>
-                <HalfCourtShotChart zoneStats={computeShotZoneStats(plays, currentTagCategories())} thresholds={shotChartThresholds} />
+                <HalfCourtShotChart zoneStats={computeShotZoneStats(off, currentTagCategories())} thresholds={shotChartThresholds} />
               </div>
             )}
 
@@ -8805,7 +8805,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
           {(teamOff.length > 0 || teamDef.length > 0) && (
             <div style={{ marginTop: 16, marginBottom: 16 }}>
               <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 10 }}>Team shot chart</div>
-              <HalfCourtShotChart zoneStats={computeShotZoneStats([...teamOff, ...teamDef], currentTagCategories())} thresholds={shotChartThresholds} />
+              <HalfCourtShotChart zoneStats={computeShotZoneStats(teamOff, currentTagCategories())} thresholds={shotChartThresholds} />
             </div>
           )}
         </>
