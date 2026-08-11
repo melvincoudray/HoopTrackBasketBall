@@ -4075,6 +4075,12 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
       <h1 style={{ fontSize: 24, marginBottom: 4 }}>{playerName}</h1>
       <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 20 }}>{position || "Position not set"} · Report generated on {new Date().toLocaleDateString("en-US")}</div>
 
+      {/* Demandé par l'utilisateur : "Role" doit apparaître en tout premier dans l'export PDF,
+          juste après le nom/prénom — UNIQUEMENT à l'export, l'ordre du menu à l'écran (dans
+          PlayerDetail) reste inchangé, Role y garde sa 6e place. */}
+      <h2 style={{ fontSize: 16, marginTop: 0, marginBottom: 8 }}>Role</h2>
+      <RoleTab playerName={playerName} isCoach={false} />
+
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Official totals (box score)</h2>
       {box.entries.length === 0 ? <p>No box score imported.</p> : (
         <>
@@ -4156,6 +4162,13 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
         </>
       )}
 
+      {off.length > 0 && (
+        <>
+          <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Shot chart</h2>
+          <HalfCourtShotChart zoneStats={computeShotZoneStats(off, currentTagCategories())} size={380} />
+        </>
+      )}
+
       {position && (
         <>
           <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Comparison by position — {position}</h2>
@@ -4167,7 +4180,32 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
       <OffenseDefenseBreakdown off={off} def={def} />
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Objectives</h2>
-      <ObjectivesPanel playerName={playerName} isCoach={false} box={box} off={off} def={def} />
+      {(() => {
+        // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : titres et valeur de départ pas visibles
+        // à l'export) : la version à l'écran (ObjectiveTrack) utilise un positionnement CSS
+        // absolu complexe (barre de progression, badges positionnés en %) — html2canvas (le
+        // moteur utilisé pour l'export PDF) est connu pour mal rendre ce type de mise en page,
+        // comme déjà documenté ailleurs dans ce fichier pour un souci similaire. On affiche donc
+        // ici, spécifiquement pour l'export, chaque objectif en texte simple (titre, départ,
+        // actuel, objectif) — bien plus robuste avec ce moteur de rendu.
+        const { objectives } = useObjectives(playerName);
+        const codingStats = buildCodingStatOptions(off, def);
+        const linkableStats = { ...box.averages, ...codingStats };
+        const fmt = v => v === null || v === undefined ? "–" : (Number.isInteger(v) ? v : v.toFixed(1));
+        if (!objectives.length) return <p>No objective defined for this player.</p>;
+        return objectives.map(o => {
+          const current = o.linkedStat ? (linkableStats[o.linkedStat] ?? null) : o.manualCurrent;
+          return (
+            <div key={o.id} style={{ border: `1px solid ${LINE}`, borderRadius: 8, padding: 10, marginBottom: 8 }}>
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>{o.description}</div>
+              <div style={{ fontSize: 11, color: "#5C6470" }}>
+                Start: {fmt(o.startValue)} &nbsp;·&nbsp; Current: {fmt(current)} &nbsp;·&nbsp; Target: {fmt(o.targetValue)}
+                {o.startDate ? ` · since ${o.startDate}` : ""}
+              </div>
+            </div>
+          );
+        });
+      })()}
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Training</h2>
       <TrainingLog playerName={playerName} isCoach={false} />
@@ -4204,9 +4242,6 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
           </div>
         </div>
       )}
-
-      <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Role</h2>
-      <RoleTab playerName={playerName} isCoach={false} />
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Meetings</h2>
       <MeetingsTab playerName={playerName} isCoach={false} />
@@ -6213,7 +6248,7 @@ function HalfCourtShotChart({ zoneStats, size = 400, thresholds = DEFAULT_SHOT_C
   }
 
   return (
-    <svg width={W} height={H} viewBox={`0 0 ${totalW} ${totalH}`} style={{ background: "#161B22", borderRadius: 12 }}>
+    <svg viewBox={`0 0 ${totalW} ${totalH}`} preserveAspectRatio="xMidYMid meet" style={{ background: "#161B22", borderRadius: 12, width: "100%", maxWidth: W, height: "auto", display: "block" }}>
       {/* Fonds de zone — la couleur indique le niveau de réussite (vert/orange/rouge), plus
           le rôle de la zone (qui reste identifiable via son libellé). */}
       <rect x={left + ox} y={arcJoinY + oy} width={right - left} height={bottom - arcJoinY} fill={zoneFill(front3?.pct, threePtThresholds, 0.8)} stroke="none" />
