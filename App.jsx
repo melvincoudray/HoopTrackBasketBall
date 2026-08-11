@@ -949,6 +949,31 @@ function isShotAttempt(tags) {
   return Object.keys(tags).some(k => /^\d\s*PT[+-]$/i.test(k) && tags[k]);
 }
 
+// Calcule le %, le nombre de tirs réussis et tentés pour chaque zone de tir ("Shot zone" :
+// Paint, Midrange, Corner 3, Front 3), à partir des tags déjà posés sur les actions codées.
+// "Corner 3" est volontairement fusionné en une seule zone "Corners" (un seul tag existe,
+// donc un seul pourcentage, affiché des deux côtés du terrain — demandé par l'utilisateur).
+function computeShotZoneStats(plays, cats) {
+  const zones = categoryTags("Shot zone", cats);
+  const out = {};
+  for (const zone of zones) {
+    const inZone = plays.filter(p => tagIsSet(p.tags, zone));
+    let made = 0, attempted = 0;
+    const shotPlays = []; // les actions qui sont bien des tirs (pour calculer %Open dessus)
+    for (const p of inZone) {
+      let isShot = false;
+      for (const [k, v] of Object.entries(p.tags)) {
+        if (!v) continue;
+        const m = k.match(/^(\d)\s*PT([+-])$/i);
+        if (m) { attempted++; if (m[2] === "+") made++; isShot = true; }
+      }
+      if (isShot) shotPlays.push(p);
+    }
+    out[zone] = { made, attempted, pct: attempted > 0 ? (100 * made) / attempted : null, openPct: openPct(shotPlays) };
+  }
+  return out;
+}
+
 function shootingSelection(plays, cats) {
   // Retracé directement depuis les formules du classeur original (cellule B30 d'une feuille
   // joueur) : le total de référence = la somme des actions taguées avec un playtype — pas
@@ -1281,32 +1306,38 @@ function tagBreakdown(source) {
 // défensives) — utilisé pour un joueur comme pour l'équipe entière.
 function OffenseDefenseBreakdown({ off, def, detailTables = true, categories }) {
   const cats = categories || currentTagCategories();
-  const offPlaysDonut = useMemo(() => categoryBreakdown(off, PLAYS_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open })), [off]);
-  const offPlaysList = useMemo(() => topCategoryBucket(off, PLAYS_LIST(cats), 9), [off]);
-  const offPlaytypesList = useMemo(() => topBucket(off, PLAYTYPES_LIST(cats), 8, false), [off]);
-  const offShooting = useMemo(() => shootingSelection(off, cats), [off]);
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "Defensive mistakes" affichait 0 après une
+  // modification dans Settings) : aucun de ces useMemo n'avait "cats" dans son tableau de
+  // dépendances — React gardait donc en cache le résultat calculé au tout premier rendu, même
+  // après une modification des catégories de tags dans Settings. Concerne en réalité TOUTES
+  // ces répartitions (Plays, Playtypes, Shooting Selection, Screen defense, Spacing), pas
+  // seulement les erreurs défensives — juste plus visible pour cette catégorie précise.
+  const offPlaysDonut = useMemo(() => categoryBreakdown(off, PLAYS_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open })), [off, cats]);
+  const offPlaysList = useMemo(() => topCategoryBucket(off, PLAYS_LIST(cats), 9), [off, cats]);
+  const offPlaytypesList = useMemo(() => topBucket(off, PLAYTYPES_LIST(cats), 8, false), [off, cats]);
+  const offShooting = useMemo(() => shootingSelection(off, cats), [off, cats]);
 
-  const defPlaysList = useMemo(() => topCategoryBucket(def, PLAYS_LIST(cats), 9), [def]);
-  const defPlaytypesList = useMemo(() => topBucket(def, PLAYTYPES_LIST(cats), 8, false), [def]);
-  const defShooting = useMemo(() => shootingSelection(def, cats), [def]);
+  const defPlaysList = useMemo(() => topCategoryBucket(def, PLAYS_LIST(cats), 9), [def, cats]);
+  const defPlaytypesList = useMemo(() => topBucket(def, PLAYTYPES_LIST(cats), 8, false), [def, cats]);
+  const defShooting = useMemo(() => shootingSelection(def, cats), [def, cats]);
   const defMistakes = useMemo(() => {
     const b = topBucket(def, DEFENSIVE_MISTAKES_LIST(cats), 9, false);
     // Le fichier original calcule la part de chaque erreur PARMI les erreurs (total = 100%
     // sur ces 9 catégories), pas par rapport à l'ensemble des possessions défendues.
     return b.map((d, i) => ({ name: d.name, value: d.value, color: CHART_COLORS[i % CHART_COLORS.length] }));
-  }, [def]);
+  }, [def, cats]);
 
   const offTagStats = useMemo(() => tagBreakdown(off), [off]);
   const defTagStats = useMemo(() => tagBreakdown(def), [def]);
 
   // Screen defense subie (attaque : quelle couverture l'adversaire utilise contre nos
   // écrans) et défense d'écran pratiquée (défense : quelle couverture on utilise nous-mêmes).
-  const offScreenDef = useMemo(() => categoryBreakdown(off, SCREEN_DEFENSE_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open })), [off]);
-  const defScreenDef = useMemo(() => categoryBreakdown(def, SCREEN_DEFENSE_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open })), [def]);
+  const offScreenDef = useMemo(() => categoryBreakdown(off, SCREEN_DEFENSE_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open })), [off, cats]);
+  const defScreenDef = useMemo(() => categoryBreakdown(def, SCREEN_DEFENSE_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open })), [def, cats]);
 
   // Spacing joué au moment des écrans, attaque et défense.
-  const offSpacing = useMemo(() => categoryBreakdown(off, SPACING_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open })), [off]);
-  const defSpacing = useMemo(() => categoryBreakdown(def, SPACING_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open })), [def]);
+  const offSpacing = useMemo(() => categoryBreakdown(off, SPACING_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open })), [off, cats]);
+  const defSpacing = useMemo(() => categoryBreakdown(def, SPACING_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open })), [def, cats]);
 
   // Custom categories (créées dans Settings, au-delà des catégories intégrées) —
   // affichées automatiquement ici, attaque et défense, sans rien coder de plus.
@@ -1721,7 +1752,19 @@ function computeWeightedTeamPercentages(perMatch) {
   const astOpportunities = sumFgm + 0.44 * sumMadeFT;
   const astPct = (has("ast") && has("fgm") && has("madeFT") && astOpportunities > 0) ? (100 * sumAst) / astOpportunities : null;
 
-  return { pct2, pct3, pctFT, efg, tovPct, orebPct, astPct };
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur, sur un vrai fichier — écart entre 68 affiché
+  // et 87 attendu) : ORTG/DRTG/FT Rate étaient calculés en faisant la MOYENNE SIMPLE du
+  // ORTG/DRTG/FT Rate de chaque match — exactement la même erreur que celle déjà corrigée
+  // pour %2pts/%3pts/etc. (un match avec peu de possessions pèse alors autant qu'un match
+  // avec beaucoup). On les calcule maintenant, comme les autres, à partir des totaux cumulés
+  // (somme des points ÷ somme des possessions, etc.), pas d'une moyenne de ratios.
+  const sumPts = sum("pts"), sumOpponentScore = sum("opponentScore");
+  const sumFta = sum("fta");
+  const ortg = (has("pts") && has("poss") && sumPoss > 0) ? (100 * sumPts) / sumPoss : null;
+  const drtg = (has("opponentScore") && has("poss") && sumPoss > 0) ? (100 * sumOpponentScore) / sumPoss : null;
+  const ftRate = (has("fta") && has("fga") && sumFga > 0) ? sumFta / sumFga : null;
+
+  return { pct2, pct3, pctFT, efg, tovPct, orebPct, astPct, ortg, drtg, ftRate };
 }
 
 // Même correctif, au niveau INDIVIDUEL cette fois : les pourcentages d'un joueur sur
@@ -2418,6 +2461,8 @@ export default function App() {
             <TagCategoriesSettings roster={roster} title="Column categories — Import Match (coding file)" getCurrent={currentTagCategories} onSave={saveTagCategories} onResetDefault={() => JSON.parse(JSON.stringify(DEFAULT_TAG_CATEGORIES))} />
             <div style={{ height: 34 }} />
             <TagCategoriesSettings roster={roster} title="Column categories — Scouting Observation" getCurrent={currentObservationTagCategories} onSave={saveObservationTagCategories} onResetDefault={() => JSON.parse(JSON.stringify(DEFAULT_TAG_CATEGORIES))} />
+            <div style={{ height: 26 }} />
+            <ShotChartThresholdsSettings />
             <div style={{ height: 26 }} />
             <BoxColumnAliasesSettings />
           </div>
@@ -3162,8 +3207,8 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
     const vals = advanced.perMatch.map(m => m[key]).filter(v => v !== null && v !== undefined);
     return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
   };
-  const { efg, tovPct, orebPct } = computeWeightedTeamPercentages(advanced.perMatch);
-  const ortg = avg("ortg"), drtg = avg("drtg"), ftRate = avg("ftRate"), oreb = avg("oreb");
+  const { efg, tovPct, orebPct, ortg, drtg, ftRate } = computeWeightedTeamPercentages(advanced.perMatch);
+  const oreb = avg("oreb");
 
   const today = todayLocal();
   const answeredToday = new Set(wellnessEntries.filter(e => e.date === today).map(e => e.slot));
@@ -4152,6 +4197,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
   const plays = allPlays.filter(p => p.player === playerName);
   const off = plays.filter(isOffense);
   const def = plays.filter(isDefense);
+  const { thresholds: shotChartThresholds } = useShotChartThresholds();
   const games = useMemo(() => Array.from(new Set(plays.map(p => p.matchId))), [plays]);
   const box = useBoxScore(playerName, matchFilter);
   const allBox = useAllBoxScores(matchFilter);
@@ -4341,6 +4387,13 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
             )}
 
             {box.entries.length > 0 && <CustomStatsPanel statsObj={box.averages} isCoach={isCoach} />}
+
+            {plays.length > 0 && (
+              <div style={{ marginTop: 16, marginBottom: 16 }}>
+                <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 10 }}>Shot chart</div>
+                <HalfCourtShotChart zoneStats={computeShotZoneStats(plays, currentTagCategories())} thresholds={shotChartThresholds} />
+              </div>
+            )}
 
             {position && (
               <>
@@ -5874,8 +5927,8 @@ function TeamAdvancedStats({ advanced, isCoach }) {
     return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
   };
   const weighted = computeWeightedTeamPercentages(advanced.perMatch);
-  const ortg = avg("ortg"), drtg = avg("drtg"), poss = avg("poss"), ftRate = avg("ftRate"), oreb = avg("oreb"), reb = avg("reb");
-  const { pct2, pct3, pctFT, efg, tovPct, orebPct, astPct } = weighted;
+  const poss = avg("poss"), oreb = avg("oreb"), reb = avg("reb");
+  const { pct2, pct3, pctFT, efg, tovPct, orebPct, astPct, ortg, drtg, ftRate } = weighted;
   const dreb = avg("dreb"), ast = avg("ast"), pts = avg("pts"), ptse = advanced.perMatch.some(m => m.opponentScore !== null && m.opponentScore !== undefined)
     ? advanced.perMatch.map(m => m.opponentScore).filter(v => v !== null && v !== undefined).reduce((s, v, _, arr) => s + v / arr.length, 0) : null;
   const net = ortg !== null && drtg !== null ? ortg - drtg : null;
@@ -6041,10 +6094,10 @@ function ourTeamAsScoutStats(advanced, box) {
   const weighted = computeWeightedTeamPercentages(advanced.perMatch);
   const stats = {
     mj: advanced.perMatch.length || undefined,
-    poss: avg("poss"), ortg: avg("ortg"), drtg: avg("drtg"),
+    poss: avg("poss"), ortg: weighted.ortg ?? undefined, drtg: weighted.drtg ?? undefined,
     efg: weighted.efg ?? undefined,
     pctbp: weighted.tovPct ?? undefined,
-    ftafga: avg("ftRate"),
+    ftafga: weighted.ftRate ?? undefined,
     pts: avg("pts"),
     ptse: advanced.perMatch.some(m => m.opponentScore !== null && m.opponentScore !== undefined)
       ? advanced.perMatch.map(m => m.opponentScore).filter(v => v !== null && v !== undefined).reduce((s, v, _, arr) => s + v / arr.length, 0) : undefined,
@@ -6083,6 +6136,110 @@ function ratingColor(v) { return v === null || v === undefined ? "#5C6470" : (RA
 
 // Roue à secteurs colorés (façon PDF) — pas un radar classique à polygone : chaque
 // compétence est un secteur indépendant, sa couleur ET sa taille reflètent la note 1-5.
+// Demi-terrain avec les zones de tir (Paint, Midrange, Corners, Front 3), reprenant
+// exactement les proportions validées avec l'utilisateur (raquette, cercle de lancers francs,
+// arc à 3pts, cercle de mi-terrain). "Corners" est une seule zone (un seul tag "Corner 3"
+// existe, donc même pourcentage affiché des deux côtés).
+// Seuils de couleur du shot chart (vert/orange/rouge), réglables dans Settings et propres à
+// chaque équipe (comme le reste — stockage automatiquement scopé par équipe).
+const DEFAULT_SHOT_CHART_THRESHOLDS = { threePt: { green: 33, orange: 20 }, paint: { green: 50, orange: 25 } };
+function useShotChartThresholds() {
+  const [thresholds, setThresholds] = useState(DEFAULT_SHOT_CHART_THRESHOLDS);
+  useEffect(() => { storeGet("shot_chart_thresholds").then(v => setThresholds(v || DEFAULT_SHOT_CHART_THRESHOLDS)); }, []);
+  async function save(next) {
+    await storeSet("shot_chart_thresholds", next);
+    setThresholds(next);
+  }
+  return { thresholds, save };
+}
+
+function HalfCourtShotChart({ zoneStats, size = 400, thresholds = DEFAULT_SHOT_CHART_THRESHOLDS }) {
+  const left = 110, right = 1000, top = 75, bottom = 915;
+  const rimX = 552, rimY = 172, arcR = 358;
+  const laneX0 = 460, laneX1 = 645, ftLineY = 410, ftCircleR = 92;
+  const cornerX0 = 205, cornerX1 = 900;
+  const midcourtCircleY = 835, midcourtCircleR = 85;
+  const arcJoinY = rimY + Math.sqrt(arcR * arcR - (rimX - cornerX0) ** 2);
+  const totalW = right - left + 40, totalH = bottom - top + 40;
+  const W = size, H = size * (totalH / totalW);
+  const ox = 20 - left, oy = 20 - top;
+  const lineColor = "#D8DCE2";
+
+  const fmtPct = v => v === null || v === undefined ? "–" : `${Math.round(v)}%`;
+  const paint = zoneStats?.Paint, midrange = zoneStats?.Midrange, corners = zoneStats?.["Corner 3"], front3 = zoneStats?.["Front 3"];
+  // BUG RÉEL CORRIGÉ (précision de l'utilisateur) : c'est le FOND de chaque zone qui doit
+  // s'afficher vert/orange/rouge selon le taux de réussite — pas le texte, qui reste dans une
+  // couleur fixe et lisible. Seuils réglables dans Settings, propres à chaque équipe (via le
+  // prop "thresholds") — plus des valeurs figées dans le code.
+  function zoneFill(pct, { green, orange }, opacity) {
+    if (pct === null || pct === undefined) return `rgba(139,147,161,${opacity})`; // gris neutre si pas de données
+    if (pct >= green) return `rgba(61,220,111,${opacity})`;
+    if (pct >= orange) return `rgba(242,169,59,${opacity})`;
+    return `rgba(225,90,78,${opacity})`;
+  }
+  const threePtThresholds = thresholds.threePt;
+  const paintThresholds = thresholds.paint;
+  const textColor = "#F3F1EA";
+  // Ligne de détail sous le pourcentage : "3/7" puis, si connu, "+40% Open" à la suite —
+  // demandé par l'utilisateur, pour voir le volume de tirs et l'ouverture en un coup d'œil.
+  function detailLine(zone) {
+    if (!zone || zone.attempted === 0) return "no data";
+    const base = `${zone.made}/${zone.attempted}`;
+    if (zone.openPct === null || zone.openPct === undefined) return base;
+    return `${base} · +${Math.round(zone.openPct)}% Open`;
+  }
+
+  return (
+    <svg width={W} height={H} viewBox={`0 0 ${totalW} ${totalH}`} style={{ background: "#161B22", borderRadius: 12 }}>
+      {/* Fonds de zone — la couleur indique le niveau de réussite (vert/orange/rouge), plus
+          le rôle de la zone (qui reste identifiable via son libellé). */}
+      <rect x={left + ox} y={arcJoinY + oy} width={right - left} height={bottom - arcJoinY} fill={zoneFill(front3?.pct, threePtThresholds, 0.8)} stroke="none" />
+      <path
+        d={`M ${left + ox} ${top + oy} L ${right + ox} ${top + oy} L ${right + ox} ${arcJoinY + oy} L ${cornerX1 + ox} ${arcJoinY + oy} A ${arcR} ${arcR} 0 0 1 ${cornerX0 + ox} ${arcJoinY + oy} L ${left + ox} ${arcJoinY + oy} Z`}
+        fill={zoneFill(midrange?.pct, threePtThresholds, 0.75)} stroke="none"
+      />
+      <rect x={left + ox} y={top + oy} width={cornerX0 - left} height={arcJoinY - top} fill={zoneFill(corners?.pct, threePtThresholds, 0.8)} stroke="none" />
+      <rect x={cornerX1 + ox} y={top + oy} width={right - cornerX1} height={arcJoinY - top} fill={zoneFill(corners?.pct, threePtThresholds, 0.8)} stroke="none" />
+      <rect x={laneX0 + ox} y={top + oy} width={laneX1 - laneX0} height={ftLineY - top} fill={zoneFill(paint?.pct, paintThresholds, 0.8)} stroke="none" />
+
+      {/* Traits du terrain */}
+      <rect x={left + ox} y={top + oy} width={right - left} height={bottom - top} fill="none" stroke={lineColor} strokeWidth={3} />
+      <rect x={laneX0 + ox} y={top + oy} width={laneX1 - laneX0} height={ftLineY - top} fill="none" stroke={lineColor} strokeWidth={3} />
+      <circle cx={rimX + ox} cy={ftLineY + oy} r={ftCircleR} fill="none" stroke={lineColor} strokeWidth={3} />
+      <path d={`M ${cornerX0 + ox} ${arcJoinY + oy} A ${arcR} ${arcR} 0 0 0 ${cornerX1 + ox} ${arcJoinY + oy}`} fill="none" stroke={lineColor} strokeWidth={3} />
+      <line x1={rimX - 35 + ox} y1={top + 8 + oy} x2={rimX + 35 + ox} y2={top + 8 + oy} stroke={lineColor} strokeWidth={4} />
+      <circle cx={rimX + ox} cy={rimY + oy} r={12} fill="none" stroke={lineColor} strokeWidth={3} />
+      <circle cx={rimX + ox} cy={midcourtCircleY + oy} r={midcourtCircleR} fill="none" stroke={lineColor} strokeWidth={3} />
+
+      {/* Chiffres par zone — couleur fixe et lisible, la performance se lit sur le fond.
+          Trois lignes : pourcentage, détail (tirs réussis/tentés + %Open), libellé de zone. */}
+      <g fontFamily="Inter, sans-serif" textAnchor="middle">
+        <text x={rimX + ox} y={232 + oy} fontSize={48} fontWeight={800} fill={textColor}>{fmtPct(paint?.pct)}</text>
+        <text x={rimX + ox} y={261 + oy} fontSize={19} fontWeight={600} fill={textColor} opacity={0.9}>{detailLine(paint)}</text>
+        <text x={rimX + ox} y={288 + oy} fontSize={27} fontWeight={700} fill={textColor}>Paint</text>
+
+        {/* BUG RÉEL CORRIGÉ (signalé par l'utilisateur) : repositionné pour rester bien DANS
+            la zone bleue (Midrange) — l'espace utilisable y est étroit (entre le bas de la
+            raquette et le point où l'arc à 3pts se referme), d'où une mise en page compacte. */}
+        <text x={rimX + ox} y={438 + oy} fontSize={30} fontWeight={800} fill={textColor}>{fmtPct(midrange?.pct)}</text>
+        <text x={rimX + ox} y={458 + oy} fontSize={13} fontWeight={600} fill={textColor} opacity={0.9}>{detailLine(midrange)}</text>
+        <text x={rimX + ox} y={476 + oy} fontSize={17} fontWeight={700} fill={textColor}>Midrange</text>
+
+        <text x={155 + ox} y={152 + oy} fontSize={38} fontWeight={800} fill={textColor}>{fmtPct(corners?.pct)}</text>
+        <text x={155 + ox} y={178 + oy} fontSize={16} fontWeight={600} fill={textColor} opacity={0.9}>{corners && corners.attempted > 0 ? `${corners.made}/${corners.attempted}` : "no data"}</text>
+        <text x={155 + ox} y={202 + oy} fontSize={21} fontWeight={700} fill={textColor}>Corners</text>
+        <text x={950 + ox} y={152 + oy} fontSize={38} fontWeight={800} fill={textColor}>{fmtPct(corners?.pct)}</text>
+        <text x={950 + ox} y={178 + oy} fontSize={16} fontWeight={600} fill={textColor} opacity={0.9}>{corners && corners.attempted > 0 ? `${corners.made}/${corners.attempted}` : "no data"}</text>
+        <text x={950 + ox} y={202 + oy} fontSize={21} fontWeight={700} fill={textColor}>Corners</text>
+
+        <text x={rimX + ox} y={648 + oy} fontSize={44} fontWeight={800} fill={textColor}>{fmtPct(front3?.pct)}</text>
+        <text x={rimX + ox} y={676 + oy} fontSize={16} fontWeight={600} fill={textColor} opacity={0.9}>{detailLine(front3)}</text>
+        <text x={rimX + ox} y={700 + oy} fontSize={26} fontWeight={700} fill={textColor}>Front 3</text>
+      </g>
+    </svg>
+  );
+}
+
 function RoseChart({ ratings, categories = SKILL_CATEGORIES, size = 420, emphasizeExtremes = true }) {
   const n = categories.length;
   const cx = size / 2, cy = size / 2;
@@ -7471,6 +7628,53 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam })
 // Settings — box score column mapping (which exact column names count as which stat)
 // ---------------------------------------------------------------------------
 
+// Réglage des seuils de couleur du shot chart (Players & Team), propre à chaque équipe.
+function ShotChartThresholdsSettings() {
+  const { thresholds, save } = useShotChartThresholds();
+  const [draft, setDraft] = useState(thresholds);
+  useEffect(() => setDraft(thresholds), [thresholds]);
+  const dirty = JSON.stringify(draft) !== JSON.stringify(thresholds);
+
+  function update(zone, key, value) {
+    const n = Math.max(0, Math.min(100, Number(value) || 0));
+    setDraft(d => ({ ...d, [zone]: { ...d[zone], [key]: n } }));
+  }
+
+  return (
+    <div>
+      <SectionTitle eyebrow="Settings" title="Shot chart color thresholds" />
+      <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 16, maxWidth: 560 }}>
+        Sets when each zone of the shot chart (Players & Team) turns green, orange, or red based
+        on shooting %. Specific to this team.
+      </div>
+      {[
+        { key: "threePt", label: "3pt zones (Corners, Front 3, Midrange)" },
+        { key: "paint", label: "Paint (2pt zone near the rim)" },
+      ].map(({ key, label }) => (
+        <div key={key} style={{ marginBottom: 18 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: PAPER, marginBottom: 8 }}>{label}</div>
+          <div style={{ display: "flex", gap: 20, alignItems: "center", flexWrap: "wrap" }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#3DDC6F" }}>
+              Green at ≥
+              <input type="number" min={0} max={100} value={draft[key].green} onChange={e => update(key, "green", e.target.value)}
+                style={{ width: 60, padding: "6px 8px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 6, color: PAPER, fontFamily: "inherit" }} />%
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: AMBER }}>
+              Orange at ≥
+              <input type="number" min={0} max={100} value={draft[key].orange} onChange={e => update(key, "orange", e.target.value)}
+                style={{ width: 60, padding: "6px 8px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 6, color: PAPER, fontFamily: "inherit" }} />%
+            </label>
+            <div style={{ fontSize: 12, color: RED }}>Red below that</div>
+          </div>
+        </div>
+      ))}
+      {dirty && (
+        <button onClick={() => save(draft)} style={{ padding: "9px 18px", background: AMBER, border: "none", borderRadius: 8, color: "#1a1200", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Save thresholds</button>
+      )}
+    </div>
+  );
+}
+
 function BoxColumnAliasesSettings() {
   const [aliases, setAliases] = useState(boxColumnAliases());
   const [newAliasByKey, setNewAliasByKey] = useState({});
@@ -8474,6 +8678,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
   const v = (visibility || DEFAULT_VISIBILITY).team;
   const box = useAllBoxScores(matchFilter);
   const advanced = useTeamAdvancedStats(matchFilter);
+  const { thresholds: shotChartThresholds } = useShotChartThresholds();
   const TEAM_SUBTAB_ORDER = [["classement", "standings"], ["collectif", "teamPlay"], ["avance", "advanced"], ["resources", "resources"]];
   const defaultTeamSubtab = isCoach ? "classement" : ((TEAM_SUBTAB_ORDER.find(([, key]) => v[key]) || ["classement"])[0]);
   const [subtab, setSubtab] = useState(defaultTeamSubtab);
@@ -8571,7 +8776,17 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
 
       {subtab === "collectif" && (isCoach || v.teamPlay) && <OffenseDefenseBreakdown off={teamOff} def={teamDef} detailTables={false} />}
 
-      {subtab === "avance" && (isCoach || v.advanced) && <TeamAdvancedStats advanced={advanced} isCoach={isCoach} />}
+      {subtab === "avance" && (isCoach || v.advanced) && (
+        <>
+          <TeamAdvancedStats advanced={advanced} isCoach={isCoach} />
+          {(teamOff.length > 0 || teamDef.length > 0) && (
+            <div style={{ marginTop: 16, marginBottom: 16 }}>
+              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 10 }}>Team shot chart</div>
+              <HalfCourtShotChart zoneStats={computeShotZoneStats([...teamOff, ...teamDef], currentTagCategories())} thresholds={shotChartThresholds} />
+            </div>
+          )}
+        </>
+      )}
       {subtab === "resources" && (isCoach || v.resources) && <TeamResourcesTab isCoach={isCoach} team={team} />}
       {subtab === "entrainement" && isCoach && <CollectiveTraining roster={roster} />}
 
