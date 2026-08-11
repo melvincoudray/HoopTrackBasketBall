@@ -740,6 +740,17 @@ async function loadTagCategories() {
       if (newKey && !stored[newKey]) { next[newKey] = val; migrated = true; }
       else next[key] = val;
     }
+    // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : le shot chart affichait "aucune donnée"
+    // malgré des matchs déjà codés avec les tags Paint/Midrange/etc.) : quand une nouvelle
+    // catégorie intégrée est ajoutée à l'app après que quelqu'un a déjà enregistré sa propre
+    // configuration, elle n'était jamais fusionnée dans les catégories déjà stockées — elle
+    // restait simplement absente indéfiniment, même si les DONNÉES CODÉES avaient bien ces
+    // tags. On ajoute maintenant automatiquement toute catégorie intégrée manquante (avec ses
+    // valeurs par défaut), sans jamais toucher aux catégories déjà personnalisées par
+    // l'utilisateur — aucun réimport de données n'est nécessaire, seulement ce correctif.
+    for (const [key, defaultVal] of Object.entries(DEFAULT_TAG_CATEGORIES)) {
+      if (!(key in next)) { next[key] = JSON.parse(JSON.stringify(defaultVal)); migrated = true; }
+    }
     TAG_CATEGORIES = next;
     if (migrated) await storeSet("tag_categories", next);
   } else {
@@ -776,8 +787,20 @@ let OBSERVATION_TAG_CATEGORIES = null;
 function currentObservationTagCategories() { return OBSERVATION_TAG_CATEGORIES || DEFAULT_TAG_CATEGORIES; }
 async function loadObservationTagCategories() {
   const stored = await storeGet("observation_tag_categories");
-  OBSERVATION_TAG_CATEGORIES = stored || JSON.parse(JSON.stringify(DEFAULT_TAG_CATEGORIES));
-  if (!stored) await storeSet("observation_tag_categories", OBSERVATION_TAG_CATEGORIES);
+  if (stored) {
+    let migrated = false;
+    const next = { ...stored };
+    // Même correctif que pour les catégories d'import (voir loadTagCategories) : toute
+    // catégorie intégrée manquante est ajoutée automatiquement, sans réimport nécessaire.
+    for (const [key, defaultVal] of Object.entries(DEFAULT_TAG_CATEGORIES)) {
+      if (!(key in next)) { next[key] = JSON.parse(JSON.stringify(defaultVal)); migrated = true; }
+    }
+    OBSERVATION_TAG_CATEGORIES = next;
+    if (migrated) await storeSet("observation_tag_categories", next);
+  } else {
+    OBSERVATION_TAG_CATEGORIES = JSON.parse(JSON.stringify(DEFAULT_TAG_CATEGORIES));
+    await storeSet("observation_tag_categories", OBSERVATION_TAG_CATEGORIES);
+  }
 }
 async function saveObservationTagCategories(cats) {
   OBSERVATION_TAG_CATEGORIES = cats;
@@ -6221,9 +6244,9 @@ function HalfCourtShotChart({ zoneStats, size = 400, thresholds = DEFAULT_SHOT_C
         {/* BUG RÉEL CORRIGÉ (signalé par l'utilisateur) : repositionné pour rester bien DANS
             la zone bleue (Midrange) — l'espace utilisable y est étroit (entre le bas de la
             raquette et le point où l'arc à 3pts se referme), d'où une mise en page compacte. */}
-        <text x={rimX + ox} y={438 + oy} fontSize={30} fontWeight={800} fill={textColor}>{fmtPct(midrange?.pct)}</text>
-        <text x={rimX + ox} y={458 + oy} fontSize={13} fontWeight={600} fill={textColor} opacity={0.9}>{detailLine(midrange)}</text>
-        <text x={rimX + ox} y={476 + oy} fontSize={17} fontWeight={700} fill={textColor}>Midrange</text>
+        <text x={rimX + ox} y={438 + oy} fontSize={34} fontWeight={800} fill={textColor}>{fmtPct(midrange?.pct)}</text>
+        <text x={rimX + ox} y={459 + oy} fontSize={14} fontWeight={600} fill={textColor} opacity={0.9}>{detailLine(midrange)}</text>
+        <text x={rimX + ox} y={479 + oy} fontSize={21} fontWeight={700} fill={textColor}>Midrange</text>
 
         <text x={155 + ox} y={152 + oy} fontSize={38} fontWeight={800} fill={textColor}>{fmtPct(corners?.pct)}</text>
         <text x={155 + ox} y={178 + oy} fontSize={16} fontWeight={600} fill={textColor} opacity={0.9}>{corners && corners.attempted > 0 ? `${corners.made}/${corners.attempted}` : "no data"}</text>
