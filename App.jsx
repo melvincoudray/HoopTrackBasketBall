@@ -3611,7 +3611,7 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch }) {
             <input type="text" placeholder="e.g. Zalgiris" value={opponent} onChange={e => setOpponent(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
           </div>
         </div>
-        <input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
+        <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
         {fileErr && <div style={{ color: RED, fontSize: 13, marginTop: 10 }}>{fileErr}</div>}
 
         {preview && (
@@ -4664,7 +4664,7 @@ function BoxScoreTab({ roster, index, onImported, onDelete }) {
           </div>
         </div>
         <div style={{ fontSize: 11.5, color: "#5C6470", marginBottom: 14 }}>The opponent's score is optional, but needed to calculate DRTG in the Team tab.</div>
-        <input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
+        <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
         {fileErr && <div style={{ color: RED, fontSize: 13, marginTop: 10 }}>{fileErr}</div>}
         {preview && (
           <div style={{ marginTop: 18, padding: 16, background: PANEL2, borderRadius: 10, border: `1px solid ${LINE}` }}>
@@ -7437,7 +7437,7 @@ function ObservationTab() {
             </div>
           )}
         </div>
-        <input ref={fileRef} type="file" accept=".xlsx,.xls" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
+        <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
         {fileErr && <div style={{ color: RED, fontSize: 13, marginTop: 10 }}>{fileErr}</div>}
 
         {preview && (
@@ -7599,11 +7599,11 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam })
             <button onClick={() => fileOffRef.current && fileOffRef.current.click()} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
               <Upload size={14} /> Import file — Offense
             </button>
-            <input ref={fileOffRef} type="file" accept=".xlsx,.xls" onChange={e => handleExcelFile(e, "offense")} style={{ display: "none" }} />
+            <input ref={fileOffRef} type="file" accept=".xlsx,.xls,.csv" onChange={e => handleExcelFile(e, "offense")} style={{ display: "none" }} />
             <button onClick={() => fileDefRef.current && fileDefRef.current.click()} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
               <Upload size={14} /> Import file — Defense
             </button>
-            <input ref={fileDefRef} type="file" accept=".xlsx,.xls" onChange={e => handleExcelFile(e, "defense")} style={{ display: "none" }} />
+            <input ref={fileDefRef} type="file" accept=".xlsx,.xls,.csv" onChange={e => handleExcelFile(e, "defense")} style={{ display: "none" }} />
             <button onClick={() => setShowManual(s => !s)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
               <Plus size={14} /> Manual entry
             </button>
