@@ -394,10 +394,12 @@ async function storeGet(key) {
   try {
     if (window.storage) {
       const r = await window.storage.get(k, true);
+      if (key === "visibility_config") console.log("[storage] storeGet", k, "->", r ? r.value : null);
       return r ? JSON.parse(r.value) : null;
     }
     if (supabase) {
       const { data } = await supabase.from("app_storage").select("value").eq("key", k).maybeSingle();
+      if (key === "visibility_config") console.log("[storage] storeGet", k, "->", data ? data.value : null);
       return data ? data.value : null;
     }
   } catch (e) { /* clé absente */ }
@@ -473,6 +475,17 @@ async function clearLocalSession() {
     if (typeof localStorage !== "undefined") { localStorage.removeItem(sessionStorageKey()); return; }
   } catch (e) {}
   try { if (window.storage) await window.storage.delete(sessionStorageKey(), false); } catch (e) {}
+}
+
+// "Génération de session" propre à chaque équipe (stockée côté serveur, comme le reste) : un
+// bouton dans Settings permet au coach d'incrémenter ce compteur, ce qui invalide TOUTES les
+// connexions mémorisées sur TOUS les appareils (chacun devra ressaisir son code PIN) — sans
+// jamais recréer ni changer les codes eux-mêmes (stockés séparément dans "app_users").
+async function getSessionEpoch() { return (await storeGet("session_epoch")) || 0; }
+async function bumpSessionEpoch() {
+  const next = (await getSessionEpoch()) + 1;
+  await storeSet("session_epoch", next);
+  return next;
 }
 
 // Même principe que la session : quelle équipe est active doit rester STRICTEMENT LOCALE à
@@ -2096,7 +2109,7 @@ export default function App() {
   const [selectedPlayer, setSelectedPlayer] = useState(null);
   const [selectedMatchKeys, setSelectedMatchKeys] = useState(null); // null = tous les matchs
   const [currentSeason, setCurrentSeason] = useState(defaultSeasonLabel());
-  const { config: visibility } = useVisibilityConfig();
+  const { config: visibility } = useVisibilityConfig(team?.id);
   const [seasonFilter, setSeasonFilter] = useState("all"); // "all" ou une saison précise
   const [initializing, setInitializing] = useState(true);
 
@@ -2188,7 +2201,8 @@ export default function App() {
       await storeSet("roster_seeded", true);
     }
     const savedSession = await loadLocalSession();
-    if (savedSession) {
+    const currentEpoch = await getSessionEpoch();
+    if (savedSession && savedSession.epoch === currentEpoch) {
       // BUG RÉEL CORRIGÉ : si un joueur est renommé (icône crayon) alors qu'il reste connecté
       // sur son appareil sans se reconnecter, sa session gardait l'ANCIEN nom indéfiniment —
       // toutes ses réponses (Wellness, Training…) continuaient à s'enregistrer sous l'ancien
@@ -2227,6 +2241,11 @@ export default function App() {
       } else {
         setSession(savedSession);
       }
+    } else if (savedSession) {
+      // La session mémorisée existe mais sa génération ne correspond plus à celle de
+      // l'équipe (le coach a cliqué "Reset all connections") — on l'efface pour de bon, afin
+      // que l'écran de connexion s'affiche proprement au lieu de retenter en boucle.
+      await clearLocalSession();
     }
     const idx = (await storeGet("match_index")) || [];
     setMatchesIndex(idx);
@@ -2302,7 +2321,7 @@ export default function App() {
   }
 
   if (!session) {
-    return <LoginScreen roster={roster} onLogin={async (s) => { await saveLocalSession(s); setSession(s); }} />;
+    return <LoginScreen roster={roster} onLogin={async (s) => { const epoch = await getSessionEpoch(); const withEpoch = { ...s, epoch }; await saveLocalSession(withEpoch); setSession(withEpoch); }} />;
   }
 
   return (
@@ -2623,6 +2642,7 @@ async function rawGet(fullKey) {
     if (supabase) {
       const { data, error } = await supabase.from("app_storage").select("value").eq("key", fullKey).maybeSingle();
       if (error) console.error("[storage] Supabase get error on", fullKey, ":", error);
+      console.log("[storage] rawGet", fullKey, "->", data ? data.value : null);
       return data ? data.value : null;
     }
   } catch (e) { console.error("[storage] rawGet failed on", fullKey, ":", e); }
@@ -2635,6 +2655,7 @@ async function rawSet(fullKey, value) {
   if (supabase) {
     const { error } = await supabase.from("app_storage").upsert({ key: fullKey, value });
     if (error) { console.error("[storage] Supabase rawSet FAILED on", fullKey, ":", error); throw error; }
+    console.log("[storage] rawSet OK ->", fullKey, "=", JSON.stringify(value));
   }
 }
 async function rawDelete(fullKey) {
@@ -2885,6 +2906,18 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
   function toggleTeamSection(key) { saveVisibility({ ...visibility, team: { ...visibility.team, [key]: !visibility.team[key] } }); }
   function toggleWellnessCharts() { saveVisibility({ ...visibility, wellnessCharts: !visibility.wellnessCharts }); }
 
+  // Force TOUS les comptes de cette équipe (joueurs, staff) à se reconnecter — chaque appareil
+  // devra ressaisir son code PIN au prochain chargement. Les codes eux-mêmes ("app_users") ne
+  // sont JAMAIS touchés : personne n'a besoin d'en créer un nouveau, juste de le ressaisir.
+  const [resetStatus, setResetStatus] = useState("");
+  async function handleResetConnections() {
+    const key = "team_" + team.id + ":session_epoch";
+    const current = (await rawGet(key)) || 0;
+    await rawSet(key, current + 1);
+    setResetStatus("Done — every account on this team will need to re-enter their PIN.");
+    setTimeout(() => setResetStatus(""), 4000);
+  }
+
   async function handleLogoChange(e) {
     const file = e.target.files[0];
     if (!file) return;
@@ -2963,6 +2996,17 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
               </label>
             </div>
           )}
+
+          <div style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, padding: 14, marginBottom: 20 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 6 }}>Reset connections</div>
+            <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 10, maxWidth: 480 }}>
+              Forces every account on this team (players, staff) to re-enter their PIN code next
+              time they open the app on any device. PIN codes themselves are not changed — no one
+              needs a new one, just to type it in again.
+            </div>
+            <button onClick={handleResetConnections} style={{ padding: "8px 14px", background: "none", border: `1px solid ${AMBER}`, borderRadius: 8, color: AMBER, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>Reset all connections</button>
+            {resetStatus && <div style={{ fontSize: 12, color: TEAL, marginTop: 8 }}>{resetStatus}</div>}
+          </div>
 
           <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 8 }}>Players & coaches with an account</div>
           {users === null ? (
@@ -4123,6 +4167,10 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
               </div>
             );
           })()}
+
+          {/* Manquait à l'export : les stats personnalisées créées par le coach n'apparaissaient
+              jamais dans le PDF, alors qu'affichées à l'écran juste après ces mêmes totaux. */}
+          <CustomStatsPanel statsObj={box.averages} isCoach={false} />
 
           <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Match by match</h2>
           {/* Police et espacement volontairement compacts pour que le tableau tienne sur la
@@ -5312,15 +5360,25 @@ const DEFAULT_VISIBILITY = {
   wellnessCharts: false, // les graphiques Wellness sont cachés aux joueurs par défaut
 };
 
-function useVisibilityConfig() {
+function useVisibilityConfig(teamId) {
   const [config, setConfig] = useState(DEFAULT_VISIBILITY);
   const [loading, setLoading] = useState(true);
   useEffect(() => {
+    // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : absolument tout restait visible pour un
+    // compte Player, quelle que soit la case décochée dans Settings) : ce chargement se
+    // faisait une seule fois, au tout premier rendu de l'app — AVANT même qu'une équipe soit
+    // sélectionnée (setActiveTeam(), qui préfixe toutes les clés de stockage par équipe,
+    // n'était appelé qu'ensuite, de façon asynchrone). La lecture se faisait donc sur une clé
+    // SANS préfixe d'équipe, ne trouvait jamais rien, et retombait sur les valeurs par défaut
+    // (tout visible) — définitivement, puisque ce chargement ne se relançait jamais après la
+    // sélection de l'équipe. On relance maintenant ce chargement à chaque changement d'équipe.
+    if (!teamId) { setConfig(DEFAULT_VISIBILITY); setLoading(false); return; }
+    setLoading(true);
     storeGet("visibility_config").then(v => {
       setConfig(v ? { ...DEFAULT_VISIBILITY, ...v, tabs: { ...DEFAULT_VISIBILITY.tabs, ...(v.tabs || {}) }, playerDetail: { ...DEFAULT_VISIBILITY.playerDetail, ...(v.playerDetail || {}) }, team: { ...DEFAULT_VISIBILITY.team, ...(v.team || {}) } } : DEFAULT_VISIBILITY);
       setLoading(false);
     });
-  }, []);
+  }, [teamId]);
   return { config, loading };
 }
 
@@ -8352,6 +8410,15 @@ function TeamPrintReport({ team, rows, otherLabels, advanced, teamOff, teamDef, 
 
       <h2 style={{ fontSize: 16, marginBottom: 8 }}>Advanced — Four Factors & Ratings</h2>
       <TeamAdvancedStats advanced={advanced} isCoach={false} />
+
+      {/* Manquait à l'export : le shot chart d'équipe est appelé séparément de
+          TeamAdvancedStats à l'écran, donc jamais inclus ici jusqu'ici. */}
+      {teamOff.length > 0 && (
+        <>
+          <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Team shot chart</h2>
+          <HalfCourtShotChart zoneStats={computeShotZoneStats(teamOff, currentTagCategories())} size={380} />
+        </>
+      )}
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Team Play — Offense / Defense</h2>
       <OffenseDefenseBreakdown off={teamOff} def={teamDef} />
