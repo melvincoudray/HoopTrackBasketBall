@@ -1060,6 +1060,76 @@ function groupBreakdown(plays, labels) {
 // Parsing d'un fichier de stats de match complètes (box score)
 // ---------------------------------------------------------------------------
 
+// Lit un fichier de "Rebound Contest" (TAG / BOX OUT) : chaque ligne représente UN événement
+// de rebond, où plusieurs joueurs peuvent être notés simultanément — 3 colonnes par joueur
+// ("Nom 0", "Nom 1", "Nom 2"), une seule vaut "1" pour les joueurs concernés par cet événement
+// précis (indiquant le nombre de points qu'ils ont obtenus : 0, 1 ou 2), les autres restent à
+// "0" (joueur non concerné par cet événement). La colonne "button" indique TAG ou BOX OUT.
+function parseReboundContestFile(arrayBuffer, roster) {
+  const wb = XLSX.read(arrayBuffer, { type: "array" });
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+  if (!rows.length) return { events: [], unmatchedColumns: [] };
+  const header = rows[0].map(h => String(h ?? "").trim());
+  const catIdx = header.findIndex(h => /^category$/i.test(h));
+  const buttonIdx = header.findIndex(h => /^button$/i.test(h));
+  // Regroupe les colonnes "Nom X 0"/"Nom X 1"/"Nom X 2" par nom de joueur.
+  const playerCols = {}; // { "Nom complet": { 0: idx, 1: idx, 2: idx } }
+  header.forEach((h, i) => {
+    const m = h.match(/^(.+?)\s+([012])$/);
+    if (!m) return;
+    const name = m[1].trim(), val = m[2];
+    if (!playerCols[name]) playerCols[name] = {};
+    playerCols[name][val] = i;
+  });
+  const rosterNames = new Set(roster.map(p => p.name));
+  const unmatchedColumns = Object.keys(playerCols).filter(n => !rosterNames.has(n));
+
+  const events = [];
+  for (let r = 1; r < rows.length; r++) {
+    const row = rows[r];
+    if (!row || row.every(c => c === "" || c === undefined)) continue;
+    const button = String(row[buttonIdx] ?? "").trim().toUpperCase();
+    if (button !== "TAG" && button !== "BOX OUT") continue; // ligne mal formée, ignorée
+    const scores = {};
+    for (const [name, cols] of Object.entries(playerCols)) {
+      for (const val of ["0", "1", "2"]) {
+        const idx = cols[val];
+        if (idx === undefined) continue;
+        const cell = String(row[idx] ?? "").trim();
+        if (cell === "1") { scores[name] = Number(val); break; }
+      }
+    }
+    if (Object.keys(scores).length > 0) events.push({ button, scores });
+  }
+  return { events, unmatchedColumns };
+}
+
+// Additionne les événements de plusieurs sessions (déjà filtrées par la sélection de
+// l'utilisateur) en un total par joueur et par aspect (TAG / BOX OUT), avec le pourcentage par
+// rapport au maximum possible (chaque événement valant 2 points au maximum).
+function computeReboundContestStats(events, playerNames) {
+  const out = {};
+  for (const name of playerNames) out[name] = { tag: { earned: 0, possible: 0, count: 0 }, boxOut: { earned: 0, possible: 0, count: 0 } };
+  for (const ev of events) {
+    const bucket = ev.button === "TAG" ? "tag" : "boxOut";
+    for (const [name, pts] of Object.entries(ev.scores)) {
+      if (!out[name]) out[name] = { tag: { earned: 0, possible: 0, count: 0 }, boxOut: { earned: 0, possible: 0, count: 0 } };
+      out[name][bucket].earned += pts;
+      out[name][bucket].possible += 2;
+      out[name][bucket].count += 1;
+    }
+  }
+  for (const name of Object.keys(out)) {
+    const s = out[name];
+    s.tag.pct = s.tag.possible > 0 ? (100 * s.tag.earned) / s.tag.possible : null;
+    s.boxOut.pct = s.boxOut.possible > 0 ? (100 * s.boxOut.earned) / s.boxOut.possible : null;
+    const totalEarned = s.tag.earned + s.boxOut.earned, totalPossible = s.tag.possible + s.boxOut.possible;
+    s.total = { earned: totalEarned, possible: totalPossible, pct: totalPossible > 0 ? (100 * totalEarned) / totalPossible : null };
+  }
+  return out;
+}
+
 function parseBoxScoreFile(arrayBuffer, roster, teamName) {
   const wb = XLSX.read(arrayBuffer, { type: "array" });
   // On cherche la feuille la plus plausible : celle qui contient le plus de noms de joueurs du roster.
@@ -1404,6 +1474,18 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories }) 
           <DonutCard title="Spacing played on screens" data={offSpacing.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No spacing tag detected." />
           <MetricBarList title="Efficiency by spacing" items={offSpacing} color={AMBER} />
         </div>
+        {/* Catégories personnalisées (créées dans Settings, au-delà des 4 intégrées ci-dessus)
+            — intégrées directement ici, dans la même grille, sans section "Custom"/"Other"
+            séparée qui les isolait tout en bas auparavant. */}
+        {customOff.filter(c => c.items.length).map(c => {
+          const style = chartStyleFor(c.name);
+          return (
+            <div key={"off-" + c.name} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
+              {(style === "simple" || style === "both") && <DonutCard title={c.name} data={c.items.map((it, i) => ({ ...it, color: CHART_COLORS[i % CHART_COLORS.length] }))} />}
+              {(style === "detailed" || style === "both") && <MetricBarList title={c.name} items={c.items} color={AMBER} />}
+            </div>
+          );
+        })}
       </div>
 
       <SectionTitle eyebrow="Source: coding file" title="Defense — what we defend against" />
@@ -1424,33 +1506,16 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories }) 
           <DonutCard title="Spacing faced on screens" data={defSpacing.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No spacing tag detected." />
           <MetricBarList title="Efficiency by spacing faced" items={defSpacing} color={TEAL} />
         </div>
+        {customDef.filter(c => c.items.length).map(c => {
+          const style = chartStyleFor(c.name);
+          return (
+            <div key={"def-" + c.name} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
+              {(style === "simple" || style === "both") && <DonutCard title={c.name} data={c.items.map((it, i) => ({ ...it, color: CHART_COLORS[i % CHART_COLORS.length] }))} />}
+              {(style === "detailed" || style === "both") && <MetricBarList title={c.name} items={c.items} color={TEAL} />}
+            </div>
+          );
+        })}
       </div>
-
-      {customCategoryNames.length > 0 && (
-        <>
-          <SectionTitle eyebrow="Custom categories" title="Settings → other categories" />
-          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 26 }}>
-            {customOff.filter(c => c.items.length).map(c => {
-              const style = chartStyleFor(c.name);
-              return (
-                <React.Fragment key={"off-" + c.name}>
-                  {(style === "simple" || style === "both") && <DonutCard title={`${c.name} — offense`} data={c.items.map((it, i) => ({ ...it, color: CHART_COLORS[i % CHART_COLORS.length] }))} />}
-                  {(style === "detailed" || style === "both") && <MetricBarList title={`${c.name} — offense`} items={c.items} color={AMBER} />}
-                </React.Fragment>
-              );
-            })}
-            {customDef.filter(c => c.items.length).map(c => {
-              const style = chartStyleFor(c.name);
-              return (
-                <React.Fragment key={"def-" + c.name}>
-                  {(style === "simple" || style === "both") && <DonutCard title={`${c.name} — defense`} data={c.items.map((it, i) => ({ ...it, color: CHART_COLORS[i % CHART_COLORS.length] }))} />}
-                  {(style === "detailed" || style === "both") && <MetricBarList title={`${c.name} — defense`} items={c.items} color={TEAL} />}
-                </React.Fragment>
-              );
-            })}
-          </div>
-        </>
-      )}
 
       {detailTables && (
         <>
@@ -1964,6 +2029,55 @@ function useTeamAdvancedStats(filterKeys) {
   return data;
 }
 
+// Gère les sessions de "Rebound Contest" (TAG/BOX OUT) importées — stockage propre à chaque
+// équipe, comme le reste. Chaque session est enregistrée séparément (indexée), pour pouvoir en
+// sélectionner un sous-ensemble à l'affichage (comme pour les matchs de coding).
+function useReboundContestSessions() {
+  const [index, setIndex] = useState([]);
+  const [sessions, setSessions] = useState({}); // { id: { id, label, date, events } }
+  const [loading, setLoading] = useState(true);
+
+  async function load() {
+    setLoading(true);
+    const idx = (await storeGet("rebound_contest_index")) || [];
+    setIndex(idx);
+    const loaded = {};
+    for (const s of idx) {
+      const rec = await storeGet("rebound_contest:" + s.id);
+      if (rec) loaded[s.id] = rec;
+    }
+    setSessions(loaded);
+    setLoading(false);
+  }
+  useEffect(() => { load(); }, []);
+
+  async function addSession({ label, date, events }) {
+    const id = uid();
+    const record = { id, label, date, events };
+    await storeSet("rebound_contest:" + id, record);
+    const newIndex = [...index, { id, label, date, eventsCount: events.length }];
+    await storeSet("rebound_contest_index", newIndex);
+    setIndex(newIndex);
+    setSessions(s => ({ ...s, [id]: record }));
+    return id;
+  }
+  async function deleteSession(id) {
+    await storeDelete("rebound_contest:" + id);
+    const newIndex = index.filter(s => s.id !== id);
+    await storeSet("rebound_contest_index", newIndex);
+    setIndex(newIndex);
+    setSessions(s => { const n = { ...s }; delete n[id]; return n; });
+  }
+  async function editSession(id, changes) {
+    const newIndex = index.map(s => s.id === id ? { ...s, ...changes } : s);
+    await storeSet("rebound_contest_index", newIndex);
+    setIndex(newIndex);
+    setSessions(s => ({ ...s, [id]: { ...s[id], ...changes } }));
+  }
+
+  return { index, sessions, loading, addSession, deleteSession, editSession, reload: load };
+}
+
 function useAllBoxScores(filterKeys) {
   const [byPlayer, setByPlayer] = useState({});
   const [loading, setLoading] = useState(true);
@@ -2154,11 +2268,24 @@ export default function App() {
     setRoster(newRoster);
   }
 
+  // Réorganise l'ordre d'affichage des joueurs dans Players (demandé par l'utilisateur) —
+  // échange la position du joueur avec son voisin, comme déjà fait pour Scouting Report.
+  async function movePlayer(id, direction) {
+    const idx = roster.findIndex(p => p.id === id);
+    const swapWith = direction === "up" ? idx - 1 : idx + 1;
+    if (idx === -1 || swapWith < 0 || swapWith >= roster.length) return;
+    const newRoster = [...roster];
+    [newRoster[idx], newRoster[swapWith]] = [newRoster[swapWith], newRoster[idx]];
+    await storeSet("roster", newRoster);
+    setRoster(newRoster);
+  }
+
   async function bootstrap() {
     await loadTagCategories();
     await loadObservationTagCategories();
     await loadCategoryChartStyles();
     await loadBoxColumnAliases();
+    await loadTrainingThemeColors();
     const savedSeason = await storeGet("current_season");
     if (savedSeason) setCurrentSeason(savedSeason); else await storeSet("current_season", currentSeason);
     const r = await storeGet("roster");
@@ -2287,18 +2414,35 @@ export default function App() {
     const map = new Map();
     matchesIndex.forEach(m => {
       const k = matchKey(m.date, m.opponent);
-      const existing = map.get(k) || { date: m.date, opponent: m.opponent, hasCoding: false, hasBox: false };
+      const existing = map.get(k) || { date: m.date, opponent: m.opponent, hasCoding: false, hasBox: false, matchType: "" };
       existing.hasCoding = true;
+      if (m.matchType) existing.matchType = m.matchType;
       map.set(k, existing);
     });
     boxScoreIndex.forEach(m => {
       const k = matchKey(m.date, m.opponent);
-      const existing = map.get(k) || { date: m.date, opponent: m.opponent, hasCoding: false, hasBox: false };
+      const existing = map.get(k) || { date: m.date, opponent: m.opponent, hasCoding: false, hasBox: false, matchType: "" };
       existing.hasBox = true;
+      if (m.matchType) existing.matchType = m.matchType;
       map.set(k, existing);
     });
     return Array.from(map.values()).sort((a, b) => a.date.localeCompare(b.date));
   }, [matchesIndex, boxScoreIndex]);
+
+  // Par défaut, les matchs amicaux ("Friendly Game") ne sont PAS inclus dans la sélection —
+  // sauf s'il n'y a QUE des matchs amicaux, auquel cas il n'y a rien d'autre à afficher.
+  // Ne s'applique qu'une fois, tant que le coach n'a jamais lui-même modifié la sélection
+  // (sinon son choix manuel serait écrasé à chaque nouvel import).
+  const userTouchedSelectionRef = useRef(false);
+  useEffect(() => {
+    if (userTouchedSelectionRef.current || !allMatchOptions.length) return;
+    const nonFriendly = allMatchOptions.filter(o => o.matchType !== "Friendly Game");
+    if (nonFriendly.length > 0 && nonFriendly.length < allMatchOptions.length) {
+      setSelectedMatchKeys(new Set(nonFriendly.map(o => matchKey(o.date, o.opponent))));
+    }
+    // Si nonFriendly.length === allMatchOptions.length (aucun match amical) ou === 0 (que des
+    // matchs amicaux), on laisse selectedMatchKeys à null (tous sélectionnés) — rien à exclure.
+  }, [allMatchOptions]);
 
   if (initializing) {
     return (
@@ -2377,10 +2521,10 @@ export default function App() {
             roster={roster}
             onImported={async (parsed, meta) => {
               const id = uid();
-              const record = { id, date: meta.date, opponent: meta.opponent, season: currentSeason, plays: parsed.plays };
+              const record = { id, date: meta.date, opponent: meta.opponent, season: currentSeason, matchType: meta.matchType || "", plays: parsed.plays };
               await storeSet("match:" + id, record);
               if (parsed.fileDataUrl) await storeSet("match_file:" + id, { name: parsed.fileName || "match.xlsx", dataUrl: parsed.fileDataUrl });
-              const newIdx = [...matchesIndex, { id, date: meta.date, opponent: meta.opponent, season: currentSeason, playsCount: parsed.plays.length }]
+              const newIdx = [...matchesIndex, { id, date: meta.date, opponent: meta.opponent, season: currentSeason, matchType: meta.matchType || "", playsCount: parsed.plays.length }]
                 .sort((a, b) => a.date.localeCompare(b.date));
               await storeSet("match_index", newIdx);
               setMatchesIndex(newIdx);
@@ -2406,6 +2550,20 @@ export default function App() {
             onDeleteMatch={async (id, label) => {
               await requestDeletion(team.id, team.name, "match", label, { id });
             }}
+            onEditMatch={async (id, changes) => {
+              // Modifie un match déjà importé (date, adversaire, type de match) sans jamais
+              // toucher aux actions codées elles-mêmes — demandé par l'utilisateur, pour
+              // corriger une erreur de saisie sans devoir réimporter le fichier entier.
+              const record = matches[id] || (await storeGet("match:" + id));
+              if (record) {
+                const updatedRecord = { ...record, ...changes };
+                await storeSet("match:" + id, updatedRecord);
+                setMatches(m => ({ ...m, [id]: updatedRecord }));
+              }
+              const newIdx = matchesIndex.map(m => m.id === id ? { ...m, ...changes } : m).sort((a, b) => a.date.localeCompare(b.date));
+              await storeSet("match_index", newIdx);
+              setMatchesIndex(newIdx);
+            }}
           />
         )}
         {tab === "boxscore" && session.role === "coach" && (
@@ -2414,10 +2572,10 @@ export default function App() {
             index={boxScoreIndex}
             onImported={async (parsed, meta) => {
               const id = uid();
-              const record = { id, date: meta.date, opponent: meta.opponent, season: currentSeason, opponentScore: meta.opponentScore ?? null, teamRow: parsed.teamRow || null, rows: parsed.rows };
+              const record = { id, date: meta.date, opponent: meta.opponent, season: currentSeason, matchType: meta.matchType || "", opponentScore: meta.opponentScore ?? null, teamRow: parsed.teamRow || null, rows: parsed.rows };
               await storeSet("boxscore:" + id, record);
               if (parsed.fileDataUrl) await storeSet("boxscore_file:" + id, { name: parsed.fileName || "boxscore.xlsx", dataUrl: parsed.fileDataUrl });
-              const newIdx = [...boxScoreIndex, { id, date: meta.date, opponent: meta.opponent, season: currentSeason, matchedCount: parsed.matchedCount }]
+              const newIdx = [...boxScoreIndex, { id, date: meta.date, opponent: meta.opponent, season: currentSeason, matchType: meta.matchType || "", matchedCount: parsed.matchedCount }]
                 .sort((a, b) => a.date.localeCompare(b.date));
               await storeSet("boxscore_index", newIdx);
               setBoxScoreIndex(newIdx);
@@ -2425,11 +2583,18 @@ export default function App() {
             onDelete={async (id, label) => {
               await requestDeletion(team.id, team.name, "boxscore", label, { id });
             }}
+            onEditBoxScore={async (id, changes) => {
+              const record = await storeGet("boxscore:" + id);
+              if (record) await storeSet("boxscore:" + id, { ...record, ...changes });
+              const newIdx = boxScoreIndex.map(m => m.id === id ? { ...m, ...changes } : m).sort((a, b) => a.date.localeCompare(b.date));
+              await storeSet("boxscore_index", newIdx);
+              setBoxScoreIndex(newIdx);
+            }}
           />
         )}
         {(tab === "players" || tab === "team" || tab === "scouting") && (
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-start" }}>
-            <MatchSelector options={allMatchOptions} selectedKeys={selectedMatchKeys} onChange={setSelectedMatchKeys} />
+            <MatchSelector options={allMatchOptions} selectedKeys={selectedMatchKeys} onChange={next => { userTouchedSelectionRef.current = true; setSelectedMatchKeys(next); }} />
             {(() => {
               const seasons = Array.from(new Set([...matchesIndex, ...boxScoreIndex].map(m => m.season).filter(Boolean)));
               if (!seasons.length) return null;
@@ -2445,7 +2610,7 @@ export default function App() {
         {tab === "players" && !selectedPlayer && (session.role === "coach" || visibility.tabs.players) && (
           <PlayersList roster={roster} allPlays={allPlays} onSelect={setSelectedPlayer} matchFilter={effectiveMatchFilter}
             isCoach={session.role === "coach"} onlyOwn={session.role === "player" ? session.name : null}
-            onAddPlayer={addPlayer} onRemovePlayer={removePlayer} onEditPlayer={editPlayer} />
+            onAddPlayer={addPlayer} onRemovePlayer={removePlayer} onEditPlayer={editPlayer} onMovePlayer={movePlayer} />
         )}
         {tab === "players" && selectedPlayer && (session.role === "coach" || visibility.tabs.players) && (
           <PlayerDetail
@@ -2505,6 +2670,8 @@ export default function App() {
             <TagCategoriesSettings roster={roster} title="Column categories — Scouting Observation" getCurrent={currentObservationTagCategories} onSave={saveObservationTagCategories} onResetDefault={() => JSON.parse(JSON.stringify(DEFAULT_TAG_CATEGORIES))} />
             <div style={{ height: 26 }} />
             <ShotChartThresholdsSettings />
+            <div style={{ height: 26 }} />
+            <TrainingThemeColorsSettings />
             <div style={{ height: 26 }} />
             <BoxColumnAliasesSettings />
           </div>
@@ -2663,7 +2830,7 @@ async function rawDelete(fullKey) {
   try {
     if (window.storage) await window.storage.delete(fullKey, true);
     else if (supabase) await supabase.from("app_storage").delete().eq("key", fullKey);
-  } catch (e) { console.error("[storage] rawDelete failed on", fullKey, ":", e); }
+  } catch (e) {}
   delete memoryStore[fullKey];
 }
 
@@ -3576,15 +3743,250 @@ function BottomTabBar({ tab, setTab, isCoach, visibility }) {
 // Import
 // ---------------------------------------------------------------------------
 
-function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch }) {
+function MatchTypeSelect({ value, onChange }) {
+  const { types, addType } = useMatchTypes();
+  const [adding, setAdding] = useState(false);
+  const [newName, setNewName] = useState("");
+  async function confirmAdd() {
+    const saved = await addType(newName);
+    if (saved) onChange(saved);
+    setNewName(""); setAdding(false);
+  }
+  if (adding) {
+    return (
+      <div style={{ display: "flex", gap: 6 }}>
+        <input autoFocus value={newName} onChange={e => setNewName(e.target.value)} placeholder="New match type…"
+          onKeyDown={e => e.key === "Enter" && confirmAdd()}
+          style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 180 }} />
+        <button onClick={confirmAdd} style={{ padding: "0 10px", background: AMBER, border: "none", borderRadius: 6, color: "#1a1200", cursor: "pointer", fontFamily: "inherit" }}>Add</button>
+        <button onClick={() => { setAdding(false); setNewName(""); }} style={{ padding: "0 10px", background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", cursor: "pointer", fontFamily: "inherit" }}>Cancel</button>
+      </div>
+    );
+  }
+  return (
+    <select value={value || ""} onChange={e => e.target.value === "__new__" ? setAdding(true) : onChange(e.target.value)}
+      style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 180 }}>
+      <option value="">— None —</option>
+      {types.map(t => <option key={t} value={t}>{t}</option>)}
+      <option value="__new__">+ New match type…</option>
+    </select>
+  );
+}
+
+// Onglet "Rebound Contest" (Team) : sélecteur de sessions + classement des joueurs sur
+// TAG / BOX OUT, avec photo et nom repris directement du roster.
+function ReboundContestTab({ roster, isCoach }) {
+  const { index, sessions, loading } = useReboundContestSessions();
+  const [selectedIds, setSelectedIds] = useState(null); // null = toutes les sessions
+
+  const effectiveIds = selectedIds === null ? index.map(s => s.id) : [...selectedIds];
+  const allEvents = useMemo(() => {
+    return effectiveIds.flatMap(id => (sessions[id]?.events) || []);
+  }, [effectiveIds.join(","), sessions]);
+
+  const stats = useMemo(() => computeReboundContestStats(allEvents, roster.map(p => p.name)), [allEvents, roster]);
+  const ranked = roster
+    .map(p => ({ ...p, stats: stats[p.name] }))
+    .filter(p => p.stats && p.stats.total.possible > 0)
+    .sort((a, b) => (b.stats.total.pct ?? -1) - (a.stats.total.pct ?? -1));
+
+  if (loading) return <div style={{ color: "#5C6470", fontSize: 13 }}>Loading…</div>;
+  if (!index.length) return <EmptyState text="No Rebound Contest session imported yet — import one from the 'Import' tab." />;
+
+  return (
+    <div>
+      <SectionTitle eyebrow="Team" title="Rebound Contest — TAG & BOX OUT" />
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
+        <button onClick={() => setSelectedIds(selectedIds === null ? new Set() : null)} style={{
+          padding: "8px 14px", background: selectedIds === null ? PANEL2 : "transparent", border: `1px solid ${LINE}`, borderRadius: 8,
+          color: PAPER, fontSize: 12.5, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+        }}>
+          {selectedIds === null ? `All sessions (${index.length})` : `${effectiveIds.length} session${effectiveIds.length !== 1 ? "s" : ""} selected`}
+        </button>
+        {index.map(s => {
+          const checked = effectiveIds.includes(s.id);
+          return (
+            <button key={s.id} onClick={() => {
+              const cur = selectedIds === null ? new Set(index.map(x => x.id)) : new Set(selectedIds);
+              if (cur.has(s.id)) cur.delete(s.id); else cur.add(s.id);
+              setSelectedIds(cur.size === index.length ? null : cur);
+            }} style={{
+              padding: "6px 10px", borderRadius: 6, fontSize: 11.5, cursor: "pointer", fontFamily: "inherit",
+              background: checked ? AMBER : "transparent", color: checked ? "#1a1200" : "#8B93A1", border: `1px solid ${checked ? AMBER : LINE}`,
+            }}>
+              {s.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {ranked.length === 0 ? (
+        <EmptyState text="No player has data for the selected session(s)." />
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {ranked.map((p, i) => (
+            <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 16px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10 }}>
+              <div style={{ width: 26, textAlign: "center", fontFamily: "ui-monospace, monospace", fontWeight: 800, color: i === 0 ? AMBER : "#5C6470" }}>{i + 1}</div>
+              <PlayerAvatar playerName={p.name} size={38} />
+              <div style={{ flex: 1, minWidth: 120 }}>
+                <div style={{ fontWeight: 600, fontSize: 14.5 }}>{p.name}</div>
+                <div style={{ fontSize: 11.5, color: "#5C6470" }}>{p.position || ""}</div>
+              </div>
+              <div style={{ display: "flex", gap: 22 }}>
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 16, color: TEAL }}>{p.stats.tag.pct !== null ? `${Math.round(p.stats.tag.pct)}%` : "–"}</div>
+                  <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>Tag {p.stats.tag.possible > 0 ? `(${p.stats.tag.earned}/${p.stats.tag.possible})` : ""}</div>
+                </div>
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 16, color: "#4A90D9" }}>{p.stats.boxOut.pct !== null ? `${Math.round(p.stats.boxOut.pct)}%` : "–"}</div>
+                  <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>Box Out {p.stats.boxOut.possible > 0 ? `(${p.stats.boxOut.earned}/${p.stats.boxOut.possible})` : ""}</div>
+                </div>
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 18, color: AMBER }}>{p.stats.total.pct !== null ? `${Math.round(p.stats.total.pct)}%` : "–"}</div>
+                  <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>Total</div>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Import d'un fichier "Rebound Contest" (TAG/BOX OUT), avec aperçu avant confirmation, comme
+// pour les autres imports de l'app.
+function ReboundContestImportPanel({ roster }) {
+  const { index, sessions, deleteSession, editSession, addSession } = useReboundContestSessions();
+  const [preview, setPreview] = useState(null);
+  const [fileErr, setFileErr] = useState("");
+  const [label, setLabel] = useState("");
+  const [date, setDate] = useState(todayLocal());
+  const [busy, setBusy] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editLabel, setEditLabel] = useState(""), [editDate, setEditDate] = useState("");
+  const fileRef = useRef();
+
+  async function handleFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setFileErr(""); setPreview(null);
+    try {
+      const buf = await file.arrayBuffer();
+      const { events, unmatchedColumns } = parseReboundContestFile(buf, roster);
+      if (!events.length) throw new Error("No TAG/BOX OUT event found in this file — check the 'button' column and the player columns (\"Name 0\", \"Name 1\", \"Name 2\").");
+      // Pré-remplit le libellé à partir du nom du fichier (ex. "Practice_18_Aout_export.csv"
+      // -> "Practice 18 Aout"), comme demandé implicitement par l'exemple envoyé.
+      const guessedLabel = file.name.replace(/\.(csv|xlsx?|xls)$/i, "").replace(/_export$/i, "").replace(/_/g, " ").trim();
+      setLabel(guessedLabel);
+      setPreview({ events, unmatchedColumns });
+    } catch (err) {
+      setFileErr(err.message || "Unable to read this file.");
+    }
+    if (fileRef.current) fileRef.current.value = "";
+  }
+
+  async function confirmImport() {
+    if (!preview) return;
+    setBusy(true);
+    await addSession({ label: label.trim() || "Rebound contest", date, events: preview.events });
+    setBusy(false); setPreview(null); setLabel("");
+  }
+
+  function startEdit(s) { setEditingId(s.id); setEditLabel(s.label); setEditDate(s.date); }
+  async function confirmEdit() { await editSession(editingId, { label: editLabel.trim(), date: editDate }); setEditingId(null); }
+
+  return (
+    <div>
+      <SectionTitle eyebrow="Rebound Contest" title="Import a TAG / BOX OUT session" />
+      <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 16, maxWidth: 600 }}>
+        One row per rebound event, with a "button" column (TAG or BOX OUT) and 3 columns per
+        player ("Name 0", "Name 1", "Name 2") marking the points earned on that event.
+      </div>
+
+      {!preview ? (
+        <div style={{ border: `1px dashed ${LINE}`, borderRadius: 10, padding: 20, textAlign: "center", marginBottom: 20 }}>
+          <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
+          {fileErr && <div style={{ color: RED, fontSize: 12.5, marginTop: 10 }}>{fileErr}</div>}
+        </div>
+      ) : (
+        <div style={{ background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 10, padding: 16, marginBottom: 20 }}>
+          <div style={{ fontSize: 13, color: TEAL, marginBottom: 10 }}>{preview.events.length} event{preview.events.length !== 1 ? "s" : ""} found ({preview.events.filter(e => e.button === "TAG").length} TAG, {preview.events.filter(e => e.button === "BOX OUT").length} BOX OUT)</div>
+          {preview.unmatchedColumns.length > 0 && (
+            <div style={{ fontSize: 12, color: AMBER, marginBottom: 10 }}>
+              These column names don't match anyone in the roster, so they were ignored: {preview.unmatchedColumns.join(", ")}.
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+            <input value={label} onChange={e => setLabel(e.target.value)} placeholder="Session name (e.g. Practice 18 Aout)" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", flex: "1 1 240px" }} />
+            <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 160 }} />
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button disabled={busy} onClick={confirmImport} style={{ ...btnPrimary, width: "auto", padding: "9px 18px" }}>{busy ? "…" : "Save session"}</button>
+            <button onClick={() => setPreview(null)} style={btnSecondary}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {index.length > 0 && (
+        <>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 8 }}>Imported sessions</div>
+          {index.slice().reverse().map(s => (
+            <div key={s.id} style={{ ...btnRow, marginBottom: 6, cursor: "default" }}>
+              {editingId === s.id ? (
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flex: 1, flexWrap: "wrap" }}>
+                  <input value={editLabel} onChange={e => setEditLabel(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", flex: "1 1 200px" }} />
+                  <input type="date" value={editDate} onChange={e => setEditDate(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 150 }} />
+                  <button onClick={confirmEdit} style={{ ...btnPrimary, width: "auto", padding: "7px 14px" }}>Save</button>
+                  <button onClick={() => setEditingId(null)} style={btnSecondary}>Cancel</button>
+                </div>
+              ) : (
+                <>
+                  <span>{s.label} <span style={{ color: "#5C6470", fontSize: 12 }}>· {s.date} · {s.eventsCount} events</span></span>
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <button onClick={() => startEdit(s)} style={{ background: "none", border: "none", color: AMBER, cursor: "pointer", fontSize: 12.5 }}>Edit</button>
+                    {confirmDeleteId === s.id ? (
+                      <>
+                        <button onClick={() => deleteSession(s.id).then(() => setConfirmDeleteId(null))} style={{ background: "none", border: "none", color: RED, cursor: "pointer", fontSize: 12.5 }}>Confirm</button>
+                        <button onClick={() => setConfirmDeleteId(null)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontSize: 12.5 }}>Cancel</button>
+                      </>
+                    ) : (
+                      <button onClick={() => setConfirmDeleteId(s.id)} style={{ background: "none", border: "none", color: RED, cursor: "pointer", fontSize: 12.5 }}>Delete</button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatch }) {
   const [preview, setPreview] = useState(null);
   const [fileErr, setFileErr] = useState("");
   const [date, setDate] = useState(todayLocal());
   const [opponent, setOpponent] = useState("");
+  const [matchType, setMatchType] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [requestedIds, setRequestedIds] = useState(new Set());
+  const [editingId, setEditingId] = useState(null);
+  const [editDate, setEditDate] = useState("");
+  const [editOpponent, setEditOpponent] = useState("");
+  const [editMatchType, setEditMatchType] = useState("");
   const fileRef = useRef();
+
+  function startEdit(m) {
+    setEditingId(m.id); setEditDate(m.date); setEditOpponent(m.opponent); setEditMatchType(m.matchType || "");
+  }
+  async function confirmEdit() {
+    await onEditMatch(editingId, { date: editDate, opponent: editOpponent.trim(), matchType: editMatchType });
+    setEditingId(null);
+  }
 
   async function handleDelete(m) {
     await onDeleteMatch(m.id, `${m.date} vs ${m.opponent}`);
@@ -3618,9 +4020,9 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch }) {
   async function confirmImport() {
     if (!opponent.trim()) { setFileErr("Enter the opponent before confirming."); return; }
     setBusy(true);
-    await onImported(preview, { date, opponent: opponent.trim() });
+    await onImported(preview, { date, opponent: opponent.trim(), matchType });
     setBusy(false);
-    setPreview(null); setOpponent("");
+    setPreview(null); setOpponent(""); setMatchType("");
     if (fileRef.current) fileRef.current.value = "";
   }
 
@@ -3653,6 +4055,10 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch }) {
           <div style={{ flex: 1, minWidth: 200 }}>
             <label style={labelStyle}>Opponent</label>
             <input type="text" placeholder="e.g. Zalgiris" value={opponent} onChange={e => setOpponent(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+          </div>
+          <div>
+            <label style={labelStyle}>Match type</label>
+            <MatchTypeSelect value={matchType} onChange={setMatchType} />
           </div>
         </div>
         <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
@@ -3691,26 +4097,49 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch }) {
       ) : (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {matchesIndex.slice().reverse().map(m => (
-            <div key={m.id} style={{ ...btnRow, cursor: "default" }}>
-              <span>{m.date} <span style={{ color: "#5C6470" }}>vs</span> {m.opponent} <span style={{ color: "#5C6470" }}>· {m.playsCount} actions</span></span>
-              {requestedIds.has(m.id) ? (
-                <span style={{ fontSize: 11.5, color: AMBER }}>Pending admin approval</span>
-              ) : confirmDeleteId === m.id ? (
-                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <span style={{ fontSize: 11.5, color: RED }}>Delete this match?</span>
-                  <button onClick={() => handleDelete(m)} style={{ background: RED, border: "none", borderRadius: 6, color: "#fff", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Yes</button>
-                  <button onClick={() => setConfirmDeleteId(null)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Cancel</button>
+            <div key={m.id} style={{ ...btnRow, cursor: "default", flexDirection: editingId === m.id ? "column" : "row", alignItems: editingId === m.id ? "stretch" : "center" }}>
+              {editingId === m.id ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "4px 0" }}>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    <input type="date" value={editDate} onChange={e => setEditDate(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 160 }} />
+                    <input type="text" value={editOpponent} onChange={e => setEditOpponent(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", flex: 1, minWidth: 160 }} />
+                    <MatchTypeSelect value={editMatchType} onChange={setEditMatchType} />
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={confirmEdit} style={{ padding: "6px 14px", background: AMBER, border: "none", borderRadius: 6, color: "#1a1200", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>Save</button>
+                    <button onClick={() => setEditingId(null)} style={{ padding: "6px 14px", background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>Cancel</button>
+                  </div>
                 </div>
               ) : (
-                <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-                  <button onClick={() => openFile(m.id)} title="Open the original file" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Download size={15} /></button>
-                  <button onClick={() => setConfirmDeleteId(m.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
-                </div>
+                <>
+                  <span>
+                    {m.date} <span style={{ color: "#5C6470" }}>vs</span> {m.opponent} <span style={{ color: "#5C6470" }}>· {m.playsCount} actions</span>
+                    {m.matchType && <span style={{ color: TEAL }}> · {m.matchType}</span>}
+                  </span>
+                  {requestedIds.has(m.id) ? (
+                    <span style={{ fontSize: 11.5, color: AMBER }}>Pending admin approval</span>
+                  ) : confirmDeleteId === m.id ? (
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <span style={{ fontSize: 11.5, color: RED }}>Delete this match?</span>
+                      <button onClick={() => handleDelete(m)} style={{ background: RED, border: "none", borderRadius: 6, color: "#fff", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Yes</button>
+                      <button onClick={() => setConfirmDeleteId(null)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Cancel</button>
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                      <button onClick={() => startEdit(m)} style={{ background: "none", border: "none", color: AMBER, cursor: "pointer", fontSize: 11.5, fontFamily: "inherit" }}>Edit</button>
+                      <button onClick={() => openFile(m.id)} title="Open the original file" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Download size={15} /></button>
+                      <button onClick={() => setConfirmDeleteId(m.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           ))}
         </div>
       )}
+
+      <div style={{ height: 34 }} />
+      <ReboundContestImportPanel roster={roster} />
     </div>
   );
 }
@@ -3884,7 +4313,7 @@ function PlayerVsPlayer({ roster, onClose }) {
   );
 }
 
-function PlayersList({ roster, allPlays, onSelect, isCoach, onlyOwn, matchFilter, onAddPlayer, onRemovePlayer, onEditPlayer }) {
+function PlayersList({ roster, allPlays, onSelect, isCoach, onlyOwn, matchFilter, onAddPlayer, onRemovePlayer, onEditPlayer, onMovePlayer }) {
   const visibleRoster = onlyOwn ? roster.filter(p => p.name === onlyOwn) : roster;
   const box = useAllBoxScores(matchFilter);
   const [showAdd, setShowAdd] = useState(false);
@@ -3972,7 +4401,7 @@ function PlayersList({ roster, allPlays, onSelect, isCoach, onlyOwn, matchFilter
       {rows.length === 0 && <div style={{ marginBottom: 16 }}><EmptyState text="No players in the roster yet — add the first player above." /></div>}
       {rows.length > 0 && rows.every(r => r.playCount === 0 && r.boxGames === 0) && <div style={{ marginBottom: 16 }}><EmptyState text="No match data imported yet — stats will appear here after an import." /></div>}
       <div style={{ display: "grid", gridTemplateColumns: "1fr", gap: 6 }}>
-        {rows.map(p => (
+        {rows.map((p, i) => (
           editingId === p.id ? (
             <div key={p.id} style={{ background: PANEL2, border: `1px solid ${AMBER}`, borderRadius: 10, padding: 16 }}>
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 10 }}>
@@ -4036,6 +4465,18 @@ function PlayersList({ roster, allPlays, onSelect, isCoach, onlyOwn, matchFilter
                       <button onClick={(e) => { e.stopPropagation(); setConfirmDelete(p.id); }} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
                     </>
                   )
+                )}
+                {isCoach && !onlyOwn && onMovePlayer && (
+                  <div style={{ display: "flex", gap: 4 }}>
+                    <button onClick={(e) => { e.stopPropagation(); onMovePlayer(p.id, "up"); }} disabled={i === 0} title="Move up"
+                      style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: i === 0 ? "#3A414C" : "#8B93A1", cursor: i === 0 ? "default" : "pointer", padding: 4, display: "flex" }}>
+                      <ChevronLeft size={14} style={{ transform: "rotate(90deg)" }} />
+                    </button>
+                    <button onClick={(e) => { e.stopPropagation(); onMovePlayer(p.id, "down"); }} disabled={i === rows.length - 1} title="Move down"
+                      style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: i === rows.length - 1 ? "#3A414C" : "#8B93A1", cursor: i === rows.length - 1 ? "default" : "pointer", padding: 4, display: "flex" }}>
+                      <ChevronLeft size={14} style={{ transform: "rotate(-90deg)" }} />
+                    </button>
+                  </div>
                 )}
                 <ChevronRight size={16} color="#5C6470" onClick={() => onSelect(p.name)} style={{ cursor: "pointer" }} />
               </div>
@@ -4628,17 +5069,35 @@ const tdStyle = { padding: "9px 14px", borderBottom: `1px solid ${LINE}`, whiteS
 // Import des stats complètes de match (box score) — nouvel onglet
 // ---------------------------------------------------------------------------
 
-function BoxScoreTab({ roster, index, onImported, onDelete }) {
+function BoxScoreTab({ roster, index, onImported, onDelete, onEditBoxScore }) {
   const [preview, setPreview] = useState(null);
   const [fileErr, setFileErr] = useState("");
   const [date, setDate] = useState(todayLocal());
   const [opponent, setOpponent] = useState("");
   const [opponentScore, setOpponentScore] = useState("");
+  const [matchType, setMatchType] = useState("");
   const [teamName, setTeamName] = useState("");
   const [busy, setBusy] = useState(false);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [requestedIds, setRequestedIds] = useState(new Set());
+  const [editingId, setEditingId] = useState(null);
+  const [editDate, setEditDate] = useState("");
+  const [editOpponent, setEditOpponent] = useState("");
+  const [editOpponentScore, setEditOpponentScore] = useState("");
+  const [editMatchType, setEditMatchType] = useState("");
   const fileRef = useRef();
+
+  function startEdit(m) {
+    setEditingId(m.id); setEditDate(m.date); setEditOpponent(m.opponent);
+    setEditOpponentScore(m.opponentScore ?? ""); setEditMatchType(m.matchType || "");
+  }
+  async function confirmEdit() {
+    await onEditBoxScore(editingId, {
+      date: editDate, opponent: editOpponent.trim(), matchType: editMatchType,
+      opponentScore: editOpponentScore !== "" ? Number(editOpponentScore) : null,
+    });
+    setEditingId(null);
+  }
 
   async function handleDelete(m) {
     await onDelete(m.id, `${m.date} vs ${m.opponent}`);
@@ -4682,8 +5141,8 @@ function BoxScoreTab({ roster, index, onImported, onDelete }) {
   async function confirmImport() {
     if (!opponent.trim()) { setFileErr("Enter the opponent before confirming."); return; }
     setBusy(true);
-    await onImported(preview, { date, opponent: opponent.trim(), opponentScore: opponentScore ? Number(opponentScore) : null });
-    setBusy(false); setPreview(null); setOpponent(""); setOpponentScore("");
+    await onImported(preview, { date, opponent: opponent.trim(), opponentScore: opponentScore ? Number(opponentScore) : null, matchType });
+    setBusy(false); setPreview(null); setOpponent(""); setOpponentScore(""); setMatchType("");
     if (fileRef.current) fileRef.current.value = "";
   }
 
@@ -4702,6 +5161,10 @@ function BoxScoreTab({ roster, index, onImported, onDelete }) {
           <div style={{ width: 140 }}>
             <label style={labelStyle}>Opponent score</label>
             <input type="number" placeholder="e.g. 78" value={opponentScore} onChange={e => setOpponentScore(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+          </div>
+          <div>
+            <label style={labelStyle}>Match type</label>
+            <MatchTypeSelect value={matchType} onChange={setMatchType} />
           </div>
         </div>
         <div style={{ marginBottom: 14 }}>
@@ -4754,21 +5217,42 @@ function BoxScoreTab({ roster, index, onImported, onDelete }) {
       {index.length === 0 ? <EmptyState text="No box score imported yet." /> : (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {index.slice().reverse().map(m => (
-            <div key={m.id} style={{ ...btnRow, cursor: "default" }}>
-              <span>{m.date} <span style={{ color: "#5C6470" }}>vs</span> {m.opponent} <span style={{ color: "#5C6470" }}>· {m.matchedCount} players</span></span>
-              {requestedIds.has(m.id) ? (
-                <span style={{ fontSize: 11.5, color: AMBER }}>Pending admin approval</span>
-              ) : confirmDeleteId === m.id ? (
-                <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                  <span style={{ fontSize: 11.5, color: RED }}>Delete this box score?</span>
-                  <button onClick={() => handleDelete(m)} style={{ background: RED, border: "none", borderRadius: 6, color: "#fff", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Yes</button>
-                  <button onClick={() => setConfirmDeleteId(null)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Cancel</button>
+            <div key={m.id} style={{ ...btnRow, cursor: "default", flexDirection: editingId === m.id ? "column" : "row", alignItems: editingId === m.id ? "stretch" : "center" }}>
+              {editingId === m.id ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "4px 0" }}>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                    <input type="date" value={editDate} onChange={e => setEditDate(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 160 }} />
+                    <input type="text" value={editOpponent} onChange={e => setEditOpponent(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", flex: 1, minWidth: 160 }} />
+                    <input type="number" placeholder="Opponent score" value={editOpponentScore} onChange={e => setEditOpponentScore(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 140 }} />
+                    <MatchTypeSelect value={editMatchType} onChange={setEditMatchType} />
+                  </div>
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={confirmEdit} style={{ padding: "6px 14px", background: AMBER, border: "none", borderRadius: 6, color: "#1a1200", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>Save</button>
+                    <button onClick={() => setEditingId(null)} style={{ padding: "6px 14px", background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>Cancel</button>
+                  </div>
                 </div>
               ) : (
-                <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
-                  <button onClick={() => openFile(m.id)} title="Open the original file" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Download size={15} /></button>
-                  <button onClick={() => setConfirmDeleteId(m.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
-                </div>
+                <>
+                  <span>
+                    {m.date} <span style={{ color: "#5C6470" }}>vs</span> {m.opponent} <span style={{ color: "#5C6470" }}>· {m.matchedCount} players</span>
+                    {m.matchType && <span style={{ color: TEAL }}> · {m.matchType}</span>}
+                  </span>
+                  {requestedIds.has(m.id) ? (
+                    <span style={{ fontSize: 11.5, color: AMBER }}>Pending admin approval</span>
+                  ) : confirmDeleteId === m.id ? (
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <span style={{ fontSize: 11.5, color: RED }}>Delete this box score?</span>
+                      <button onClick={() => handleDelete(m)} style={{ background: RED, border: "none", borderRadius: 6, color: "#fff", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Yes</button>
+                      <button onClick={() => setConfirmDeleteId(null)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Cancel</button>
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                      <button onClick={() => startEdit(m)} style={{ background: "none", border: "none", color: AMBER, cursor: "pointer", fontSize: 11.5, fontFamily: "inherit" }}>Edit</button>
+                      <button onClick={() => openFile(m.id)} title="Open the original file" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Download size={15} /></button>
+                      <button onClick={() => setConfirmDeleteId(m.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           ))}
@@ -5107,9 +5591,38 @@ function ObjectivesPanel({ playerName, isCoach, box, off, def }) {
 }
 
 const DEFAULT_TRAINING_THEMES = ["Pts + Indiv", "Pts - Indiv", "Coll Off", "Coll Def"];
+
+// Types de match (ex. "Friendly Game", "Season Game", "Play-Off Game") — propres à chaque
+// équipe, extensibles par le coach depuis les onglets Import Match / Full Stats.
+const DEFAULT_MATCH_TYPES = ["Friendly Game", "Season Game", "Play-Off Game"];
+function useMatchTypes() {
+  const [types, setTypes] = useState(DEFAULT_MATCH_TYPES);
+  useEffect(() => { storeGet("match_types").then(t => setTypes(t && t.length ? t : DEFAULT_MATCH_TYPES)); }, []);
+  async function addType(name) {
+    const trimmed = name.trim();
+    if (!trimmed || types.includes(trimmed)) return trimmed;
+    const next = [...types, trimmed];
+    await storeSet("match_types", next);
+    setTypes(next);
+    return trimmed;
+  }
+  return { types, addType };
+}
 const TRAINING_THEME_COLORS = { "Pts + Indiv": AMBER, "Pts - Indiv": "#C97BE0", "Coll Off": TEAL, "Coll Def": "#7C9CF2" };
 const TRAINING_THEME_FALLBACK_COLORS = ["#E4231C", "#4A90D9", "#B15FE0", "#8B93A1", "#F2A93B", "#2FBF9C"];
+// Couleurs personnalisées par le coach (propres à chaque équipe) — chargées une fois au
+// démarrage (comme TAG_CATEGORIES), pour que trainingThemeColor() reste une simple fonction
+// synchrone utilisable partout sans changer sa signature dans tous les appels existants.
+let CUSTOM_TRAINING_THEME_COLORS = {};
+async function loadTrainingThemeColors() {
+  CUSTOM_TRAINING_THEME_COLORS = (await storeGet("training_theme_colors")) || {};
+}
+async function saveTrainingThemeColors(colors) {
+  CUSTOM_TRAINING_THEME_COLORS = colors;
+  await storeSet("training_theme_colors", colors);
+}
 function trainingThemeColor(name, allThemes) {
+  if (CUSTOM_TRAINING_THEME_COLORS[name]) return CUSTOM_TRAINING_THEME_COLORS[name];
   if (TRAINING_THEME_COLORS[name]) return TRAINING_THEME_COLORS[name];
   const idx = Math.max(0, allThemes.indexOf(name));
   return TRAINING_THEME_FALLBACK_COLORS[idx % TRAINING_THEME_FALLBACK_COLORS.length];
@@ -5356,7 +5869,7 @@ const MENTAL_CRITERIA = [
 const DEFAULT_VISIBILITY = {
   tabs: { players: true, team: true, scouting: true, planning: true },
   playerDetail: { stats: true, objectives: true, training: true, mental: true, wellness: true, role: true, meetings: true },
-  team: { standings: true, teamPlay: true, advanced: true, resources: true },
+  team: { standings: true, teamPlay: true, advanced: true, resources: true, reboundContest: true },
   wellnessCharts: false, // les graphiques Wellness sont cachés aux joueurs par défaut
 };
 
@@ -5579,6 +6092,64 @@ function RoleTab({ playerName, isCoach }) {
         </div>
         <button disabled={busy} onClick={save} style={{ ...btnPrimary, width: "auto", padding: "10px 20px" }}>{busy ? "…" : "Save"}</button>
         {status && <div style={{ fontSize: 12, color: TEAL, marginTop: 10 }}>{status}</div>}
+      </div>
+
+      <div style={{ height: 30 }} />
+      <PlayerReboundContestSection playerName={playerName} />
+    </div>
+  );
+}
+
+// Partie rebond de la fiche joueur — demandé par l'utilisateur : le joueur voit son propre %
+// Tag et % Box Out, avec un sélecteur pour choisir sur quelles sessions ("matchs sélectionnés").
+function PlayerReboundContestSection({ playerName }) {
+  const { index, sessions, loading } = useReboundContestSessions();
+  const [selectedIds, setSelectedIds] = useState(null); // null = toutes les sessions
+
+  if (loading || !index.length) return null;
+
+  const effectiveIds = selectedIds === null ? index.map(s => s.id) : [...selectedIds];
+  const events = effectiveIds.flatMap(id => (sessions[id]?.events) || []);
+  const stats = computeReboundContestStats(events, [playerName])[playerName];
+  if (!stats || stats.total.possible === 0) return null;
+
+  return (
+    <div>
+      <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 10 }}>Rebound Contest</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
+        <button onClick={() => setSelectedIds(selectedIds === null ? new Set() : null)} style={{
+          padding: "6px 12px", background: selectedIds === null ? PANEL2 : "transparent", border: `1px solid ${LINE}`, borderRadius: 7,
+          color: PAPER, fontSize: 11.5, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+        }}>
+          {selectedIds === null ? `All sessions (${index.length})` : `${effectiveIds.length} selected`}
+        </button>
+        {index.map(s => {
+          const checked = effectiveIds.includes(s.id);
+          return (
+            <button key={s.id} onClick={() => {
+              const cur = selectedIds === null ? new Set(index.map(x => x.id)) : new Set(selectedIds);
+              if (cur.has(s.id)) cur.delete(s.id); else cur.add(s.id);
+              setSelectedIds(cur.size === index.length ? null : cur);
+            }} style={{
+              padding: "5px 9px", borderRadius: 6, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
+              background: checked ? AMBER : "transparent", color: checked ? "#1a1200" : "#8B93A1", border: `1px solid ${checked ? AMBER : LINE}`,
+            }}>{s.label}</button>
+          );
+        })}
+      </div>
+      <div style={{ display: "flex", gap: 26 }}>
+        <div>
+          <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 26, color: TEAL }}>{stats.tag.pct !== null ? `${Math.round(stats.tag.pct)}%` : "–"}</div>
+          <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase" }}>Tag {stats.tag.possible > 0 ? `(${stats.tag.earned}/${stats.tag.possible})` : "no data"}</div>
+        </div>
+        <div>
+          <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 26, color: "#4A90D9" }}>{stats.boxOut.pct !== null ? `${Math.round(stats.boxOut.pct)}%` : "–"}</div>
+          <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase" }}>Box Out {stats.boxOut.possible > 0 ? `(${stats.boxOut.earned}/${stats.boxOut.possible})` : "no data"}</div>
+        </div>
+        <div>
+          <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 26, color: AMBER }}>{stats.total.pct !== null ? `${Math.round(stats.total.pct)}%` : "–"}</div>
+          <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase" }}>Total</div>
+        </div>
       </div>
     </div>
   );
@@ -5832,10 +6403,27 @@ function MatchSelector({ options, selectedKeys, onChange }) {
   const [open, setOpen] = useState(false);
   const allSelected = selectedKeys === null;
   const count = allSelected ? options.length : selectedKeys.size;
+  const selectedKeysSet = allSelected ? new Set(options.map(o => matchKey(o.date, o.opponent))) : selectedKeys;
 
   function toggleKey(k) {
-    const next = new Set(allSelected ? options.map(o => matchKey(o.date, o.opponent)) : selectedKeys);
+    const next = new Set(selectedKeysSet);
     if (next.has(k)) next.delete(k); else next.add(k);
+    onChange(next.size === options.length ? null : next);
+  }
+
+  // Raccourci par type de match (ex. "Season Game") — demandé par l'utilisateur, pour ne pas
+  // avoir à cocher chaque match un par un. Même comportement à bascule que "All matches" :
+  // si tous les matchs de ce type sont déjà sélectionnés, un second clic les retire de la
+  // sélection ; sinon, ils sont ajoutés (sans toucher aux autres matchs déjà sélectionnés).
+  const matchTypesPresent = useMemo(() => {
+    const set = new Set(options.filter(o => o.matchType).map(o => o.matchType));
+    return [...set];
+  }, [options]);
+  function toggleType(type) {
+    const keysOfType = options.filter(o => o.matchType === type).map(o => matchKey(o.date, o.opponent));
+    const allOfTypeSelected = keysOfType.every(k => selectedKeysSet.has(k));
+    const next = new Set(selectedKeysSet);
+    keysOfType.forEach(k => allOfTypeSelected ? next.delete(k) : next.add(k));
     onChange(next.size === options.length ? null : next);
   }
 
@@ -5852,18 +6440,40 @@ function MatchSelector({ options, selectedKeys, onChange }) {
         <ChevronRight size={13} style={{ transform: open ? "rotate(90deg)" : "none", transition: "transform 0.15s" }} />
       </button>
       {open && (
-        <div style={{ position: "absolute", zIndex: 10, marginTop: 6, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, padding: 10, minWidth: 280, maxHeight: 320, overflowY: "auto", boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
-          <button onClick={() => onChange(null)} style={{ ...btnRow, marginBottom: 6, background: allSelected ? PANEL : "transparent" }}>
+        <div style={{ position: "absolute", zIndex: 10, marginTop: 6, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, padding: 10, minWidth: 280, maxHeight: 380, overflowY: "auto", boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
+          {/* Bascule : si tout est déjà sélectionné, un second clic désélectionne tout (zéro
+              match) — au lieu de forcer systématiquement "tout sélectionner". */}
+          <button onClick={() => onChange(allSelected ? new Set() : null)} style={{ ...btnRow, marginBottom: 6, background: allSelected ? PANEL : "transparent" }}>
             <span style={{ fontWeight: 700 }}>All matches</span>
             {allSelected && <span style={{ color: AMBER }}>✓</span>}
           </button>
+          {matchTypesPresent.length > 0 && (
+            <>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8 }}>
+                {matchTypesPresent.map(type => {
+                  const keysOfType = options.filter(o => o.matchType === type).map(o => matchKey(o.date, o.opponent));
+                  const allOfTypeSelected = keysOfType.every(k => selectedKeysSet.has(k));
+                  return (
+                    <button key={type} onClick={() => toggleType(type)} style={{
+                      padding: "5px 10px", borderRadius: 6, fontSize: 11.5, cursor: "pointer", fontFamily: "inherit",
+                      background: allOfTypeSelected ? AMBER : "transparent", color: allOfTypeSelected ? "#1a1200" : TEAL,
+                      border: `1px solid ${allOfTypeSelected ? AMBER : TEAL}`,
+                    }}>
+                      {type} ({keysOfType.length})
+                    </button>
+                  );
+                })}
+              </div>
+              <div style={{ height: 1, background: LINE, margin: "2px 0 8px" }} />
+            </>
+          )}
           {options.map(o => {
             const k = matchKey(o.date, o.opponent);
-            const checked = allSelected || selectedKeys.has(k);
+            const checked = selectedKeysSet.has(k);
             return (
               <button key={k} onClick={() => toggleKey(k)} style={{ ...btnRow, marginBottom: 4 }}>
                 <span>{o.date} <span style={{ color: "#5C6470" }}>vs</span> {o.opponent}
-                  <span style={{ color: "#5C6470", fontSize: 11 }}> {o.hasCoding && o.hasBox ? "· coding + box" : o.hasCoding ? "· coding" : "· box"}</span>
+                  <span style={{ color: "#5C6470", fontSize: 11 }}> {o.hasCoding && o.hasBox ? "· coding + box" : o.hasCoding ? "· coding" : "· box"}{o.matchType ? ` · ${o.matchType}` : ""}</span>
                 </span>
                 {checked && <span style={{ color: AMBER }}>✓</span>}
               </button>
@@ -6785,7 +7395,109 @@ function StatShapeBadge({ label, value, size = 74, fontScale = 1, color = TEAL }
   );
 }
 
-function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, teamLogo, onEdit, onDelete, printMode, onMoveUp, onMoveDown, isFirst, isLast, chartScale }) {
+// Position/taille personnalisable de chaque forme de la fiche scouting (écran uniquement —
+// l'export garde sa mise en page fixe, déjà calibrée pour tenir à 2 joueurs par page). Les
+// valeurs par défaut reproduisent exactement la disposition actuelle, en pourcentages d'une
+// zone de référence de 900×560 — pour que rien ne change tant que le coach n'a pas personnalisé.
+const SCOUTING_LAYOUT_REF_W = 900, SCOUTING_LAYOUT_REF_H = 560;
+const DEFAULT_SCOUTING_LAYOUT = {
+  logo: { x: 850, y: 16, w: 30, h: 30 },
+  photo: { x: 28, y: 28, w: 260, h: 260 },
+  name: { x: 28, y: 300, w: 300, h: 34 },
+  info: { x: 28, y: 334, w: 300, h: 24 },
+  heightBadge: { x: 28, y: 366, w: 145, h: 60 },
+  handBadge: { x: 183, y: 366, w: 145, h: 60 },
+  gamePlan: { x: 28, y: 434, w: 300, h: 70 },
+  closeOut: { x: 28, y: 512, w: 300, h: 24 },
+  highlights: { x: 28, y: 544, w: 300, h: 90 },
+  chart: { x: 360, y: 20, w: 500, h: 500 },
+};
+function useScoutingLayout() {
+  const [layout, setLayout] = useState(DEFAULT_SCOUTING_LAYOUT);
+  useEffect(() => { storeGet("scouting_layout").then(v => setLayout(v ? { ...DEFAULT_SCOUTING_LAYOUT, ...v } : DEFAULT_SCOUTING_LAYOUT)); }, []);
+  async function save(next) { await storeSet("scouting_layout", next); setLayout(next); }
+  async function resetShape(key) { const next = { ...layout }; delete next[key]; await save(next); }
+  return { layout, save, resetShape };
+}
+
+// Panneau d'édition de la mise en page (position + taille de chaque forme), avec aperçu en
+// direct — enregistré directement pour toute l'équipe (demandé par l'utilisateur), pas juste
+// pour le joueur affiché (qui ne sert que d'aperçu pendant le réglage).
+const SCOUTING_SHAPE_LABELS = {
+  logo: "Team logo", photo: "Player photo", name: "Name", info: "Position info",
+  heightBadge: "Height badge", handBadge: "Hand badge", gamePlan: "Game plan text",
+  closeOut: "Close out line", highlights: "Stat badges", chart: "Skill wheel",
+};
+function ScoutingLayoutEditor({ player, layout, onSave, onResetShape, onClose, bgPhoto, bgDarkness, bgStretch, teamLogo }) {
+  const [draft, setDraft] = useState(layout);
+  useEffect(() => setDraft(layout), [layout]);
+  const [selected, setSelected] = useState("photo");
+  const dirty = JSON.stringify(draft) !== JSON.stringify(layout);
+
+  function update(key, field, value) {
+    const n = Math.max(0, Number(value) || 0);
+    setDraft(d => ({ ...d, [key]: { ...(d[key] || DEFAULT_SCOUTING_LAYOUT[key]), [field]: n } }));
+  }
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+      <div style={{ background: INK, border: `1px solid ${LINE}`, borderRadius: 14, padding: 20, maxWidth: 1100, width: "100%", maxHeight: "90vh", overflow: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+          <div>
+            <div style={{ fontSize: 17, fontWeight: 800, color: PAPER }}>Edit layout</div>
+            <div style={{ fontSize: 12, color: "#8B93A1" }}>Applies to every player's card for this team — not just the preview below.</div>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer" }}><X size={20} /></button>
+        </div>
+
+        <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
+          <div style={{ flex: "1 1 400px", minWidth: 320 }}>
+            <ScoutingPlayerCard player={player} isCoach={false} bgPhoto={bgPhoto} bgDarkness={bgDarkness} bgStretch={bgStretch} teamLogo={teamLogo} layout={draft} onEdit={() => {}} onDelete={() => {}} />
+          </div>
+
+          <div style={{ flex: "1 1 320px", minWidth: 280 }}>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+              {Object.keys(SCOUTING_SHAPE_LABELS).map(key => (
+                <button key={key} onClick={() => setSelected(key)}
+                  style={{ padding: "6px 10px", borderRadius: 6, fontSize: 11.5, cursor: "pointer", fontFamily: "inherit",
+                    background: selected === key ? AMBER : PANEL2, color: selected === key ? "#1a1200" : "#D8DCE2", border: `1px solid ${selected === key ? AMBER : LINE}` }}>
+                  {SCOUTING_SHAPE_LABELS[key]}
+                </button>
+              ))}
+            </div>
+
+            {(() => {
+              const s = draft[selected] || DEFAULT_SCOUTING_LAYOUT[selected];
+              return (
+                <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 16 }}>
+                  <div style={{ fontSize: 14, fontWeight: 700, color: PAPER, marginBottom: 12 }}>{SCOUTING_SHAPE_LABELS[selected]}</div>
+                  {[["x", "Position X"], ["y", "Position Y"], ["w", "Width"], ["h", "Height"]].map(([field, label]) => (
+                    <label key={field} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10, fontSize: 12.5, color: "#8B93A1" }}>
+                      <span style={{ width: 80 }}>{label}</span>
+                      <input type="range" min={0} max={field === "x" || field === "w" ? SCOUTING_LAYOUT_REF_W : SCOUTING_LAYOUT_REF_H} value={s[field]} onChange={e => update(selected, field, e.target.value)} style={{ flex: 1 }} />
+                      <input type="number" value={Math.round(s[field])} onChange={e => update(selected, field, e.target.value)} style={{ width: 60, padding: "4px 6px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 6, color: PAPER, fontFamily: "inherit" }} />
+                    </label>
+                  ))}
+                  <button onClick={() => setDraft(d => ({ ...d, [selected]: DEFAULT_SCOUTING_LAYOUT[selected] }))} style={{ fontSize: 11.5, color: "#5C6470", background: "none", border: "none", cursor: "pointer", marginTop: 4 }}>Reset this shape</button>
+                </div>
+              );
+            })()}
+
+            <div style={{ display: "flex", gap: 10, marginTop: 20 }}>
+              <button onClick={() => onSave(draft)} disabled={!dirty}
+                style={{ padding: "10px 18px", background: dirty ? AMBER : PANEL2, border: "none", borderRadius: 8, color: dirty ? "#1a1200" : "#5C6470", fontWeight: 700, cursor: dirty ? "pointer" : "default", fontFamily: "inherit" }}>
+                Save for the whole team
+              </button>
+              <button onClick={onClose} style={{ padding: "10px 18px", background: "none", border: `1px solid ${LINE}`, borderRadius: 8, color: "#8B93A1", cursor: "pointer", fontFamily: "inherit" }}>Close</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, teamLogo, onEdit, onDelete, printMode, onMoveUp, onMoveDown, isFirst, isLast, chartScale, layout, onEditLayout }) {
   // 0 = aucun voile (photo visible à 100%), 100 = fond entièrement noir (photo invisible).
   const darkness = Math.max(0, Math.min(100, bgDarkness ?? 70)) / 100;
   // Étirement optionnel (activé par défaut, comme avant) : "100% 100%" remplit tout le cadre
@@ -6793,19 +7505,27 @@ function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, t
   // correspondent pas) ; désactivé, on repasse en "cover" classique (recadrage, sans
   // déformation). Choix laissé au coach, propre à chaque équipe.
   const stretch = bgStretch ?? true;
-  // Mode export : la fiche doit remplir toute une page A4 paysage, avec TOUS les éléments
-  // bien visibles (photo, stats, chiffres) — pas la version compacte utilisée à l'écran.
-  // BUG RÉEL CORRIGÉ : l'export n'activait jamais réellement "printMode" (le call site ne le
-  // passait pas) — il utilisait donc la même branche que l'écran. En agrandissant la roue à
-  // l'écran, on aurait aussi cassé le "2 joueurs par page" déjà validé pour le PDF. Les deux
-  // sont maintenant bien séparés : printMode (export) garde les tailles déjà vérifiées pour
-  // tenir à 2 par page en portrait ; l'écran (sans contrainte de page) peut être bien plus
-  // grand pour utiliser tout l'espace disponible.
-  const photoW = printMode ? 150 : 260, photoH = printMode ? 150 : 260;
-  const sidebarW = printMode ? 200 : 300;
-  const nameSize = printMode ? 15 : 26, subSize = printMode ? 11.5 : 16;
-  const chartSize = printMode ? 445 : Math.round(640 * Math.max(0.75, Math.min(1.8, chartScale ?? 1)));
-  const badgeMinSize = printMode ? 56 : 90;
+
+  // Demandé par l'utilisateur : l'export doit reproduire EXACTEMENT ce qui s'affiche à l'écran
+  // — même mise en page personnalisée (position/taille de chaque forme), pas une version figée
+  // séparée comme avant. Les deux contextes utilisent donc maintenant EXACTEMENT le même
+  // système de positionnement ; seule la largeur cible de la carte diffère (fixe en pixels à
+  // l'export, pour tenir à 2 joueurs par page A4 portrait — 380px, déjà vérifié ; responsive à
+  // l'écran, via une largeur CSS à 100%).
+  const L = layout || DEFAULT_SCOUTING_LAYOUT;
+  const pctX = (v) => `${(v / SCOUTING_LAYOUT_REF_W) * 100}%`;
+  const pctY = (v) => `${(v / SCOUTING_LAYOUT_REF_H) * 100}%`;
+  const shapeStyle = (key) => {
+    const s = L[key] || DEFAULT_SCOUTING_LAYOUT[key];
+    return { position: "absolute", left: pctX(s.x), top: pctY(s.y), width: pctX(s.w), height: pctY(s.h) };
+  };
+  const cardWidthPx = printMode ? 720 : Math.round(640 * Math.max(0.75, Math.min(1.8, chartScale ?? 1)) * (SCOUTING_LAYOUT_REF_W / 500));
+  const scaleFactor = cardWidthPx / SCOUTING_LAYOUT_REF_W; // pour mettre à l'échelle les tailles de police et la roue
+  const nameSize = Math.round(26 * scaleFactor);
+  const subSize = Math.round(16 * scaleFactor);
+  const chartSize = Math.round((L.chart?.w ?? DEFAULT_SCOUTING_LAYOUT.chart.w) * scaleFactor);
+  const badgeMinSize = Math.round(90 * scaleFactor);
+
   return (
     <div data-no-split="true" style={{
       position: "relative",
@@ -6816,68 +7536,73 @@ function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, t
       // la couper ni la répéter en mosaïque — quitte à légèrement déformer l'image si ses
       // proportions ne correspondent pas exactement à celles du cadre.
       backgroundSize: stretch ? "100% 100%" : "cover", backgroundPosition: "center", backgroundRepeat: "no-repeat",
-      border: `1px solid ${LINE}`, borderRadius: 14, padding: printMode ? 16 : 28, marginBottom: 14,
+      border: `1px solid ${LINE}`, borderRadius: 14, marginBottom: 14,
+      width: printMode ? cardWidthPx : "100%",
+      aspectRatio: `${SCOUTING_LAYOUT_REF_W} / ${SCOUTING_LAYOUT_REF_H}`, overflow: "hidden",
     }}>
       {/* Logo de l'équipe scoutée, à l'intérieur du cadre de la fiche (pas en dehors, sur le
-          document partagé) — demandé par l'utilisateur, à la même taille que les onglets. */}
-      {teamLogo && <img src={teamLogo} alt="" style={{ position: "absolute", top: 16, right: 16, width: 30, height: 30, borderRadius: 6, objectFit: "cover" }} />}
-      <div style={{ display: "flex", gap: printMode ? 24 : 36, flexWrap: "wrap", width: "100%" }}>
-        <div style={{ width: sidebarW, flexShrink: 0 }}>
-          <div style={{ width: photoW, height: photoH, borderRadius: 12, background: PANEL2, border: `1px solid ${LINE}`, overflow: "hidden", marginBottom: 12 }}>
-            {player.photo && <img src={player.photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />}
-          </div>
-          <div style={{ fontSize: nameSize, fontWeight: 800, color: PAPER }}>{player.jersey ? `#${player.jersey} ` : ""}{player.lastName?.toUpperCase()}</div>
-          <div style={{ fontSize: subSize, color: "#8B93A1", marginBottom: 10 }}>{player.firstName}{player.position ? ` · Position ${player.position}` : ""}</div>
+          document partagé) — demandé par l'utilisateur. */}
+      {teamLogo && <img src={teamLogo} alt="" style={{ ...shapeStyle("logo"), borderRadius: 6, objectFit: "cover" }} />}
 
-          {(player.height || player.handedness) && (
-            <div style={{ display: "flex", gap: 8, marginBottom: printMode ? 10 : 12 }}>
-              {player.height && (
-                <div style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: printMode ? "8px 12px" : "12px 16px", flex: 1, textAlign: "center" }}>
-                  <div style={{ fontWeight: 800, fontSize: printMode ? 16 : 22, color: PAPER }}>{player.height} cm</div>
-                  <div style={{ fontSize: printMode ? 9.5 : 12, color: "#5C6470", textTransform: "uppercase" }}>Height</div>
-                </div>
-              )}
-              {player.handedness && (
-                <div style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: printMode ? "8px 12px" : "12px 16px", flex: 1, textAlign: "center" }}>
-                  <div style={{ fontWeight: 800, fontSize: printMode ? 16 : 22, color: PAPER }}>{player.handedness}</div>
-                  <div style={{ fontSize: printMode ? 9.5 : 12, color: "#5C6470", textTransform: "uppercase" }}>Dominant hand</div>
-                </div>
-              )}
-            </div>
-          )}
-
-          {player.plan && (
-            <div style={{ fontSize: printMode ? 12.5 : 15, color: "#D8DCE2", marginBottom: 10, lineHeight: 1.4, whiteSpace: "pre-wrap" }}>
-              <div style={{ fontSize: printMode ? 10.5 : 13, textTransform: "uppercase", color: "#5C6470", marginBottom: 4 }}>Game plan</div>
-              {player.plan}
-            </div>
-          )}
-          <div style={{ fontSize: printMode ? 12.5 : 15, marginBottom: 10 }}>Close Out : <CloseOutBadge level={player.closeOut} /></div>
-          {player.highlights?.length > 0 && (
-            <div style={{ display: "flex", gap: printMode ? 10 : 14, flexWrap: "wrap" }}>
-              {player.highlights.map((h, i) => (
-                <StatShapeBadge key={i} label={h.label} value={h.value} size={printMode ? (h.size ?? 74) : Math.max(badgeMinSize, h.size ?? 74)} fontScale={(h.fontScale ?? 1) * (printMode ? 1 : 1.15)} color={h.color ?? TEAL} />
-              ))}
-            </div>
-          )}
-          {isCoach && !printMode && (
-            <div style={{ display: "flex", gap: 10, marginTop: 14, alignItems: "center" }}>
-              <button onClick={onEdit} style={{ fontSize: 12, color: AMBER, background: "none", border: "none", cursor: "pointer" }}>Edit</button>
-              <button onClick={onDelete} style={{ fontSize: 12, color: RED, background: "none", border: "none", cursor: "pointer" }}>Delete</button>
-              {(onMoveUp || onMoveDown) && (
-                <div style={{ display: "flex", gap: 4, marginLeft: "auto" }}>
-                  <button onClick={onMoveUp} disabled={isFirst} title="Move up" style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: isFirst ? "#3A414C" : "#8B93A1", cursor: isFirst ? "default" : "pointer", padding: 4, display: "flex" }}><ChevronLeft size={14} style={{ transform: "rotate(90deg)" }} /></button>
-                  <button onClick={onMoveDown} disabled={isLast} title="Move down" style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: isLast ? "#3A414C" : "#8B93A1", cursor: isLast ? "default" : "pointer", padding: 4, display: "flex" }}><ChevronLeft size={14} style={{ transform: "rotate(-90deg)" }} /></button>
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        <div style={{ flex: "1 1 420px", display: "flex", justifyContent: "center" }}>
-          <RoseChart ratings={player.ratings} size={chartSize} />
-        </div>
+      <div style={{ ...shapeStyle("photo"), borderRadius: 12, background: PANEL2, border: `1px solid ${LINE}`, overflow: "hidden" }}>
+        {player.photo && <img src={player.photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} />}
       </div>
+
+      <div style={{ ...shapeStyle("name"), fontSize: nameSize, fontWeight: 800, color: PAPER, overflow: "hidden" }}>
+        {player.jersey ? `#${player.jersey} ` : ""}{player.lastName?.toUpperCase()}
+      </div>
+
+      <div style={{ ...shapeStyle("info"), fontSize: subSize, color: "#8B93A1", overflow: "hidden" }}>
+        {player.firstName}{player.position ? ` · Position ${player.position}` : ""}
+      </div>
+
+      {player.height && (
+        <div style={{ ...shapeStyle("heightBadge"), background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, textAlign: "center", display: "flex", flexDirection: "column", justifyContent: "center" }}>
+          <div style={{ fontWeight: 800, fontSize: Math.round(22 * scaleFactor), color: PAPER }}>{player.height} cm</div>
+          <div style={{ fontSize: Math.round(12 * scaleFactor), color: "#5C6470", textTransform: "uppercase" }}>Height</div>
+        </div>
+      )}
+      {player.handedness && (
+        <div style={{ ...shapeStyle("handBadge"), background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, textAlign: "center", display: "flex", flexDirection: "column", justifyContent: "center" }}>
+          <div style={{ fontWeight: 800, fontSize: Math.round(22 * scaleFactor), color: PAPER }}>{player.handedness}</div>
+          <div style={{ fontSize: Math.round(12 * scaleFactor), color: "#5C6470", textTransform: "uppercase" }}>Dominant hand</div>
+        </div>
+      )}
+
+      {player.plan && (
+        <div style={{ ...shapeStyle("gamePlan"), fontSize: Math.round(15 * scaleFactor), color: "#D8DCE2", lineHeight: 1.4, whiteSpace: "pre-wrap", overflow: "auto" }}>
+          <div style={{ fontSize: Math.round(13 * scaleFactor), textTransform: "uppercase", color: "#5C6470", marginBottom: 4 }}>Game plan</div>
+          {player.plan}
+        </div>
+      )}
+
+      <div style={{ ...shapeStyle("closeOut"), fontSize: Math.round(15 * scaleFactor), overflow: "hidden" }}>Close Out : <CloseOutBadge level={player.closeOut} /></div>
+
+      {player.highlights?.length > 0 && (
+        <div style={{ ...shapeStyle("highlights"), display: "flex", gap: 14, flexWrap: "wrap", overflow: "hidden" }}>
+          {player.highlights.map((h, i) => (
+            <StatShapeBadge key={i} label={h.label} value={h.value} size={Math.max(badgeMinSize, Math.round((h.size ?? 74) * scaleFactor))} fontScale={(h.fontScale ?? 1) * 1.15} color={h.color ?? TEAL} />
+          ))}
+        </div>
+      )}
+
+      <div style={{ ...shapeStyle("chart"), display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <RoseChart ratings={player.ratings} size={chartSize} />
+      </div>
+
+      {isCoach && !printMode && (
+        <div style={{ position: "absolute", bottom: 10, left: 28, display: "flex", gap: 10, alignItems: "center" }}>
+          <button onClick={onEdit} style={{ fontSize: 12, color: AMBER, background: "none", border: "none", cursor: "pointer" }}>Edit</button>
+          <button onClick={onDelete} style={{ fontSize: 12, color: RED, background: "none", border: "none", cursor: "pointer" }}>Delete</button>
+          {onEditLayout && <button onClick={onEditLayout} style={{ fontSize: 12, color: "#8B93A1", background: "none", border: "none", cursor: "pointer" }}>Edit layout</button>}
+          {(onMoveUp || onMoveDown) && (
+            <div style={{ display: "flex", gap: 4 }}>
+              <button onClick={onMoveUp} disabled={isFirst} title="Move up" style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: isFirst ? "#3A414C" : "#8B93A1", cursor: isFirst ? "default" : "pointer", padding: 4, display: "flex" }}><ChevronLeft size={14} style={{ transform: "rotate(90deg)" }} /></button>
+              <button onClick={onMoveDown} disabled={isLast} title="Move down" style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: isLast ? "#3A414C" : "#8B93A1", cursor: isLast ? "default" : "pointer", padding: 4, display: "flex" }}><ChevronLeft size={14} style={{ transform: "rotate(-90deg)" }} /></button>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -7007,6 +7732,10 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
     setDisplaySettings(next);
     await storeSet("scouting_display:" + selectedTeam, next);
   }
+  // Position/taille de chaque forme de la fiche (photo, badges, roue, etc.), personnalisable
+  // par le coach et enregistrée pour toute l'équipe — demandé par l'utilisateur.
+  const { layout: scoutingLayout, save: saveScoutingLayout, resetShape: resetScoutingShape } = useScoutingLayout();
+  const [editingLayoutFor, setEditingLayoutFor] = useState(null); // id du joueur en cours d'édition de mise en page, ou null
   async function handleLogoUpload(e) {
     const file = e.target.files[0];
     if (!file || !selectedTeam) return;
@@ -7146,12 +7875,22 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
               ) : (
                 <div className="screen-only">
                   {report.players.map((p, i) => (
-                    <ScoutingPlayerCard key={p.id} player={p} isCoach={isCoach} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness} bgStretch={teamBg?.stretch} teamLogo={teamLogo} chartScale={displaySettings?.chartScale}
-                      onEdit={() => setEditing(p)} onDelete={() => report.deletePlayer(p.id)}
+                    <ScoutingPlayerCard key={p.id} player={p} isCoach={isCoach} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness} bgStretch={teamBg?.stretch} teamLogo={teamLogo} chartScale={displaySettings?.chartScale} layout={scoutingLayout}
+                      onEdit={() => setEditing(p)} onDelete={() => report.deletePlayer(p.id)} onEditLayout={() => setEditingLayoutFor(p.id)}
                       onMoveUp={() => report.movePlayer(p.id, "up")} onMoveDown={() => report.movePlayer(p.id, "down")}
                       isFirst={i === 0} isLast={i === report.players.length - 1} />
                   ))}
                 </div>
+              )}
+              {editingLayoutFor && (
+                <ScoutingLayoutEditor
+                  player={report.players.find(p => p.id === editingLayoutFor)}
+                  layout={scoutingLayout}
+                  onSave={saveScoutingLayout}
+                  onResetShape={resetScoutingShape}
+                  onClose={() => setEditingLayoutFor(null)}
+                  bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness} bgStretch={teamBg?.stretch} teamLogo={teamLogo}
+                />
               )}
               {report.players.length > 0 && (
                 <div className="print-only" id="scouting-print-content">
@@ -7159,7 +7898,7 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
                     <h1 style={{ fontSize: 18, marginBottom: 8 }}>Scouting individuel — {selectedTeam}</h1>
                     {report.players.map((p, i) => (
                       <div key={p.id} data-new-page={i % 2 === 0 ? "true" : undefined} style={{ marginBottom: 0, pageBreakInside: "avoid", pageBreakBefore: i % 2 === 0 ? "always" : "auto" }}>
-                        <ScoutingPlayerCard player={p} isCoach={false} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness} bgStretch={teamBg?.stretch} teamLogo={teamLogo} onEdit={() => {}} onDelete={() => {}} printMode />
+                        <ScoutingPlayerCard player={p} isCoach={false} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness} bgStretch={teamBg?.stretch} teamLogo={teamLogo} layout={scoutingLayout} onEdit={() => {}} onDelete={() => {}} printMode />
                       </div>
                     ))}
                   </div>
@@ -7745,6 +8484,50 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam })
 // ---------------------------------------------------------------------------
 
 // Réglage des seuils de couleur du shot chart (Players & Team), propre à chaque équipe.
+// Réglage des couleurs des catégories Training (thèmes), propre à chaque équipe.
+function TrainingThemeColorsSettings() {
+  const { themes, addTheme } = useTrainingThemes();
+  const [, forceRerender] = useState(0);
+  const [saving, setSaving] = useState(null); // nom du thème en cours d'enregistrement
+
+  async function handleColorChange(themeName, color) {
+    setSaving(themeName);
+    const next = { ...CUSTOM_TRAINING_THEME_COLORS, [themeName]: color };
+    await saveTrainingThemeColors(next);
+    setSaving(null);
+    forceRerender(n => n + 1);
+  }
+  async function handleReset(themeName) {
+    const next = { ...CUSTOM_TRAINING_THEME_COLORS };
+    delete next[themeName];
+    await saveTrainingThemeColors(next);
+    forceRerender(n => n + 1);
+  }
+
+  return (
+    <div>
+      <SectionTitle eyebrow="Settings" title="Training category colors" />
+      <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 16, maxWidth: 560 }}>
+        Pick a color for each training category. Specific to this team.
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 10, maxWidth: 420, marginBottom: 20 }}>
+        {themes.map(t => {
+          const color = trainingThemeColor(t, themes);
+          const isCustom = !!CUSTOM_TRAINING_THEME_COLORS[t];
+          return (
+            <div key={t} style={{ display: "flex", alignItems: "center", gap: 10, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 12px" }}>
+              <input type="color" value={color} onChange={e => handleColorChange(t, e.target.value)} style={{ width: 32, height: 32, padding: 0, border: "none", borderRadius: 6, background: "none", cursor: "pointer" }} />
+              <span style={{ flex: 1, fontSize: 13, color: PAPER }}>{t}</span>
+              {isCustom && <button onClick={() => handleReset(t)} style={{ fontSize: 11, color: "#5C6470", background: "none", border: "none", cursor: "pointer" }}>Reset</button>}
+              {saving === t && <span style={{ fontSize: 11, color: TEAL }}>Saved</span>}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function ShotChartThresholdsSettings() {
   const { thresholds, save } = useShotChartThresholds();
   const [draft, setDraft] = useState(thresholds);
@@ -8804,7 +9587,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
   const box = useAllBoxScores(matchFilter);
   const advanced = useTeamAdvancedStats(matchFilter);
   const { thresholds: shotChartThresholds } = useShotChartThresholds();
-  const TEAM_SUBTAB_ORDER = [["classement", "standings"], ["collectif", "teamPlay"], ["avance", "advanced"], ["resources", "resources"]];
+  const TEAM_SUBTAB_ORDER = [["classement", "standings"], ["collectif", "teamPlay"], ["avance", "advanced"], ["reboundContest", "reboundContest"], ["resources", "resources"]];
   const defaultTeamSubtab = isCoach ? "classement" : ((TEAM_SUBTAB_ORDER.find(([, key]) => v[key]) || ["classement"])[0]);
   const [subtab, setSubtab] = useState(defaultTeamSubtab);
   const [exportReport, setExportReport] = useState(null);
@@ -8860,7 +9643,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
       </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 20, borderBottom: `1px solid ${LINE}`, paddingBottom: 10, flexWrap: "wrap" }}>
-        {[["classement", "Standings", "standings"], ["collectif", "Team Play", "teamPlay"], ["avance", "Advanced", "advanced"], ["resources", "Resources", "resources"]]
+        {[["classement", "Standings", "standings"], ["collectif", "Team Play", "teamPlay"], ["avance", "Advanced", "advanced"], ["reboundContest", "Rebound Contest", "reboundContest"], ["resources", "Resources", "resources"]]
           .filter(([, , key]) => isCoach || v[key])
           .concat(isCoach ? [["entrainement", "Team Training"]] : [])
           .map(([id, label]) => (
@@ -8871,7 +9654,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
         ))}
       </div>
 
-      {!isCoach && !v[{ classement: "standings", collectif: "teamPlay", avance: "advanced", resources: "resources" }[subtab]] && (
+      {!isCoach && !v[{ classement: "standings", collectif: "teamPlay", avance: "advanced", reboundContest: "reboundContest", resources: "resources" }[subtab]] && (
         <div style={{ padding: 30, textAlign: "center", color: "#5C6470", border: `1px dashed ${LINE}`, borderRadius: 12, fontSize: 13.5, marginBottom: 26 }}>
           You don't have the permission to see this.
         </div>
@@ -8913,6 +9696,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
         </>
       )}
       {subtab === "resources" && (isCoach || v.resources) && <TeamResourcesTab isCoach={isCoach} team={team} />}
+      {subtab === "reboundContest" && (isCoach || v.reboundContest) && <ReboundContestTab roster={roster} isCoach={isCoach} />}
       {subtab === "entrainement" && isCoach && <CollectiveTraining roster={roster} />}
 
       {rows.length > 0 && (
