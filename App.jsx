@@ -2110,6 +2110,19 @@ function useTeamAdvancedStats(filterKeys) {
 // Gère les sessions de "Rebound Contest" (TAG/BOX OUT) importées — stockage propre à chaque
 // équipe, comme le reste. Chaque session est enregistrée séparément (indexée), pour pouvoir en
 // sélectionner un sous-ensemble à l'affichage (comme pour les matchs de coding).
+// Libellés affichés pour les deux catégories du Rebound Contest — réglables dans Settings,
+// propres à chaque équipe. Réglés automatiquement sur "Tag" et "Box" par défaut, mais le coach
+// peut les renommer (ex. pour coller au vocabulaire utilisé avec son équipe). Ne change QUE
+// l'affichage — le fichier importé continue d'utiliser "TAG"/"BOX OUT" dans sa colonne
+// "button", ce réglage n'affecte jamais la lecture du fichier.
+const DEFAULT_REBOUND_CONTEST_LABELS = { tag: "Tag", boxOut: "Box" };
+function useReboundContestLabels() {
+  const [labels, setLabels] = useState(DEFAULT_REBOUND_CONTEST_LABELS);
+  useEffect(() => { storeGet("rebound_contest_labels").then(v => setLabels(v ? { ...DEFAULT_REBOUND_CONTEST_LABELS, ...v } : DEFAULT_REBOUND_CONTEST_LABELS)); }, []);
+  async function save(next) { await storeSet("rebound_contest_labels", next); setLabels(next); }
+  return { labels, save };
+}
+
 function useReboundContestSessions() {
   const [index, setIndex] = useState([]);
   const [sessions, setSessions] = useState({}); // { id: { id, label, date, events } }
@@ -2762,6 +2775,8 @@ export default function App() {
             <ShotChartThresholdsSettings />
             <div style={{ height: 26 }} />
             <TrainingThemeColorsSettings />
+            <div style={{ height: 26 }} />
+            <ReboundContestLabelsSettings />
             <div style={{ height: 26 }} />
             <BoxColumnAliasesSettings />
           </div>
@@ -3867,6 +3882,7 @@ function MatchTypeSelect({ value, onChange }) {
 // TAG / BOX OUT, avec photo et nom repris directement du roster.
 function ReboundContestTab({ roster, isCoach }) {
   const { index, sessions, loading } = useReboundContestSessions();
+  const { labels } = useReboundContestLabels();
   const [selectedIds, setSelectedIds] = useState(null); // null = toutes les sessions
   const userTouchedRef = useRef(false);
   // Par défaut, seule la dernière session AJOUTÉE (pas forcément la plus récente en date, si
@@ -3936,11 +3952,11 @@ function ReboundContestTab({ roster, isCoach }) {
               <div style={{ display: "flex", justifyContent: "center", gap: 20, width: "100%" }}>
                 <div style={{ textAlign: "center" }}>
                   <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 17, color: TEAL }}>{p.stats.tag.pct !== null ? `${Math.round(p.stats.tag.pct)}%` : "–"}</div>
-                  <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>Tag</div>
+                  <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>{labels.tag}</div>
                 </div>
                 <div style={{ textAlign: "center" }}>
                   <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 17, color: "#4A90D9" }}>{p.stats.boxOut.pct !== null ? `${Math.round(p.stats.boxOut.pct)}%` : "–"}</div>
-                  <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>Box Out</div>
+                  <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>{labels.boxOut}</div>
                 </div>
                 <div style={{ textAlign: "center" }}>
                   <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 19, color: AMBER }}>{p.stats.total.pct !== null ? `${Math.round(p.stats.total.pct)}%` : "–"}</div>
@@ -6206,6 +6222,7 @@ function RoleTab({ playerName, isCoach }) {
 // Tag et % Box Out, avec un sélecteur pour choisir sur quelles sessions ("matchs sélectionnés").
 function PlayerReboundContestSection({ playerName }) {
   const { index, sessions, loading } = useReboundContestSessions();
+  const { labels } = useReboundContestLabels();
   const [selectedIds, setSelectedIds] = useState(null); // null = toutes les sessions
   const userTouchedRef = useRef(false);
   useEffect(() => {
@@ -6248,11 +6265,11 @@ function PlayerReboundContestSection({ playerName }) {
       <div style={{ display: "flex", gap: 26 }}>
         <div>
           <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 26, color: TEAL }}>{stats.tag.pct !== null ? `${Math.round(stats.tag.pct)}%` : "–"}</div>
-          <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase" }}>Tag {stats.tag.possible > 0 ? `(${stats.tag.earned}/${stats.tag.possible})` : "no data"}</div>
+          <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase" }}>{labels.tag} {stats.tag.possible > 0 ? `(${stats.tag.earned}/${stats.tag.possible})` : "no data"}</div>
         </div>
         <div>
           <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 26, color: "#4A90D9" }}>{stats.boxOut.pct !== null ? `${Math.round(stats.boxOut.pct)}%` : "–"}</div>
-          <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase" }}>Box Out {stats.boxOut.possible > 0 ? `(${stats.boxOut.earned}/${stats.boxOut.possible})` : "no data"}</div>
+          <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase" }}>{labels.boxOut} {stats.boxOut.possible > 0 ? `(${stats.boxOut.earned}/${stats.boxOut.possible})` : "no data"}</div>
         </div>
         <div>
           <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 26, color: AMBER }}>{stats.total.pct !== null ? `${Math.round(stats.total.pct)}%` : "–"}</div>
@@ -8593,6 +8610,42 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam })
 
 // Réglage des seuils de couleur du shot chart (Players & Team), propre à chaque équipe.
 // Réglage des couleurs des catégories Training (thèmes), propre à chaque équipe.
+// Réglage des libellés affichés pour le Rebound Contest (Tag / Box), propre à chaque équipe.
+// N'affecte jamais la lecture des fichiers importés (qui utilisent toujours "TAG"/"BOX OUT"
+// dans leur colonne "button") — uniquement ce qui s'affiche à l'écran.
+function ReboundContestLabelsSettings() {
+  const { labels, save } = useReboundContestLabels();
+  const [draft, setDraft] = useState(labels);
+  useEffect(() => setDraft(labels), [labels]);
+  const dirty = draft.tag !== labels.tag || draft.boxOut !== labels.boxOut;
+
+  return (
+    <div>
+      <SectionTitle eyebrow="Settings" title="Rebound Contest labels" />
+      <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 16, maxWidth: 560 }}>
+        Renames how the two Rebound Contest categories are displayed (Players, Team, Import).
+        Automatically set to "Tag" and "Box" — change them if you use different wording with
+        your team. Specific to this team.
+      </div>
+      <div style={{ display: "flex", gap: 16, marginBottom: 16, flexWrap: "wrap" }}>
+        <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12.5, color: "#8B93A1" }}>
+          Tag label
+          <input value={draft.tag} onChange={e => setDraft(d => ({ ...d, tag: e.target.value }))}
+            style={{ padding: "8px 12px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, fontFamily: "inherit", width: 180 }} />
+        </label>
+        <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12.5, color: "#8B93A1" }}>
+          Box Out label
+          <input value={draft.boxOut} onChange={e => setDraft(d => ({ ...d, boxOut: e.target.value }))}
+            style={{ padding: "8px 12px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, fontFamily: "inherit", width: 180 }} />
+        </label>
+      </div>
+      {dirty && (
+        <button onClick={() => save(draft)} style={{ padding: "9px 18px", background: AMBER, border: "none", borderRadius: 8, color: "#1a1200", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Save labels</button>
+      )}
+    </div>
+  );
+}
+
 function TrainingThemeColorsSettings() {
   const { themes, addTheme } = useTrainingThemes();
   const [, forceRerender] = useState(0);
