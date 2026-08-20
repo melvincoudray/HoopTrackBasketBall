@@ -451,22 +451,36 @@ async function storeList(prefix) {
 // le site, puisque ce stockage est synchronisé en temps réel entre tout le monde.
 function sessionStorageKey() { return "hooptrack_session_" + TEAM_PREFIX; }
 async function saveLocalSession(session) {
-  try {
-    if (typeof localStorage !== "undefined") { localStorage.setItem(sessionStorageKey(), JSON.stringify(session)); return; }
-  } catch (e) {}
-  // Repli pour l'artifact Claude, où localStorage est volontairement indisponible —
-  // stockage "personnel" (shared=false), déjà scindé par utilisateur Claude.ai.
-  try { if (window.storage) await window.storage.set(sessionStorageKey(), JSON.stringify(session), false); } catch (e) {}
-}
-async function loadLocalSession() {
+  const key = sessionStorageKey();
   try {
     if (typeof localStorage !== "undefined") {
-      const raw = localStorage.getItem(sessionStorageKey());
+      localStorage.setItem(key, JSON.stringify(session));
+      console.log("[session] saved to localStorage:", key, "=", session.name);
+      return;
+    }
+  } catch (e) {
+    // Ne plus avaler l'erreur en silence : si localStorage refuse d'écrire (mode privé
+    // strict, stockage bloqué par le navigateur...), on le voit maintenant dans la console
+    // au lieu d'une déconnexion "mystère" au rechargement suivant.
+    console.error("[session] localStorage.setItem FAILED on", key, ":", e);
+  }
+  // Repli pour l'artifact Claude, où localStorage est volontairement indisponible —
+  // stockage "personnel" (shared=false), déjà scindé par utilisateur Claude.ai.
+  try {
+    if (window.storage) { await window.storage.set(key, JSON.stringify(session), false); console.log("[session] saved to window.storage:", key); }
+  } catch (e) { console.error("[session] window.storage.set FAILED on", key, ":", e); }
+}
+async function loadLocalSession() {
+  const key = sessionStorageKey();
+  try {
+    if (typeof localStorage !== "undefined") {
+      const raw = localStorage.getItem(key);
+      console.log("[session] loadLocalSession", key, "->", raw ? JSON.parse(raw).name : null);
       return raw ? JSON.parse(raw) : null;
     }
-  } catch (e) {}
+  } catch (e) { console.error("[session] localStorage.getItem FAILED on", key, ":", e); }
   try {
-    if (window.storage) { const r = await window.storage.get(sessionStorageKey(), false); return r ? JSON.parse(r.value) : null; }
+    if (window.storage) { const r = await window.storage.get(key, false); return r ? JSON.parse(r.value) : null; }
   } catch (e) {}
   return null;
 }
@@ -972,6 +986,23 @@ function categoryBreakdown(plays, labels) {
   return items.map(g => ({ ...g, freq: categoryTotal ? (100 * g.count) / categoryTotal : 0 }));
 }
 
+// Pour chaque valeur de Spacing (celles déjà enregistrées ET toute nouvelle ajoutée plus tard
+// dans Settings, lues dynamiquement — rien de figé en dur), calcule la répartition des types de
+// défense d'écran utilisés sur les actions taguées avec ce spacing précis. Demandé par
+// l'utilisateur, en plus (pas à la place) des répartitions Screen defense et Spacing déjà
+// existantes — attaque et défense, comme le reste de la section.
+function computeSpacingScreenDefenseBreakdown(plays, cats) {
+  const spacings = SPACING_LIST(cats);
+  const screenDefLabels = SCREEN_DEFENSE_LIST(cats);
+  return spacings.map(spacing => {
+    const playsWithSpacing = plays.filter(p => tagIsSet(p.tags, spacing));
+    const breakdown = categoryBreakdown(playsWithSpacing, screenDefLabels)
+      .sort((a, b) => b.count - a.count)
+      .map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open }));
+    return { spacing, total: playsWithSpacing.length, breakdown };
+  }).filter(s => s.total > 0);
+}
+
 function topCategoryBucket(plays, labels, n) {
   return categoryBreakdown(plays, labels)
     .sort((a, b) => b.count - a.count)
@@ -1445,6 +1476,12 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories }) 
   const offSpacing = useMemo(() => categoryBreakdown(off, SPACING_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open })), [off, cats]);
   const defSpacing = useMemo(() => categoryBreakdown(def, SPACING_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open })), [def, cats]);
 
+  // Demandé par l'utilisateur, en plus des répartitions ci-dessus : défense d'écran utilisée
+  // selon le Spacing d'écran, attaque et défense — dynamique (toute nouvelle valeur de Spacing
+  // ajoutée dans Settings apparaît automatiquement, sans rien coder en dur).
+  const offSpacingScreenDef = useMemo(() => computeSpacingScreenDefenseBreakdown(off, cats), [off, cats]);
+  const defSpacingScreenDef = useMemo(() => computeSpacingScreenDefenseBreakdown(def, cats), [def, cats]);
+
   // Custom categories (créées dans Settings, au-delà des catégories intégrées) —
   // affichées automatiquement ici, attaque et défense, sans rien coder de plus.
   const BUILTIN_CATEGORIES = new Set(["Player", "Playtypes", "Plays", "Shot selection", "Defensive mistakes", "Screen defense", "Spacing", "Shot zone", "Results & misc."]);
@@ -1516,6 +1553,39 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories }) 
           );
         })}
       </div>
+
+      {/* Demandé par l'utilisateur, en plus des sections ci-dessus : défense d'écran vue selon
+          le Spacing utilisé — un bloc par valeur de Spacing (existante ou ajoutée plus tard
+          dans Settings), attaque et défense. */}
+      {(offSpacingScreenDef.length > 0 || defSpacingScreenDef.length > 0) && (
+        <>
+          <SectionTitle eyebrow="Source: coding file" title="Screen defense by spacing" />
+          {offSpacingScreenDef.length > 0 && (
+            <>
+              <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 10 }}>Offense — coverage faced, by spacing</div>
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 20 }}>
+                {offSpacingScreenDef.map(s => (
+                  <div key={"off-spacing-" + s.spacing} style={{ flex: "1 1 260px", minWidth: 220 }}>
+                    <DonutCard title={s.spacing} data={s.breakdown.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag on these plays." />
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+          {defSpacingScreenDef.length > 0 && (
+            <>
+              <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 10 }}>Defense — coverage used, by spacing</div>
+              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 26 }}>
+                {defSpacingScreenDef.map(s => (
+                  <div key={"def-spacing-" + s.spacing} style={{ flex: "1 1 260px", minWidth: 220 }}>
+                    <DonutCard title={s.spacing} data={s.breakdown.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag on these plays." />
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </>
+      )}
 
       {detailTables && (
         <>
@@ -2329,6 +2399,7 @@ export default function App() {
     }
     const savedSession = await loadLocalSession();
     const currentEpoch = await getSessionEpoch();
+    console.log("[session] epoch check — saved session epoch:", savedSession?.epoch, "| current team epoch:", currentEpoch, "| team:", team?.id);
     if (savedSession && savedSession.epoch === currentEpoch) {
       // BUG RÉEL CORRIGÉ : si un joueur est renommé (icône crayon) alors qu'il reste connecté
       // sur son appareil sans se reconnecter, sa session gardait l'ANCIEN nom indéfiniment —
@@ -2488,7 +2559,18 @@ export default function App() {
       <TopBar
         session={session}
         team={team}
-        onSwitchAccount={async () => { await clearLocalSession(); setSession(null); }}
+        onSwitchAccount={async () => {
+          // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : un joueur pouvait se connecter et
+          // atterrir sur la fiche d'un AUTRE joueur — plausible sur un appareil partagé) :
+          // "Switch account" effaçait bien la session, mais ne remettait jamais à zéro l'état
+          // de navigation (joueur affiché, sélection de match) — laissé tel quel du précédent
+          // utilisateur pour la personne suivante qui se connecte sur ce même appareil.
+          await clearLocalSession();
+          setSession(null);
+          setSelectedPlayer(null);
+          setSelectedMatchKeys(null);
+          setTab("home");
+        }}
         onSwitchTeam={async () => {
           await clearLocalActiveTeam();
           await clearLocalSession();
@@ -3778,6 +3860,16 @@ function MatchTypeSelect({ value, onChange }) {
 function ReboundContestTab({ roster, isCoach }) {
   const { index, sessions, loading } = useReboundContestSessions();
   const [selectedIds, setSelectedIds] = useState(null); // null = toutes les sessions
+  const userTouchedRef = useRef(false);
+  // Par défaut, seule la dernière session AJOUTÉE (pas forcément la plus récente en date, si
+  // le coach rattrape un import en retard) est sélectionnée — le coach peut ensuite en
+  // choisir d'autres, ou "All sessions", librement. On ne touche plus à ce choix une fois
+  // que l'utilisateur l'a modifié lui-même.
+  useEffect(() => {
+    if (userTouchedRef.current || index.length === 0) return;
+    setSelectedIds(new Set([index[index.length - 1].id]));
+  }, [index.length]);
+  function userSetSelectedIds(next) { userTouchedRef.current = true; setSelectedIds(next); }
 
   const effectiveIds = selectedIds === null ? index.map(s => s.id) : [...selectedIds];
   const allEvents = useMemo(() => {
@@ -3797,7 +3889,7 @@ function ReboundContestTab({ roster, isCoach }) {
     <div>
       <SectionTitle eyebrow="Team" title="Rebound Contest — TAG & BOX OUT" />
       <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
-        <button onClick={() => setSelectedIds(selectedIds === null ? new Set() : null)} style={{
+        <button onClick={() => userSetSelectedIds(selectedIds === null ? new Set() : null)} style={{
           padding: "8px 14px", background: selectedIds === null ? PANEL2 : "transparent", border: `1px solid ${LINE}`, borderRadius: 8,
           color: PAPER, fontSize: 12.5, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
         }}>
@@ -3809,7 +3901,7 @@ function ReboundContestTab({ roster, isCoach }) {
             <button key={s.id} onClick={() => {
               const cur = selectedIds === null ? new Set(index.map(x => x.id)) : new Set(selectedIds);
               if (cur.has(s.id)) cur.delete(s.id); else cur.add(s.id);
-              setSelectedIds(cur.size === index.length ? null : cur);
+              userSetSelectedIds(cur.size === index.length ? null : cur);
             }} style={{
               padding: "6px 10px", borderRadius: 6, fontSize: 11.5, cursor: "pointer", fontFamily: "inherit",
               background: checked ? AMBER : "transparent", color: checked ? "#1a1200" : "#8B93A1", border: `1px solid ${checked ? AMBER : LINE}`,
@@ -3823,26 +3915,27 @@ function ReboundContestTab({ roster, isCoach }) {
       {ranked.length === 0 ? (
         <EmptyState text="No player has data for the selected session(s)." />
       ) : (
-        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        // Grille responsive : ~4 cartes par ligne sur ordinateur (colonnes de 220px minimum
+        // dans un conteneur large), et une seule visible à la fois sur mobile (l'écran est
+        // trop étroit pour loger 2 colonnes de 220px) — demandé par l'utilisateur.
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 16 }}>
           {ranked.map((p, i) => (
-            <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 16px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10 }}>
-              <div style={{ width: 26, textAlign: "center", fontFamily: "ui-monospace, monospace", fontWeight: 800, color: i === 0 ? AMBER : "#5C6470" }}>{i + 1}</div>
-              <PlayerAvatar playerName={p.name} size={38} />
-              <div style={{ flex: 1, minWidth: 120 }}>
-                <div style={{ fontWeight: 600, fontSize: 14.5 }}>{p.name}</div>
-                <div style={{ fontSize: 11.5, color: "#5C6470" }}>{p.position || ""}</div>
-              </div>
-              <div style={{ display: "flex", gap: 22 }}>
+            <div key={p.id} style={{ position: "relative", display: "flex", flexDirection: "column", alignItems: "center", padding: "20px 16px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 14, textAlign: "center" }}>
+              <div style={{ position: "absolute", top: 12, left: 12, width: 24, height: 24, borderRadius: "50%", background: i === 0 ? AMBER : PANEL2, color: i === 0 ? "#1a1200" : "#8B93A1", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, fontFamily: "ui-monospace, monospace" }}>{i + 1}</div>
+              <PlayerAvatar playerName={p.name} size={140} />
+              <div style={{ fontWeight: 700, fontSize: 16, marginTop: 14 }}>{p.name}</div>
+              <div style={{ fontSize: 12, color: "#5C6470", marginBottom: 16 }}>{p.position || ""}</div>
+              <div style={{ display: "flex", justifyContent: "center", gap: 20, width: "100%" }}>
                 <div style={{ textAlign: "center" }}>
-                  <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 16, color: TEAL }}>{p.stats.tag.pct !== null ? `${Math.round(p.stats.tag.pct)}%` : "–"}</div>
-                  <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>Tag {p.stats.tag.possible > 0 ? `(${p.stats.tag.earned}/${p.stats.tag.possible})` : ""}</div>
+                  <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 17, color: TEAL }}>{p.stats.tag.pct !== null ? `${Math.round(p.stats.tag.pct)}%` : "–"}</div>
+                  <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>Tag</div>
                 </div>
                 <div style={{ textAlign: "center" }}>
-                  <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 16, color: "#4A90D9" }}>{p.stats.boxOut.pct !== null ? `${Math.round(p.stats.boxOut.pct)}%` : "–"}</div>
-                  <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>Box Out {p.stats.boxOut.possible > 0 ? `(${p.stats.boxOut.earned}/${p.stats.boxOut.possible})` : ""}</div>
+                  <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 17, color: "#4A90D9" }}>{p.stats.boxOut.pct !== null ? `${Math.round(p.stats.boxOut.pct)}%` : "–"}</div>
+                  <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>Box Out</div>
                 </div>
                 <div style={{ textAlign: "center" }}>
-                  <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 18, color: AMBER }}>{p.stats.total.pct !== null ? `${Math.round(p.stats.total.pct)}%` : "–"}</div>
+                  <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 19, color: AMBER }}>{p.stats.total.pct !== null ? `${Math.round(p.stats.total.pct)}%` : "–"}</div>
                   <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>Total</div>
                 </div>
               </div>
@@ -4941,6 +5034,10 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
                 <HalfCourtShotChart zoneStats={computeShotZoneStats(off, currentTagCategories())} thresholds={shotChartThresholds} />
               </div>
             )}
+
+            {/* Demandé par l'utilisateur : la partie Rebound Contest doit être dans Match
+                Stats, juste sous le Shot chart — pas dans Role. */}
+            <PlayerReboundContestSection playerName={playerName} />
 
             {position && (
               <>
@@ -6093,9 +6190,6 @@ function RoleTab({ playerName, isCoach }) {
         <button disabled={busy} onClick={save} style={{ ...btnPrimary, width: "auto", padding: "10px 20px" }}>{busy ? "…" : "Save"}</button>
         {status && <div style={{ fontSize: 12, color: TEAL, marginTop: 10 }}>{status}</div>}
       </div>
-
-      <div style={{ height: 30 }} />
-      <PlayerReboundContestSection playerName={playerName} />
     </div>
   );
 }
@@ -6105,6 +6199,12 @@ function RoleTab({ playerName, isCoach }) {
 function PlayerReboundContestSection({ playerName }) {
   const { index, sessions, loading } = useReboundContestSessions();
   const [selectedIds, setSelectedIds] = useState(null); // null = toutes les sessions
+  const userTouchedRef = useRef(false);
+  useEffect(() => {
+    if (userTouchedRef.current || index.length === 0) return;
+    setSelectedIds(new Set([index[index.length - 1].id]));
+  }, [index.length]);
+  function userSetSelectedIds(next) { userTouchedRef.current = true; setSelectedIds(next); }
 
   if (loading || !index.length) return null;
 
@@ -6117,7 +6217,7 @@ function PlayerReboundContestSection({ playerName }) {
     <div>
       <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 10 }}>Rebound Contest</div>
       <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
-        <button onClick={() => setSelectedIds(selectedIds === null ? new Set() : null)} style={{
+        <button onClick={() => userSetSelectedIds(selectedIds === null ? new Set() : null)} style={{
           padding: "6px 12px", background: selectedIds === null ? PANEL2 : "transparent", border: `1px solid ${LINE}`, borderRadius: 7,
           color: PAPER, fontSize: 11.5, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
         }}>
@@ -6129,7 +6229,7 @@ function PlayerReboundContestSection({ playerName }) {
             <button key={s.id} onClick={() => {
               const cur = selectedIds === null ? new Set(index.map(x => x.id)) : new Set(selectedIds);
               if (cur.has(s.id)) cur.delete(s.id); else cur.add(s.id);
-              setSelectedIds(cur.size === index.length ? null : cur);
+              userSetSelectedIds(cur.size === index.length ? null : cur);
             }} style={{
               padding: "5px 9px", borderRadius: 6, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
               background: checked ? AMBER : "transparent", color: checked ? "#1a1200" : "#8B93A1", border: `1px solid ${checked ? AMBER : LINE}`,
