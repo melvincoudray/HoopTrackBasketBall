@@ -2115,7 +2115,7 @@ function useTeamAdvancedStats(filterKeys) {
 // peut les renommer (ex. pour coller au vocabulaire utilisé avec son équipe). Ne change QUE
 // l'affichage — le fichier importé continue d'utiliser "TAG"/"BOX OUT" dans sa colonne
 // "button", ce réglage n'affecte jamais la lecture du fichier.
-const DEFAULT_REBOUND_CONTEST_LABELS = { tag: "Tag", boxOut: "Box" };
+const DEFAULT_REBOUND_CONTEST_LABELS = { tag: "Tagg", boxOut: "Box Out" };
 function useReboundContestLabels() {
   const [labels, setLabels] = useState(DEFAULT_REBOUND_CONTEST_LABELS);
   useEffect(() => { storeGet("rebound_contest_labels").then(v => setLabels(v ? { ...DEFAULT_REBOUND_CONTEST_LABELS, ...v } : DEFAULT_REBOUND_CONTEST_LABELS)); }, []);
@@ -3950,16 +3950,21 @@ function ReboundContestTab({ roster, isCoach }) {
               <div style={{ fontWeight: 700, fontSize: 16, marginTop: 14 }}>{p.name}</div>
               <div style={{ fontSize: 12, color: "#5C6470", marginBottom: 16 }}>{p.position || ""}</div>
               <div style={{ display: "flex", justifyContent: "center", gap: 20, width: "100%" }}>
+                {/* Demandé par l'utilisateur : afficher aussi le total en fraction (ex. "13/16"),
+                    pas seulement le pourcentage — sur cette carte comme sur la fiche joueur. */}
                 <div style={{ textAlign: "center" }}>
                   <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 17, color: TEAL }}>{p.stats.tag.pct !== null ? `${Math.round(p.stats.tag.pct)}%` : "–"}</div>
+                  <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 11, color: "#8B93A1" }}>{p.stats.tag.possible > 0 ? `${p.stats.tag.earned}/${p.stats.tag.possible}` : "–"}</div>
                   <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>{labels.tag}</div>
                 </div>
                 <div style={{ textAlign: "center" }}>
                   <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 17, color: "#4A90D9" }}>{p.stats.boxOut.pct !== null ? `${Math.round(p.stats.boxOut.pct)}%` : "–"}</div>
+                  <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 11, color: "#8B93A1" }}>{p.stats.boxOut.possible > 0 ? `${p.stats.boxOut.earned}/${p.stats.boxOut.possible}` : "–"}</div>
                   <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>{labels.boxOut}</div>
                 </div>
                 <div style={{ textAlign: "center" }}>
                   <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 19, color: AMBER }}>{p.stats.total.pct !== null ? `${Math.round(p.stats.total.pct)}%` : "–"}</div>
+                  <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 11, color: "#8B93A1" }}>{p.stats.total.possible > 0 ? `${p.stats.total.earned}/${p.stats.total.possible}` : "–"}</div>
                   <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>Total</div>
                 </div>
               </div>
@@ -3967,6 +3972,28 @@ function ReboundContestTab({ roster, isCoach }) {
           ))}
         </div>
       )}
+
+      {/* Légende des points, uniquement ici (bas du classement) — demandé par l'utilisateur,
+          pas dans la fiche joueur. Les deux catégories (Tagg et Box), avec le libellé
+          personnalisé partout, y compris dans le titre de chaque légende. */}
+      <div style={{ marginTop: 24, display: "flex", gap: 16, flexWrap: "wrap" }}>
+        <div style={{ padding: 16, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, flex: "1 1 260px", maxWidth: 380 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 10 }}>{labels.tag} scoring</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12.5, color: "#D8DCE2" }}>
+            <div><span style={{ color: TEAL, fontWeight: 700, fontFamily: "ui-monospace, monospace" }}>2 pts</span> — advances toward their man with physical contact (or follows their man if they go into transition)</div>
+            <div><span style={{ color: AMBER, fontWeight: 700, fontFamily: "ui-monospace, monospace" }}>1 pt</span> — advances toward their man without physical contact</div>
+            <div><span style={{ color: RED, fontWeight: 700, fontFamily: "ui-monospace, monospace" }}>0 pts</span> — does nothing, or retreats</div>
+          </div>
+        </div>
+        <div style={{ padding: 16, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, flex: "1 1 260px", maxWidth: 380 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 10 }}>{labels.boxOut} scoring</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12.5, color: "#D8DCE2" }}>
+            <div><span style={{ color: TEAL, fontWeight: 700, fontFamily: "ui-monospace, monospace" }}>2 pts</span> — visual AND physical contact on their man (or visual contact only, if they immediately go into transition)</div>
+            <div><span style={{ color: AMBER, fontWeight: 700, fontFamily: "ui-monospace, monospace" }}>1 pt</span> — visual contact only</div>
+            <div><span style={{ color: RED, fontWeight: 700, fontFamily: "ui-monospace, monospace" }}>0 pts</span> — no contact at all</div>
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -6273,7 +6300,7 @@ function PlayerReboundContestSection({ playerName }) {
         </div>
         <div>
           <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 26, color: AMBER }}>{stats.total.pct !== null ? `${Math.round(stats.total.pct)}%` : "–"}</div>
-          <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase" }}>Total</div>
+          <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase" }}>Total {stats.total.possible > 0 ? `(${stats.total.earned}/${stats.total.possible})` : "no data"}</div>
         </div>
       </div>
     </div>
