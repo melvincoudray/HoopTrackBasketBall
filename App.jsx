@@ -1563,10 +1563,17 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories }) 
           {offSpacingScreenDef.length > 0 && (
             <>
               <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 10 }}>Offense — coverage faced, by spacing</div>
+              {/* BUG RÉEL CORRIGÉ (signalé par l'utilisateur, capture d'écran) : les cartes
+                  étaient trop étroites (260px au lieu des 320px utilisés partout ailleurs dans
+                  ce composant), coupant les pourcentages sur le bord droit — et MetricBarList
+                  (qui affiche PPPP et %Open) manquait entièrement, alors que chaque autre bloc
+                  de cette section l'a toujours en plus du donut. Corrigé pour suivre exactement
+                  le même schéma que "Screen defense faced"/"Spacing played" juste au-dessus. */}
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 20 }}>
                 {offSpacingScreenDef.map(s => (
-                  <div key={"off-spacing-" + s.spacing} style={{ flex: "1 1 260px", minWidth: 220 }}>
+                  <div key={"off-spacing-" + s.spacing} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
                     <DonutCard title={s.spacing} data={s.breakdown.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag on these plays." />
+                    <MetricBarList title={`${s.spacing} — efficiency by coverage`} items={s.breakdown} color={AMBER} />
                   </div>
                 ))}
               </div>
@@ -1577,8 +1584,9 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories }) 
               <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 10 }}>Defense — coverage used, by spacing</div>
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 26 }}>
                 {defSpacingScreenDef.map(s => (
-                  <div key={"def-spacing-" + s.spacing} style={{ flex: "1 1 260px", minWidth: 220 }}>
+                  <div key={"def-spacing-" + s.spacing} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
                     <DonutCard title={s.spacing} data={s.breakdown.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag on these plays." />
+                    <MetricBarList title={`${s.spacing} — efficiency by coverage`} items={s.breakdown} color={TEAL} />
                   </div>
                 ))}
               </div>
