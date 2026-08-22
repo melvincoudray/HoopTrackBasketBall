@@ -3910,7 +3910,7 @@ function MatchTypeSelect({ value, onChange }) {
 
 // Onglet "Rebound Contest" (Team) : sélecteur de sessions + classement des joueurs sur
 // TAG / BOX OUT, avec photo et nom repris directement du roster.
-function ReboundContestTab({ roster, isCoach }) {
+function ReboundContestTab({ roster, isCoach, teamLogo }) {
   const { index, sessions, loading } = useReboundContestSessions();
   const { categories } = useReboundContestCategories();
   const { name: tabName } = useReboundContestTabName();
@@ -3936,6 +3936,31 @@ function ReboundContestTab({ roster, isCoach }) {
     .map(p => ({ ...p, stats: stats[p.name] }))
     .filter(p => p.stats && p.stats.total.possible > 0)
     .sort((a, b) => (b.stats.total.pct ?? -1) - (a.stats.total.pct ?? -1));
+
+  // Carte "Team Total", toujours en dernière position — additionne les points obtenus et
+  // possibles de TOUS les joueurs pour chaque catégorie, puis calcule le pourcentage à partir
+  // de cette somme (jamais une moyenne des pourcentages individuels, ce qui serait faux dès que
+  // les joueurs n'ont pas le même nombre d'occasions).
+  const teamTotal = useMemo(() => {
+    const catTotals = {};
+    for (const cat of categories) catTotals[cat.key] = { earned: 0, possible: 0 };
+    let grandEarned = 0, grandPossible = 0;
+    for (const p of ranked) {
+      for (const cat of categories) {
+        const c = p.stats[cat.key];
+        if (!c) continue;
+        catTotals[cat.key].earned += c.earned;
+        catTotals[cat.key].possible += c.possible;
+      }
+      grandEarned += p.stats.total.earned;
+      grandPossible += p.stats.total.possible;
+    }
+    for (const cat of categories) {
+      const c = catTotals[cat.key];
+      c.pct = c.possible > 0 ? (100 * c.earned) / c.possible : null;
+    }
+    return { ...catTotals, total: { earned: grandEarned, possible: grandPossible, pct: grandPossible > 0 ? (100 * grandEarned) / grandPossible : null } };
+  }, [ranked, categories]);
 
   if (loading) return <div style={{ color: "#5C6470", fontSize: 13 }}>Loading…</div>;
   if (!index.length) return <EmptyState text={`No ${tabName} session imported yet — import one from the 'Import' tab.`} />;
@@ -4006,6 +4031,38 @@ function ReboundContestTab({ roster, isCoach }) {
               </div>
             </div>
           ))}
+
+          {/* Carte "Team Total", toujours en dernière position (demandé par l'utilisateur) —
+              additionne les points de TOUS les joueurs avant de calculer le pourcentage, jamais
+              une moyenne des pourcentages individuels. Distinguée visuellement d'une carte
+              joueur (bordure ambre, icône au lieu d'un numéro de classement). */}
+          <div style={{ position: "relative", display: "flex", flexDirection: "column", alignItems: "center", padding: "20px 16px", background: PANEL, border: `2px solid ${AMBER}`, borderRadius: 14, textAlign: "center" }}>
+            <div style={{ position: "absolute", top: 12, left: 12, width: 24, height: 24, borderRadius: "50%", background: AMBER, color: "#1a1200", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Users size={13} />
+            </div>
+            <div style={{ width: 140, height: 140, borderRadius: 16, background: PANEL2, border: `1px solid ${LINE}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+              {teamLogo ? <img src={teamLogo} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }} /> : <Users size={56} color={AMBER} />}
+            </div>
+            <div style={{ fontWeight: 700, fontSize: 16, marginTop: 14 }}>Team Total</div>
+            <div style={{ fontSize: 12, color: "#5C6470", marginBottom: 16 }}>All players combined</div>
+            <div style={{ display: "flex", justifyContent: "center", gap: 20, width: "100%", flexWrap: "wrap" }}>
+              {categories.map((cat, ci) => {
+                const c = teamTotal[cat.key] || { earned: 0, possible: 0, pct: null };
+                return (
+                  <div key={cat.key} style={{ textAlign: "center" }}>
+                    <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 17, color: catColors[ci % catColors.length] }}>{c.pct !== null ? `${Math.round(c.pct)}%` : "–"}</div>
+                    <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 11, color: "#8B93A1" }}>{c.possible > 0 ? `${c.earned}/${c.possible}` : "–"}</div>
+                    <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>{cat.label}</div>
+                  </div>
+                );
+              })}
+              <div style={{ textAlign: "center" }}>
+                <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 19, color: AMBER }}>{teamTotal.total.pct !== null ? `${Math.round(teamTotal.total.pct)}%` : "–"}</div>
+                <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 11, color: "#8B93A1" }}>{teamTotal.total.possible > 0 ? `${teamTotal.total.earned}/${teamTotal.total.possible}` : "–"}</div>
+                <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>Total</div>
+              </div>
+            </div>
+          </div>
         </div>
       )}
 
@@ -9971,7 +10028,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
         </>
       )}
       {subtab === "resources" && (isCoach || v.resources) && <TeamResourcesTab isCoach={isCoach} team={team} />}
-      {subtab === "reboundContest" && (isCoach || v.reboundContest) && <ReboundContestTab roster={roster} isCoach={isCoach} />}
+      {subtab === "reboundContest" && (isCoach || v.reboundContest) && <ReboundContestTab roster={roster} isCoach={isCoach} teamLogo={team?.logo} />}
       {subtab === "entrainement" && isCoach && <CollectiveTraining roster={roster} />}
 
       {rows.length > 0 && (
