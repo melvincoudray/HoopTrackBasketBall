@@ -9192,6 +9192,24 @@ async function migratePlayerRename(oldName, newName) {
     const rows = data.rows.map(row => row.player === oldName ? { ...row, player: newName, playerFull: newName } : row);
     await storeSet("boxscore:" + b.id, { ...data, rows });
   }
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : les données Rebound Contest d'un joueur
+  // disparaissaient de sa fiche après un renommage) : chaque événement importé garde le nom du
+  // joueur tel qu'il apparaissait dans le fichier au moment de l'import (clé de "scores") — ce
+  // renommage ne touchait jamais ces sessions déjà enregistrées. Corrigé pour suivre le même
+  // principe que les matchs et box scores ci-dessus : la clé "scores[oldName]" devient
+  // "scores[newName]" dans chaque événement de chaque session, sans rien perdre.
+  const reboundIdx = (await storeGet("rebound_contest_index")) || [];
+  for (const s of reboundIdx) {
+    const data = await storeGet("rebound_contest:" + s.id);
+    if (!data || !data.events) continue;
+    if (!data.events.some(ev => ev.scores && Object.prototype.hasOwnProperty.call(ev.scores, oldName))) continue;
+    const events = data.events.map(ev => {
+      if (!ev.scores || !Object.prototype.hasOwnProperty.call(ev.scores, oldName)) return ev;
+      const { [oldName]: value, ...rest } = ev.scores;
+      return { ...ev, scores: { ...rest, [newName]: value } };
+    });
+    await storeSet("rebound_contest:" + s.id, { ...data, events });
+  }
 }
 
 function BackupTab({ team, roster }) {
