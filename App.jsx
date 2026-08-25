@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
-import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon, Calendar } from "lucide-react";
+import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon, Calendar, Star } from "lucide-react";
 import {
   PieChart, Pie, Cell, ComposedChart, Bar as RBar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
   RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar,
@@ -3515,7 +3515,13 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
     finally { setMessageBusy(false); }
   }
 
-  useEffect(() => { storeGet("team_resources").then(r => setResources(((r || []).sort((a, b) => b.addedAt.localeCompare(a.addedAt))).slice(0, 2))); }, []);
+  // Épinglé en priorité ici aussi (comme dans Team → Resources) — c'est justement l'endroit où
+  // un accès rapide compte le plus, demandé par l'utilisateur.
+  useEffect(() => { storeGet("team_resources").then(r => setResources(((r || []).sort((a, b) => {
+    const pa = a.pinned ? 1 : 0, pb = b.pinned ? 1 : 0;
+    if (pa !== pb) return pb - pa;
+    return b.addedAt.localeCompare(a.addedAt);
+  })).slice(0, 2))); }, []);
   useEffect(() => {
     storeGet("planning_events").then(evs => {
       const todayKey = toDateKey(new Date());
@@ -3853,13 +3859,25 @@ function BottomTabBar({ tab, setTab, isCoach, visibility }) {
   ];
   return (
     <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 100 }}>
-      <div style={{
+      {/* Sur petit écran (mobile) : largeur fixe par bouton + défilement horizontal, comme
+          avant. À partir d'une certaine largeur d'écran (ordinateur), les boutons s'étirent
+          pour se répartir sur toute la largeur disponible au lieu de rester collés à gauche —
+          demandé par l'utilisateur, qui trouvait ça inesthétique sur grand écran. */}
+      <style>{`
+        .hooptrack-bottom-nav { display: flex; overflow-x: auto; }
+        .hooptrack-bottom-nav-item { flex: 0 0 auto; width: 72px; }
+        @media (min-width: 860px) {
+          .hooptrack-bottom-nav { overflow-x: visible; max-width: 1180px; margin: 0 auto; }
+          .hooptrack-bottom-nav-item { flex: 1 1 0; width: auto; }
+        }
+      `}</style>
+      <div className="hooptrack-bottom-nav" style={{
         background: "#0B0D11", borderTop: `1px solid ${LINE}`,
-        display: "flex", overflowX: "auto", WebkitOverflowScrolling: "touch", paddingBottom: "env(safe-area-inset-bottom, 0px)",
+        WebkitOverflowScrolling: "touch", paddingBottom: "env(safe-area-inset-bottom, 0px)",
       }}>
         {items.map(it => (
-          <button key={it.id} onClick={() => setTab(it.id)} style={{
-            flex: "0 0 auto", width: 72, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+          <button key={it.id} className="hooptrack-bottom-nav-item" onClick={() => setTab(it.id)} style={{
+            display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
             gap: 3, padding: "9px 4px 8px", background: "none", border: "none", cursor: "pointer", fontFamily: "inherit",
             color: tab === it.id ? AMBER : "#7B8390",
           }}>
@@ -3868,8 +3886,10 @@ function BottomTabBar({ tab, setTab, isCoach, visibility }) {
           </button>
         ))}
       </div>
-      {/* Léger indice visuel qu'il y a d'autres onglets à faire glisser — sans bloquer le tap. */}
-      <div style={{ position: "absolute", top: 0, right: 0, bottom: "env(safe-area-inset-bottom, 0px)", width: 28, background: "linear-gradient(90deg, transparent, #0B0D11)", pointerEvents: "none" }} />
+      {/* Léger indice visuel qu'il y a d'autres onglets à faire glisser — sans bloquer le tap.
+          Uniquement utile sur mobile (défilement) ; masqué sur grand écran où tout est visible. */}
+      <div className="hooptrack-bottom-nav-fade" style={{ position: "absolute", top: 0, right: 0, bottom: "env(safe-area-inset-bottom, 0px)", width: 28, background: "linear-gradient(90deg, transparent, #0B0D11)", pointerEvents: "none" }} />
+      <style>{`@media (min-width: 860px) { .hooptrack-bottom-nav-fade { display: none; } }`}</style>
     </div>
   );
 }
@@ -9510,7 +9530,11 @@ function TeamPrintReport({ team, rows, otherLabels, advanced, teamOff, teamDef, 
   const [resources, setResources] = useState([]);
 
   useEffect(() => {
-    storeGet("team_resources").then(r => setResources(((r || []).sort((a, b) => b.addedAt.localeCompare(a.addedAt)))));
+    storeGet("team_resources").then(r => setResources(((r || []).sort((a, b) => {
+      const pa = a.pinned ? 1 : 0, pb = b.pinned ? 1 : 0;
+      if (pa !== pb) return pb - pa;
+      return b.addedAt.localeCompare(a.addedAt);
+    }))));
   }, []);
 
   return (
@@ -9853,8 +9877,19 @@ function TeamResourcesTab({ isCoach, team }) {
   useEffect(() => { load(); }, []);
   async function load() {
     setLoading(true);
-    setResources(((await storeGet("team_resources")) || []).sort((a, b) => b.addedAt.localeCompare(a.addedAt)));
+    const all = (await storeGet("team_resources")) || [];
+    setResources(sortResources(all));
     setLoading(false);
+  }
+  // Épinglé en premier (par date d'ajout la plus récente parmi les épinglés), puis le reste
+  // par date d'ajout — demandé par l'utilisateur, pour un accès plus rapide aux ressources
+  // importantes sans avoir à les chercher dans la liste.
+  function sortResources(list) {
+    return [...list].sort((a, b) => {
+      const pa = a.pinned ? 1 : 0, pb = b.pinned ? 1 : 0;
+      if (pa !== pb) return pb - pa;
+      return b.addedAt.localeCompare(a.addedAt);
+    });
   }
 
   async function addResource() {
@@ -9863,12 +9898,18 @@ function TeamResourcesTab({ isCoach, team }) {
     let parsed;
     try { parsed = new URL(url.trim()); } catch { setError("That doesn't look like a valid link."); return; }
     setBusy(true);
-    const entry = { id: uid(), title: title.trim(), url: parsed.href, type: detectResourceType(parsed.href), addedAt: new Date().toISOString() };
-    const next = [entry, ...resources];
+    const entry = { id: uid(), title: title.trim(), url: parsed.href, type: detectResourceType(parsed.href), addedAt: new Date().toISOString(), pinned: false };
+    const next = sortResources([entry, ...resources]);
     await storeSet("team_resources", next);
     setResources(next);
     setTitle(""); setUrl("");
     setBusy(false);
+  }
+
+  async function togglePin(r) {
+    const next = sortResources(resources.map(x => x.id === r.id ? { ...x, pinned: !x.pinned } : x));
+    setResources(next);
+    await storeSet("team_resources", next);
   }
 
   async function handleDelete(r) {
@@ -9905,11 +9946,18 @@ function TeamResourcesTab({ isCoach, team }) {
       {resources.length === 0 ? <EmptyState text="No resource shared yet." /> : (
         <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
           {resources.map(r => (
-            <div key={r.id} style={{ ...btnRow, cursor: "default" }}>
+            <div key={r.id} style={{ ...btnRow, cursor: "default", background: r.pinned ? "rgba(242,169,59,0.08)" : undefined, border: r.pinned ? `1px solid ${AMBER}` : undefined }}>
               <a href={r.url} target="_blank" rel="noopener noreferrer" style={{ display: "flex", alignItems: "center", gap: 10, color: "inherit", textDecoration: "none", flex: 1, minWidth: 0 }}>
                 {r.type === "video" ? <Video size={16} color={AMBER} /> : <LinkIcon size={16} color={TEAL} />}
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{r.title}</span>
               </a>
+              {isCoach ? (
+                <button onClick={() => togglePin(r)} title={r.pinned ? "Unpin" : "Pin for quick access"} style={{ background: "none", border: "none", cursor: "pointer", display: "flex", flexShrink: 0, marginRight: 4 }}>
+                  <Star size={15} color={r.pinned ? AMBER : "#5C6470"} fill={r.pinned ? AMBER : "none"} />
+                </button>
+              ) : (
+                r.pinned && <Star size={14} color={AMBER} fill={AMBER} style={{ flexShrink: 0, marginRight: 4 }} />
+              )}
               {isCoach && (
                 requestedIds.has(r.id) ? (
                   <span style={{ fontSize: 11.5, color: AMBER, flexShrink: 0 }}>Pending admin approval</span>
