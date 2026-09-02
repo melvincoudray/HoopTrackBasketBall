@@ -1171,6 +1171,37 @@ function parseReboundContestFile(arrayBuffer, roster, categories = DEFAULT_REBOU
 // l'utilisateur) en un total par joueur et par catégorie (dynamique — pas seulement Tagg/Box
 // Out, s'adapte à la config actuelle), avec le pourcentage par rapport au maximum possible
 // (chaque événement valant 2 points au maximum).
+// Calcule le % de réussite d'un joueur sur une grille de tir, selon des filtres librement
+// combinables (demandé par l'utilisateur : "que à Droite", "que de la 1ère Série", "sans les LF
+// de fin") — jamais de moyenne de pourcentages, toujours somme des tirs réussis / somme des
+// tirs tentés sur l'ensemble filtré, comme pour le Rebound Contest.
+// filters = { situationIds: Set|null (null = toutes), sides: Set|null (null = les deux),
+//             seriesIndices: Set|null (null = toutes, 0-based) }
+function computeShootingGridStats(grid, playerScores, filters = {}) {
+  const { situationIds = null, sides = null, seriesIndices = null } = filters;
+  const out = {};
+  for (const [playerName, bySituation] of Object.entries(playerScores || {})) {
+    let made = 0, attempted = 0;
+    for (const sit of grid.situations) {
+      if (situationIds && !situationIds.has(sit.id)) continue;
+      const sitScores = bySituation[sit.id];
+      if (!sitScores) continue;
+      const activeSides = sit.sides.filter(side => !sides || sides.has(side));
+      for (const side of activeSides) {
+        const series = sitScores[side] || [];
+        series.forEach((madeInSeries, idx) => {
+          if (seriesIndices && !seriesIndices.has(idx)) return;
+          if (madeInSeries === null || madeInSeries === undefined) return; // série pas encore saisie
+          made += madeInSeries;
+          attempted += sit.shotsPerSeries;
+        });
+      }
+    }
+    out[playerName] = { made, attempted, pct: attempted > 0 ? (100 * made) / attempted : null };
+  }
+  return out;
+}
+
 function computeReboundContestStats(events, playerNames, categories = DEFAULT_REBOUND_CONTEST_CATEGORIES) {
   const out = {};
   function emptyStats() {
@@ -2147,6 +2178,83 @@ function useTeamAdvancedStats(filterKeys) {
   }
 
   return data;
+}
+
+// Gère les sessions de "Shooting Grid" (grille de tir) — chaque grille définit un ensemble de
+// situations (nom, image, tirs/série, nombre de séries, côtés joués), et les scores sont
+// enregistrés séparément par joueur/situation/côté/série, pour permettre des pourcentages
+// filtrables librement à l'affichage (ex. "que la série 1", "que côté droit", "sans les LF").
+// Modèle d'export du planning : un PDF "plat" (sans champs de formulaire) importé une fois,
+// avec l'emplacement (x/y/largeur/hauteur, en points PDF) où insérer le contenu de chaque jour
+// de la semaine, défini en cliquant-glissant directement sur l'aperçu du PDF. Propre à chaque
+// équipe, comme le reste.
+function usePlanningExportTemplate() {
+  const [template, setTemplate] = useState(null); // null = aucun modèle configuré
+  const [loading, setLoading] = useState(true);
+  useEffect(() => { storeGet("planning_export_template").then(t => { setTemplate(t || null); setLoading(false); }); }, []);
+  async function save(next) { await storeSet("planning_export_template", next); setTemplate(next); }
+  async function clear() { await storeDelete("planning_export_template"); setTemplate(null); }
+  return { template, loading, save, clear };
+}
+
+function useShootingGridSessions() {
+  const [index, setIndex] = useState([]);
+  const [grids, setGrids] = useState({}); // { id: { id, date, label, situations: [...] } }
+  const [scores, setScores] = useState({}); // { id: { playerName: { situationId: { left: [made,...], right: [made,...] } } } }
+  const [loading, setLoading] = useState(true);
+
+  async function load() {
+    setLoading(true);
+    const idx = (await storeGet("shooting_grid_index")) || [];
+    setIndex(idx);
+    const loadedGrids = {}, loadedScores = {};
+    for (const g of idx) {
+      const rec = await storeGet("shooting_grid:" + g.id);
+      if (rec) loadedGrids[g.id] = rec;
+      const sc = await storeGet("shooting_grid_scores:" + g.id);
+      loadedScores[g.id] = sc || {};
+    }
+    setGrids(loadedGrids);
+    setScores(loadedScores);
+    setLoading(false);
+  }
+  useEffect(() => { load(); }, []);
+
+  async function addGrid({ label, date, situations }) {
+    const id = uid();
+    const record = { id, label, date, situations };
+    await storeSet("shooting_grid:" + id, record);
+    const newIndex = [...index, { id, label, date }];
+    await storeSet("shooting_grid_index", newIndex);
+    setIndex(newIndex);
+    setGrids(g => ({ ...g, [id]: record }));
+    setScores(s => ({ ...s, [id]: {} }));
+    return id;
+  }
+  async function editGrid(id, changes) {
+    const next = { ...grids[id], ...changes };
+    await storeSet("shooting_grid:" + id, next);
+    const newIndex = index.map(g => g.id === id ? { ...g, label: next.label, date: next.date } : g);
+    await storeSet("shooting_grid_index", newIndex);
+    setIndex(newIndex);
+    setGrids(g => ({ ...g, [id]: next }));
+  }
+  async function deleteGrid(id) {
+    await storeDelete("shooting_grid:" + id);
+    await storeDelete("shooting_grid_scores:" + id);
+    const newIndex = index.filter(g => g.id !== id);
+    await storeSet("shooting_grid_index", newIndex);
+    setIndex(newIndex);
+    setGrids(g => { const n = { ...g }; delete n[id]; return n; });
+    setScores(s => { const n = { ...s }; delete n[id]; return n; });
+  }
+  async function savePlayerScores(gridId, playerName, situationScores) {
+    const next = { ...(scores[gridId] || {}), [playerName]: situationScores };
+    await storeSet("shooting_grid_scores:" + gridId, next);
+    setScores(s => ({ ...s, [gridId]: next }));
+  }
+
+  return { index, grids, scores, loading, addGrid, editGrid, deleteGrid, savePlayerScores, reload: load };
 }
 
 // Gère les sessions de "Rebound Contest" importées — stockage propre à chaque équipe, comme le
@@ -3930,6 +4038,335 @@ function MatchTypeSelect({ value, onChange }) {
 
 // Onglet "Rebound Contest" (Team) : sélecteur de sessions + classement des joueurs sur
 // TAG / BOX OUT, avec photo et nom repris directement du roster.
+// ============================================================================
+// Shooting Grid (Team) — grilles de tir : plusieurs situations, chacune avec une image
+// explicative, un nombre de tirs par série, un nombre de séries, et les côtés joués (gauche/
+// droite). Les scores sont saisis par joueur, par situation, par côté, par série, pour
+// permettre des pourcentages filtrés librement à l'affichage (demandé par l'utilisateur).
+// ============================================================================
+
+function ShootingGridSituationEditor({ situation, onChange, onRemove }) {
+  const imgRef = useRef();
+  async function handleImage(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const dataUrl = await fileToResizedDataURL(file, 500, 0.85);
+    onChange({ ...situation, image: dataUrl });
+  }
+  function toggleSide(side) {
+    const sides = situation.sides.includes(side) ? situation.sides.filter(s => s !== side) : [...situation.sides, side];
+    onChange({ ...situation, sides: sides.length ? sides : situation.sides }); // au moins un côté
+  }
+  return (
+    <div style={{ display: "flex", gap: 16, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 16, marginBottom: 12 }}>
+      <div onClick={() => imgRef.current?.click()} style={{ width: 90, height: 90, borderRadius: 8, background: PANEL2, border: `1px dashed ${LINE}`, display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0, overflow: "hidden" }}>
+        {situation.image ? <img src={situation.image} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <Camera size={22} color="#5C6470" />}
+        <input ref={imgRef} type="file" accept="image/*" onChange={handleImage} style={{ display: "none" }} />
+      </div>
+      <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 10 }}>
+        <input value={situation.name} onChange={e => onChange({ ...situation, name: e.target.value })} placeholder="Situation name (e.g. Elbow catch-and-shoot)"
+          style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", alignItems: "center" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#8B93A1" }}>
+            Shots per series
+            <input type="number" min={1} value={situation.shotsPerSeries} onChange={e => onChange({ ...situation, shotsPerSeries: Math.max(1, Number(e.target.value) || 1) })}
+              style={{ width: 56, padding: "6px 8px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 6, color: PAPER, fontFamily: "inherit" }} />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#8B93A1" }}>
+            Series per side
+            <input type="number" min={1} value={situation.seriesCount} onChange={e => onChange({ ...situation, seriesCount: Math.max(1, Number(e.target.value) || 1) })}
+              style={{ width: 56, padding: "6px 8px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 6, color: PAPER, fontFamily: "inherit" }} />
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#8B93A1", cursor: "pointer" }}>
+            <input type="checkbox" checked={situation.sides.includes("left")} onChange={() => toggleSide("left")} /> Left
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#8B93A1", cursor: "pointer" }}>
+            <input type="checkbox" checked={situation.sides.includes("right")} onChange={() => toggleSide("right")} /> Right
+          </label>
+        </div>
+      </div>
+      <button onClick={onRemove} style={{ background: "none", border: "none", color: RED, cursor: "pointer", flexShrink: 0, display: "flex", height: "fit-content" }}><Trash2 size={16} /></button>
+    </div>
+  );
+}
+
+function ShootingGridEditor({ initialGrid, onSave, onCancel }) {
+  const [label, setLabel] = useState(initialGrid?.label || "");
+  const [date, setDate] = useState(initialGrid?.date || todayLocal());
+  const [situations, setSituations] = useState(initialGrid?.situations || []);
+  const [error, setError] = useState("");
+
+  function addSituation() {
+    setSituations(s => [...s, { id: uid(), name: "", image: null, shotsPerSeries: 6, seriesCount: 2, sides: ["left", "right"] }]);
+  }
+  function updateSituation(id, next) { setSituations(s => s.map(x => x.id === id ? next : x)); }
+  function removeSituation(id) { setSituations(s => s.filter(x => x.id !== id)); }
+
+  function handleSave() {
+    setError("");
+    if (!label.trim()) { setError("Give this grid a name."); return; }
+    if (situations.length === 0) { setError("Add at least one situation."); return; }
+    if (situations.some(s => !s.name.trim())) { setError("Every situation needs a name."); return; }
+    onSave({ label: label.trim(), date, situations });
+  }
+
+  const totalShots = situations.reduce((sum, s) => sum + s.sides.length * s.seriesCount * s.shotsPerSeries, 0);
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
+        <input value={label} onChange={e => setLabel(e.target.value)} placeholder="Grid name (e.g. Shooting Grid 27 Aug)"
+          style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", flex: "1 1 260px" }} />
+        <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 160 }} />
+      </div>
+
+      {situations.map(sit => (
+        <ShootingGridSituationEditor key={sit.id} situation={sit} onChange={next => updateSituation(sit.id, next)} onRemove={() => removeSituation(sit.id)} />
+      ))}
+
+      <button onClick={addSituation} style={{ padding: "9px 16px", background: "none", border: `1px solid ${LINE}`, borderRadius: 8, color: "#8B93A1", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, marginBottom: 16 }}>+ Add situation</button>
+
+      {situations.length > 0 && (
+        <div style={{ fontSize: 12.5, color: "#5C6470", marginBottom: 16 }}>
+          Total: {situations.length} situation{situations.length !== 1 ? "s" : ""} · {totalShots} shots per player
+        </div>
+      )}
+
+      {error && <div style={{ color: RED, fontSize: 12.5, marginBottom: 12 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 10 }}>
+        <button onClick={handleSave} style={{ ...btnPrimary, width: "auto", padding: "10px 20px" }}>Save grid</button>
+        <button onClick={onCancel} style={btnSecondary}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function ShootingGridScoreEntry({ grid, roster, gridScores, onSavePlayer }) {
+  const [selectedPlayerId, setSelectedPlayerId] = useState(roster[0]?.id || null);
+  const player = roster.find(p => p.id === selectedPlayerId);
+  const existing = (player && gridScores[player.name]) || {};
+  const [draft, setDraft] = useState(existing);
+  useEffect(() => { setDraft((player && gridScores[player.name]) || {}); }, [selectedPlayerId]);
+  const [status, setStatus] = useState("");
+
+  function setValue(situationId, side, seriesIdx, value) {
+    const n = value === "" ? null : Math.max(0, Math.min(9999, Number(value)));
+    setDraft(d => {
+      const sit = d[situationId] || {};
+      const arr = [...(sit[side] || [])];
+      arr[seriesIdx] = n;
+      return { ...d, [situationId]: { ...sit, [side]: arr } };
+    });
+  }
+
+  async function handleSave() {
+    await onSavePlayer(player.name, draft);
+    setStatus("Saved");
+    setTimeout(() => setStatus(""), 2000);
+  }
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 20 }}>
+        {roster.map(p => (
+          <button key={p.id} onClick={() => setSelectedPlayerId(p.id)} style={{
+            padding: "6px 12px", borderRadius: 7, fontSize: 12.5, cursor: "pointer", fontFamily: "inherit",
+            background: p.id === selectedPlayerId ? AMBER : PANEL2, color: p.id === selectedPlayerId ? "#1a1200" : "#D8DCE2",
+            border: `1px solid ${p.id === selectedPlayerId ? AMBER : LINE}`,
+          }}>{p.name}</button>
+        ))}
+      </div>
+
+      {player && grid.situations.map(sit => (
+        <div key={sit.id} style={{ display: "flex", gap: 16, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 16, marginBottom: 12 }}>
+          {sit.image && <img src={sit.image} alt="" style={{ width: 64, height: 64, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />}
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 10 }}>{sit.name}</div>
+            {sit.sides.map(side => (
+              <div key={side} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8, flexWrap: "wrap" }}>
+                <span style={{ fontSize: 12, color: "#8B93A1", width: 46, textTransform: "capitalize" }}>{side}</span>
+                {Array.from({ length: sit.seriesCount }).map((_, idx) => (
+                  <label key={idx} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: "#5C6470" }}>
+                    S{idx + 1}
+                    <input type="number" min={0} max={sit.shotsPerSeries}
+                      value={draft[sit.id]?.[side]?.[idx] ?? ""}
+                      onChange={e => setValue(sit.id, side, idx, e.target.value)}
+                      placeholder="0"
+                      style={{ width: 44, padding: "5px 6px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 6, color: PAPER, fontFamily: "inherit", textAlign: "center" }} />
+                    / {sit.shotsPerSeries}
+                  </label>
+                ))}
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+
+      {player && (
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <button onClick={handleSave} style={{ ...btnPrimary, width: "auto", padding: "9px 18px" }}>Save {player.name}'s scores</button>
+          {status && <span style={{ color: TEAL, fontSize: 12.5 }}>{status}</span>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ShootingGridResults({ grid, gridScores, roster }) {
+  const [situationIds, setSituationIds] = useState(new Set(grid.situations.map(s => s.id)));
+  const maxSeries = Math.max(1, ...grid.situations.map(s => s.seriesCount));
+  const [sides, setSides] = useState(new Set(["left", "right"]));
+  const [seriesIndices, setSeriesIndices] = useState(new Set(Array.from({ length: maxSeries }, (_, i) => i)));
+
+  function toggleSet(setFn, current, value) {
+    const next = new Set(current);
+    if (next.has(value)) next.delete(value); else next.add(value);
+    setFn(next);
+  }
+
+  const filters = useMemo(() => ({
+    situationIds: situationIds.size === grid.situations.length ? null : situationIds,
+    sides: sides.size === 2 ? null : sides,
+    seriesIndices: seriesIndices.size === maxSeries ? null : seriesIndices,
+  }), [situationIds, sides, seriesIndices]);
+
+  const stats = useMemo(() => computeShootingGridStats(grid, gridScores, filters), [grid, gridScores, filters]);
+  const ranked = roster
+    .map(p => ({ ...p, stats: stats[p.name] }))
+    .filter(p => p.stats && p.stats.attempted > 0)
+    .sort((a, b) => (b.stats.pct ?? -1) - (a.stats.pct ?? -1));
+
+  return (
+    <div>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 20, marginBottom: 20, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 16 }}>
+        <div>
+          <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase", marginBottom: 8 }}>Situations</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {grid.situations.map(sit => (
+              <label key={sit.id} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
+                <input type="checkbox" checked={situationIds.has(sit.id)} onChange={() => toggleSet(setSituationIds, situationIds, sit.id)} /> {sit.name}
+              </label>
+            ))}
+          </div>
+        </div>
+        <div>
+          <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase", marginBottom: 8 }}>Side</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}><input type="checkbox" checked={sides.has("left")} onChange={() => toggleSet(setSides, sides, "left")} /> Left</label>
+            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}><input type="checkbox" checked={sides.has("right")} onChange={() => toggleSet(setSides, sides, "right")} /> Right</label>
+          </div>
+        </div>
+        <div>
+          <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase", marginBottom: 8 }}>Series</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {Array.from({ length: maxSeries }).map((_, idx) => (
+              <label key={idx} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
+                <input type="checkbox" checked={seriesIndices.has(idx)} onChange={() => toggleSet(setSeriesIndices, seriesIndices, idx)} /> Series {idx + 1}
+              </label>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {ranked.length === 0 ? (
+        <EmptyState text="No score entered yet for this selection." />
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {ranked.map((p, i) => (
+            <div key={p.id} style={{ display: "flex", alignItems: "center", gap: 14, padding: "12px 16px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10 }}>
+              <div style={{ width: 26, textAlign: "center", fontFamily: "ui-monospace, monospace", fontWeight: 800, color: i === 0 ? AMBER : "#5C6470" }}>{i + 1}</div>
+              <PlayerAvatar playerName={p.name} size={38} />
+              <div style={{ flex: 1, fontWeight: 600, fontSize: 14.5 }}>{p.name}</div>
+              <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, color: "#8B93A1" }}>{p.stats.made}/{p.stats.attempted}</div>
+              <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 18, color: AMBER, width: 60, textAlign: "right" }}>{p.stats.pct !== null ? `${Math.round(p.stats.pct)}%` : "–"}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ShootingGridTab({ roster, isCoach }) {
+  const { index, grids, scores, loading, addGrid, editGrid, deleteGrid, savePlayerScores } = useShootingGridSessions();
+  const [selectedGridId, setSelectedGridId] = useState(null); // demandé : toujours choisir d'abord, pas de sélection automatique
+  const [creating, setCreating] = useState(false);
+  const [mode, setMode] = useState("results"); // edit | scores | results
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+
+  if (loading) return <div style={{ color: "#5C6470", fontSize: 13 }}>Loading…</div>;
+
+  if (creating) {
+    return (
+      <div>
+        <SectionTitle eyebrow="Shooting Grid" title="New grid" />
+        <ShootingGridEditor onSave={async data => { const id = await addGrid(data); setCreating(false); setSelectedGridId(id); setMode("scores"); }} onCancel={() => setCreating(false)} />
+      </div>
+    );
+  }
+
+  if (!selectedGridId) {
+    return (
+      <div>
+        <SectionTitle eyebrow="Shooting Grid" title="Select a grid" />
+        {isCoach && (
+          <button onClick={() => setCreating(true)} style={{ ...btnPrimary, width: "auto", padding: "10px 20px", marginBottom: 20 }}>+ New grid</button>
+        )}
+        {index.length === 0 ? (
+          <EmptyState text="No shooting grid created yet." />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {index.slice().reverse().map(g => (
+              <div key={g.id} style={{ ...btnRow, cursor: "pointer" }} onClick={() => { setSelectedGridId(g.id); setMode("results"); }}>
+                <span>{g.label} <span style={{ color: "#5C6470", fontSize: 12 }}>· {g.date}</span></span>
+                {isCoach && (
+                  confirmDeleteId === g.id ? (
+                    <div style={{ display: "flex", gap: 10 }} onClick={e => e.stopPropagation()}>
+                      <button onClick={() => deleteGrid(g.id).then(() => setConfirmDeleteId(null))} style={{ background: "none", border: "none", color: RED, cursor: "pointer", fontSize: 12.5 }}>Confirm</button>
+                      <button onClick={() => setConfirmDeleteId(null)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontSize: 12.5 }}>Cancel</button>
+                    </div>
+                  ) : (
+                    <button onClick={e => { e.stopPropagation(); setConfirmDeleteId(g.id); }} style={{ background: "none", border: "none", color: RED, cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
+                  )
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const grid = grids[selectedGridId];
+  const gridScores = scores[selectedGridId] || {};
+  if (!grid) return null;
+
+  return (
+    <div>
+      <button onClick={() => setSelectedGridId(null)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontSize: 12.5, marginBottom: 12, display: "flex", alignItems: "center", gap: 4 }}>
+        <ChevronLeft size={14} /> Change grid
+      </button>
+      <SectionTitle eyebrow="Shooting Grid" title={`${grid.label} — ${grid.date}`} />
+      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+        {[["results", "Results"], ["scores", "Enter scores"], ...(isCoach ? [["edit", "Edit grid"]] : [])].map(([id, label]) => (
+          <button key={id} onClick={() => setMode(id)} style={{
+            padding: "7px 14px", borderRadius: 7, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+            background: mode === id ? PANEL2 : "transparent", color: mode === id ? AMBER : "#8B93A1", border: "none",
+          }}>{label}</button>
+        ))}
+      </div>
+
+      {mode === "edit" && isCoach && (
+        <ShootingGridEditor initialGrid={grid} onSave={async data => { await editGrid(grid.id, data); setMode("results"); }} onCancel={() => setMode("results")} />
+      )}
+      {mode === "scores" && isCoach && (
+        <ShootingGridScoreEntry grid={grid} roster={roster} gridScores={gridScores} onSavePlayer={(name, sc) => savePlayerScores(grid.id, name, sc)} />
+      )}
+      {mode === "results" && <ShootingGridResults grid={grid} gridScores={gridScores} roster={roster} />}
+    </div>
+  );
+}
+
 function ReboundContestTab({ roster, isCoach, teamLogo }) {
   const { index, sessions, loading } = useReboundContestSessions();
   const { categories } = useReboundContestCategories();
@@ -6125,7 +6562,7 @@ const MENTAL_CRITERIA = [
 const DEFAULT_VISIBILITY = {
   tabs: { players: true, team: true, scouting: true, planning: true },
   playerDetail: { stats: true, objectives: true, training: true, mental: true, wellness: true, role: true, meetings: true },
-  team: { standings: true, teamPlay: true, advanced: true, resources: true, reboundContest: true },
+  team: { standings: true, teamPlay: true, advanced: true, resources: true, reboundContest: true, shootingGrid: true },
   wellnessCharts: false, // les graphiques Wellness sont cachés aux joueurs par défaut
 };
 
@@ -9607,6 +10044,69 @@ function detectResourceType(url) {
 const DEFAULT_PLANNING_EVENT_TYPES = ["Training", "Meeting", "Other"];
 const PLANNING_COLORS = ["#F2A93B", "#2FBF9C", "#E4231C", "#4A90D9", "#B15FE0", "#8B93A1"];
 
+const PLANNING_EXPORT_DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+const PLANNING_EXPORT_DAY_LABELS = { monday: "Monday", tuesday: "Tuesday", wednesday: "Wednesday", thursday: "Thursday", friday: "Friday", saturday: "Saturday", sunday: "Sunday" };
+
+// Découpe un texte en lignes qui tiennent dans une largeur donnée (en points PDF), pour une
+// police et une taille données — pdf-lib ne fait pas de retour à la ligne automatique.
+function wrapPdfText(text, font, fontSize, maxWidth) {
+  const words = text.split(" ");
+  const lines = [];
+  let current = "";
+  for (const word of words) {
+    const attempt = current ? current + " " + word : word;
+    if (font.widthOfTextAtSize(attempt, fontSize) > maxWidth && current) {
+      lines.push(current);
+      current = word;
+    } else {
+      current = attempt;
+    }
+  }
+  if (current) lines.push(current);
+  return lines;
+}
+
+// Génère le PDF final à partir du modèle importé (déjà configuré avec l'emplacement de chaque
+// jour) et des événements de la semaine sélectionnée — insère le contenu de chaque jour aux
+// coordonnées définies, puis déclenche le téléchargement.
+async function exportPlanningWithTemplate(template, events, weekStart) {
+  const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
+  const pdfDoc = await PDFDocument.load(template.pdfBytes);
+  const page = pdfDoc.getPages()[0];
+  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
+  const fontSize = template.fontSize || 9;
+
+  PLANNING_EXPORT_DAYS.forEach((dayKey, i) => {
+    const zone = template.dayZones[dayKey];
+    if (!zone) return;
+    const dayDate = addDays(weekStart, i);
+    const dayKeyStr = toDateKey(dayDate);
+    const dayEvents = events.filter(ev => ev.date === dayKeyStr).sort((a, b) => a.startTime.localeCompare(b.startTime));
+    if (!dayEvents.length) return;
+
+    let cursorY = zone.y + zone.height - fontSize; // pdf-lib : origine en bas à gauche, on part du haut de la zone
+    for (const ev of dayEvents) {
+      const line = `${ev.startTime} ${ev.title}`;
+      const wrapped = wrapPdfText(line, font, fontSize, zone.width);
+      for (const wLine of wrapped) {
+        if (cursorY < zone.y) break; // ne dépasse pas le bas de la zone
+        page.drawText(wLine, { x: zone.x, y: cursorY, size: fontSize, font, color: rgb(0.1, 0.1, 0.1) });
+        cursorY -= fontSize + 2;
+      }
+      cursorY -= 3; // petit espace entre deux événements
+    }
+  });
+
+  const bytes = await pdfDoc.save();
+  const blob = new Blob([bytes], { type: "application/pdf" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `Planning_${toDateKey(weekStart)}.pdf`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 function startOfWeek(d) {
   const date = new Date(d);
   const day = date.getDay(); // 0 = dimanche
@@ -9618,6 +10118,184 @@ function startOfWeek(d) {
 function addDays(d, n) { const c = new Date(d); c.setDate(c.getDate() + n); return c; }
 function toDateKey(d) { return todayLocal(d); }
 function formatDayLabel(d) { return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric" }); }
+
+// Éditeur de modèle d'export : le coach importe un PDF "plat" (sans champs remplissables) et
+// clique-glisse directement sur l'aperçu pour définir où va le contenu de chaque jour de la
+// semaine — demandé par l'utilisateur.
+function PlanningExportTemplateEditor({ template, onSave, onClear }) {
+  const [pdfBytes, setPdfBytes] = useState(template?.pdfBytes || null);
+  const [pageImage, setPageImage] = useState(null); // data URL de la page rendue, pour l'aperçu cliquable
+  const [pageSize, setPageSize] = useState(template ? { width: 0, height: 0 } : null); // en points PDF
+  const [dayZones, setDayZones] = useState(template?.dayZones || {});
+  const [fontSize, setFontSize] = useState(template?.fontSize || 9);
+  const [activeDay, setActiveDay] = useState(null); // jour en cours de dessin, ou null
+  const [drawing, setDrawing] = useState(null); // { startX, startY, x, y, w, h } en pixels écran, pendant le glissement
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const canvasWrapRef = useRef();
+  const fileRef = useRef();
+
+  async function handleFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setError(""); setBusy(true);
+    try {
+      const buf = await file.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      const pdfjsLib = await import("pdfjs-dist");
+      // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : l'aperçu Claude entier plantait avec
+      // "Cannot use 'import.meta' outside a module") : "import.meta.url" n'est valable que dans
+      // un vrai module ES — l'aperçu Claude exécute ce fichier autrement, et rien qu'AVOIR cette
+      // instruction quelque part dans le fichier suffisait à casser TOUT l'aperçu, même si cette
+      // ligne précise n'est jamais appelée (erreur d'analyse, pas d'exécution). Remplacé par une
+      // URL de CDN figée sur la même version que dans package.json — fonctionne à l'identique
+      // dans l'aperçu Claude ET sur le site déployé, sans dépendre du bundleur.
+      pdfjsLib.GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@4.0.379/build/pdf.worker.min.mjs";
+
+      const loadingTask = pdfjsLib.getDocument({ data: bytes });
+      const pdf = await loadingTask.promise;
+      const page = await pdf.getPage(1);
+      const viewport = page.getViewport({ scale: 2 }); // résolution correcte pour un aperçu net
+      const canvas = document.createElement("canvas");
+      canvas.width = viewport.width;
+      canvas.height = viewport.height;
+      const ctx = canvas.getContext("2d");
+      await page.render({ canvasContext: ctx, viewport }).promise;
+
+      setPdfBytes(bytes);
+      setPageImage(canvas.toDataURL("image/png"));
+      // Dimensions RÉELLES de la page en points PDF (indépendantes du zoom d'aperçu) — c'est
+      // dans ce repère que les zones sont enregistrées, pour rester valides quelle que soit la
+      // taille d'affichage.
+      const unscaled = page.getViewport({ scale: 1 });
+      setPageSize({ width: unscaled.width, height: unscaled.height });
+      setDayZones({});
+    } catch (err) {
+      console.error("[planning export template] PDF load failed:", err);
+      setError("Unable to read this PDF (" + (err?.message || "unknown error") + "). Make sure it's a valid, uncorrupted file.");
+    }
+    setBusy(false);
+    if (fileRef.current) fileRef.current.value = "";
+  }
+
+  function startDrawing(day) { setActiveDay(day); }
+
+  function onMouseDown(e) {
+    if (!activeDay || !canvasWrapRef.current) return;
+    const rect = canvasWrapRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+    setDrawing({ startX: x, startY: y, x, y, w: 0, h: 0 });
+  }
+  function onMouseMove(e) {
+    if (!drawing || !canvasWrapRef.current) return;
+    const rect = canvasWrapRef.current.getBoundingClientRect();
+    const x = e.clientX - rect.left, y = e.clientY - rect.top;
+    setDrawing(d => ({
+      ...d,
+      x: Math.min(d.startX, x), y: Math.min(d.startY, y),
+      w: Math.abs(x - d.startX), h: Math.abs(y - d.startY),
+    }));
+  }
+  function onMouseUp() {
+    if (!drawing || !activeDay || !canvasWrapRef.current || drawing.w < 8 || drawing.h < 8) { setDrawing(null); setActiveDay(null); return; }
+    // Convertit les pixels écran en points PDF : l'aperçu est affiché à la largeur du
+    // conteneur, potentiellement différente de la résolution native du canvas — on calcule le
+    // ratio réel, puis on bascule vers le repère PDF (origine en bas à gauche, pas en haut).
+    const rect = canvasWrapRef.current.getBoundingClientRect();
+    const scaleX = pageSize.width / rect.width, scaleY = pageSize.height / rect.height;
+    const pdfX = drawing.x * scaleX;
+    const pdfW = drawing.w * scaleX;
+    const pdfH = drawing.h * scaleY;
+    const pdfY = pageSize.height - (drawing.y * scaleY) - pdfH; // inversion d'axe Y
+    setDayZones(z => ({ ...z, [activeDay]: { x: pdfX, y: pdfY, width: pdfW, height: pdfH } }));
+    setDrawing(null);
+    setActiveDay(null);
+  }
+
+  function removeZone(day) { setDayZones(z => { const n = { ...z }; delete n[day]; return n; }); }
+
+  async function handleSave() {
+    if (!pdfBytes) { setError("Import a PDF first."); return; }
+    if (Object.keys(dayZones).length === 0) { setError("Draw at least one day's zone on the preview."); return; }
+    await onSave({ pdfBytes, dayZones, fontSize });
+  }
+
+  return (
+    <div>
+      <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 16, maxWidth: 640 }}>
+        Import a flat PDF (fixed layout, not a fillable form). Click a day below, then click-and-drag
+        directly on the preview to mark where that day's content should be inserted at export time.
+      </div>
+
+      {!pageImage && !pdfBytes ? (
+        <div style={{ border: `1px dashed ${LINE}`, borderRadius: 10, padding: 20, textAlign: "center", marginBottom: 20 }}>
+          <input ref={fileRef} type="file" accept="application/pdf" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
+        </div>
+      ) : (
+        <>
+          {!pageImage && pdfBytes && <div style={{ fontSize: 12.5, color: TEAL, marginBottom: 12 }}>Template already saved — re-import the PDF to change day zones (kept as-is otherwise).</div>}
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
+            {PLANNING_EXPORT_DAYS.map(day => (
+              <button key={day} onClick={() => startDrawing(day)} disabled={!pageImage} style={{
+                padding: "6px 12px", borderRadius: 7, fontSize: 12.5, cursor: pageImage ? "pointer" : "default", fontFamily: "inherit",
+                background: activeDay === day ? AMBER : (dayZones[day] ? "rgba(47,184,166,0.15)" : PANEL2),
+                color: activeDay === day ? "#1a1200" : (dayZones[day] ? TEAL : "#8B93A1"),
+                border: `1px solid ${activeDay === day ? AMBER : (dayZones[day] ? TEAL : LINE)}`, opacity: pageImage ? 1 : 0.5,
+              }}>
+                {PLANNING_EXPORT_DAY_LABELS[day]} {dayZones[day] ? "✓" : ""}
+              </button>
+            ))}
+            <button onClick={() => fileRef.current?.click()} style={{ padding: "6px 12px", borderRadius: 7, fontSize: 12.5, background: "none", border: `1px solid ${LINE}`, color: "#8B93A1", cursor: "pointer", fontFamily: "inherit" }}>Re-import PDF</button>
+            <input ref={fileRef} type="file" accept="application/pdf" onChange={handleFile} style={{ display: "none" }} />
+          </div>
+
+          {activeDay && <div style={{ fontSize: 12.5, color: AMBER, marginBottom: 10 }}>Click and drag on the preview to mark the zone for {PLANNING_EXPORT_DAY_LABELS[activeDay]}.</div>}
+
+          {pageImage && (
+            <div ref={canvasWrapRef} onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} style={{
+              position: "relative", width: "100%", maxWidth: 700, border: `1px solid ${LINE}`, borderRadius: 8, overflow: "hidden",
+              cursor: activeDay ? "crosshair" : "default", userSelect: "none", marginBottom: 20,
+            }}>
+              <img src={pageImage} alt="" style={{ width: "100%", display: "block", pointerEvents: "none" }} />
+              {Object.entries(dayZones).map(([day, z]) => {
+                // Reconvertit du repère PDF vers des pourcentages d'affichage, pour un survol
+                // toujours juste quelle que soit la taille réelle à l'écran.
+                const leftPct = (z.x / pageSize.width) * 100;
+                const widthPct = (z.width / pageSize.width) * 100;
+                const topPct = ((pageSize.height - z.y - z.height) / pageSize.height) * 100;
+                const heightPct = (z.height / pageSize.height) * 100;
+                return (
+                  <div key={day} style={{
+                    position: "absolute", left: `${leftPct}%`, top: `${topPct}%`, width: `${widthPct}%`, height: `${heightPct}%`,
+                    border: `2px solid ${TEAL}`, background: "rgba(47,184,166,0.15)", display: "flex", alignItems: "flex-start", justifyContent: "flex-end", padding: 2,
+                  }}>
+                    <button onClick={() => removeZone(day)} style={{ background: RED, border: "none", borderRadius: 4, color: "#fff", cursor: "pointer", fontSize: 9, padding: "1px 5px", pointerEvents: "auto" }}>{PLANNING_EXPORT_DAY_LABELS[day]} ✕</button>
+                  </div>
+                );
+              })}
+              {drawing && (
+                <div style={{ position: "absolute", left: drawing.x, top: drawing.y, width: drawing.w, height: drawing.h, border: `2px dashed ${AMBER}`, background: "rgba(242,169,59,0.15)", pointerEvents: "none" }} />
+              )}
+            </div>
+          )}
+
+          <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12.5, color: "#8B93A1", marginBottom: 16 }}>
+            Text size
+            <input type="number" min={6} max={20} value={fontSize} onChange={e => setFontSize(Math.max(6, Math.min(20, Number(e.target.value) || 9)))}
+              style={{ width: 56, padding: "6px 8px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 6, color: PAPER, fontFamily: "inherit" }} />
+            pt
+          </label>
+        </>
+      )}
+
+      {error && <div style={{ color: RED, fontSize: 12.5, marginBottom: 12 }}>{error}</div>}
+      <div style={{ display: "flex", gap: 10 }}>
+        <button disabled={busy} onClick={handleSave} style={{ ...btnPrimary, width: "auto", padding: "10px 20px" }}>{busy ? "…" : "Save template"}</button>
+        {template && <button onClick={onClear} style={{ ...btnSecondary, color: RED }}>Remove template</button>}
+      </div>
+    </div>
+  );
+}
 
 function PlanningTab({ isCoach, team, roster = [], playerName }) {
   const [events, setEvents] = useState([]);
@@ -9640,6 +10318,23 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [requestedIds, setRequestedIds] = useState(new Set());
   const formRef = useRef();
+  // Export du planning vers un modèle PDF importé — demandé par l'utilisateur.
+  const { template: exportTemplate, loading: templateLoading, save: saveExportTemplate, clear: clearExportTemplate } = usePlanningExportTemplate();
+  const [showTemplateEditor, setShowTemplateEditor] = useState(false);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportError, setExportError] = useState("");
+
+  async function handleExport() {
+    setExportError("");
+    if (!exportTemplate) { setShowTemplateEditor(true); return; }
+    setExportBusy(true);
+    try {
+      await exportPlanningWithTemplate(exportTemplate, events, weekStart);
+    } catch (e) {
+      setExportError("Export failed — try re-importing the template PDF.");
+    }
+    setExportBusy(false);
+  }
 
   useEffect(() => { load(); }, []);
   async function load() {
@@ -9726,6 +10421,29 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
 
   return (
     <div>
+      {isCoach && (
+        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
+          <button onClick={handleExport} disabled={exportBusy || templateLoading} style={{ ...btnPrimary, width: "auto", padding: "9px 18px", display: "flex", alignItems: "center", gap: 8 }}>
+            <Download size={15} /> {exportBusy ? "Exporting…" : "Export"}
+          </button>
+          {exportTemplate && (
+            <button onClick={() => setShowTemplateEditor(s => !s)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontSize: 12.5 }}>
+              {showTemplateEditor ? "Hide template settings" : "Edit export template"}
+            </button>
+          )}
+          {exportError && <span style={{ color: RED, fontSize: 12.5 }}>{exportError}</span>}
+        </div>
+      )}
+      {isCoach && (!exportTemplate || showTemplateEditor) && (
+        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 24 }}>
+          <SectionTitle eyebrow="Planning" title="Export template" />
+          <PlanningExportTemplateEditor
+            template={exportTemplate}
+            onSave={async data => { await saveExportTemplate(data); setShowTemplateEditor(false); }}
+            onClear={async () => { await clearExportTemplate(); setShowTemplateEditor(false); }}
+          />
+        </div>
+      )}
       {isCoach && (
         <div ref={formRef} style={{ background: PANEL, border: `1px solid ${editingId ? AMBER : LINE}`, borderRadius: 12, padding: 18, marginBottom: 24 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
@@ -9985,7 +10703,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
   const advanced = useTeamAdvancedStats(matchFilter);
   const { thresholds: shotChartThresholds } = useShotChartThresholds();
   const { name: reboundContestTabName } = useReboundContestTabName();
-  const TEAM_SUBTAB_ORDER = [["classement", "standings"], ["collectif", "teamPlay"], ["avance", "advanced"], ["reboundContest", "reboundContest"], ["resources", "resources"]];
+  const TEAM_SUBTAB_ORDER = [["classement", "standings"], ["collectif", "teamPlay"], ["avance", "advanced"], ["reboundContest", "reboundContest"], ["shootingGrid", "shootingGrid"], ["resources", "resources"]];
   const defaultTeamSubtab = isCoach ? "classement" : ((TEAM_SUBTAB_ORDER.find(([, key]) => v[key]) || ["classement"])[0]);
   const [subtab, setSubtab] = useState(defaultTeamSubtab);
   const [exportReport, setExportReport] = useState(null);
@@ -10041,7 +10759,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
       </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 20, borderBottom: `1px solid ${LINE}`, paddingBottom: 10, flexWrap: "wrap" }}>
-        {[["classement", "Standings", "standings"], ["collectif", "Team Play", "teamPlay"], ["avance", "Advanced", "advanced"], ["reboundContest", reboundContestTabName, "reboundContest"], ["resources", "Resources", "resources"]]
+        {[["classement", "Standings", "standings"], ["collectif", "Team Play", "teamPlay"], ["avance", "Advanced", "advanced"], ["reboundContest", reboundContestTabName, "reboundContest"], ["shootingGrid", "Shooting Grid", "shootingGrid"], ["resources", "Resources", "resources"]]
           .filter(([, , key]) => isCoach || v[key])
           .concat(isCoach ? [["entrainement", "Team Training"]] : [])
           .map(([id, label]) => (
@@ -10052,7 +10770,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
         ))}
       </div>
 
-      {!isCoach && !v[{ classement: "standings", collectif: "teamPlay", avance: "advanced", reboundContest: "reboundContest", resources: "resources" }[subtab]] && (
+      {!isCoach && !v[{ classement: "standings", collectif: "teamPlay", avance: "advanced", reboundContest: "reboundContest", shootingGrid: "shootingGrid", resources: "resources" }[subtab]] && (
         <div style={{ padding: 30, textAlign: "center", color: "#5C6470", border: `1px dashed ${LINE}`, borderRadius: 12, fontSize: 13.5, marginBottom: 26 }}>
           You don't have the permission to see this.
         </div>
@@ -10095,6 +10813,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
       )}
       {subtab === "resources" && (isCoach || v.resources) && <TeamResourcesTab isCoach={isCoach} team={team} />}
       {subtab === "reboundContest" && (isCoach || v.reboundContest) && <ReboundContestTab roster={roster} isCoach={isCoach} teamLogo={team?.logo} />}
+      {subtab === "shootingGrid" && (isCoach || v.shootingGrid) && <ShootingGridTab roster={roster} isCoach={isCoach} />}
       {subtab === "entrainement" && isCoach && <CollectiveTraining roster={roster} />}
 
       {rows.length > 0 && (
