@@ -10203,8 +10203,8 @@ async function exportPlanningWithTemplate(template, events, weekStart) {
   }
   const standardFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const page = pdfDoc.getPages()[0];
-  const styles = template.fieldStyles || DEFAULT_PLANNING_FIELD_STYLES;
-  const weekStyle = template.weekStyle || DEFAULT_PLANNING_WEEK_STYLE;
+  const styles = { ...DEFAULT_PLANNING_FIELD_STYLES, ...(template.fieldStyles || {}) };
+  const weekStyle = { ...DEFAULT_PLANNING_WEEK_STYLE, ...(template.weekStyle || {}) };
 
   function fontFor(style) { return style?.useCustomFont && customFont ? customFont : standardFont; }
   function drawWrapped(text, zone, style, startY) {
@@ -10299,8 +10299,13 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
   // "zones" regroupe les 7 jours ET la zone "semaine" (clé "week") — un seul système de
   // dessin cliquer-glisser pour les deux, demandé par l'utilisateur pour la zone semaine.
   const [zones, setZones] = useState({ ...(template?.dayZones || {}), ...(template?.weekZone ? { week: template.weekZone } : {}) });
-  const [fieldStyles, setFieldStyles] = useState(template?.fieldStyles || DEFAULT_PLANNING_FIELD_STYLES);
-  const [weekStyle, setWeekStyle] = useState(template?.weekStyle || DEFAULT_PLANNING_WEEK_STYLE);
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur, "Edit export template" ne réagissait plus) :
+  // un modèle déjà enregistré AVANT l'ajout du champ "date" n'a pas cette clé dans ses données
+  // — accéder à "fieldStyles.date.enabled" plantait alors (objet manquant = undefined). On
+  // fusionne systématiquement avec les valeurs par défaut, pour que tout champ ajouté plus
+  // tard reste toujours défini, même sur d'anciens modèles.
+  const [fieldStyles, setFieldStyles] = useState({ ...DEFAULT_PLANNING_FIELD_STYLES, ...(template?.fieldStyles || {}) });
+  const [weekStyle, setWeekStyle] = useState({ ...DEFAULT_PLANNING_WEEK_STYLE, ...(template?.weekStyle || {}) });
   const [fontBase64, setFontBase64] = useState(template?.fontBase64 || null);
   const [fontName, setFontName] = useState(template?.fontName || null);
   const [activeZone, setActiveZone] = useState(null); // zone en cours de dessin, ou null
