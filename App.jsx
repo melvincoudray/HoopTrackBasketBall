@@ -3799,6 +3799,28 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
         </div>
       )}
 
+      {/* Demandé par l'utilisateur : "Today's schedule" juste sous "Resources" et au-dessus de
+          "Four Factors" — déplacé hors de la partie réservée aux joueurs, pour s'afficher pour
+          tout le monde (coach compris), à cet endroit précis. */}
+      {(visibility || DEFAULT_VISIBILITY).tabs.planning && (
+        <div style={{ marginBottom: 26 }}>
+          <HomeSectionLink eyebrow={new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })} title="Today's schedule" onClick={goToPlanning} />
+          {todayEvents.length === 0 ? <EmptyState text="Nothing scheduled today." /> : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+              {todayEvents.map(ev => (
+                <div key={ev.id} style={{ display: "flex", alignItems: "center", gap: 10, background: PANEL, border: `1px solid ${LINE}`, borderLeft: `4px solid ${ev.color}`, borderRadius: 8, padding: "8px 12px" }}>
+                  <div style={{ fontSize: 12, color: "#8B93A1", width: 90, flexShrink: 0 }}>{ev.startTime}–{ev.endTime}</div>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div style={{ fontSize: 13.5, fontWeight: 600 }}>{ev.title} <span style={{ color: "#5C6470", fontWeight: 400 }}>· {ev.type}</span></div>
+                    {ev.location && <div style={{ fontSize: 11.5, color: "#5C6470" }}>{ev.location}</div>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {playerName && (() => {
         const pd = (visibility || DEFAULT_VISIBILITY).playerDetail || DEFAULT_VISIBILITY.playerDetail;
         return (
@@ -3833,25 +3855,6 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
                 </div>
                 {wStatus && <div style={{ fontSize: 12, color: TEAL }}>{wStatus}</div>}
               </div>
-            </>
-          )}
-
-          {(visibility || DEFAULT_VISIBILITY).tabs.planning && (
-            <>
-              <HomeSectionLink eyebrow={new Date().toLocaleDateString("en-US", { weekday: "long", month: "short", day: "numeric" })} title="Today's schedule" onClick={goToPlanning} />
-              {todayEvents.length === 0 ? <EmptyState text="Nothing scheduled today." /> : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 26 }}>
-                  {todayEvents.map(ev => (
-                    <div key={ev.id} style={{ display: "flex", alignItems: "center", gap: 10, background: PANEL, border: `1px solid ${LINE}`, borderLeft: `4px solid ${ev.color}`, borderRadius: 8, padding: "8px 12px" }}>
-                      <div style={{ fontSize: 12, color: "#8B93A1", width: 90, flexShrink: 0 }}>{ev.startTime}–{ev.endTime}</div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13.5, fontWeight: 600 }}>{ev.title} <span style={{ color: "#5C6470", fontWeight: 400 }}>· {ev.type}</span></div>
-                        {ev.location && <div style={{ fontSize: 11.5, color: "#5C6470" }}>{ev.location}</div>}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
             </>
           )}
 
@@ -10143,14 +10146,12 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
       const buf = await file.arrayBuffer();
       const bytes = new Uint8Array(buf);
       const pdfjsLib = await import("pdfjs-dist");
-      // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : l'aperçu Claude entier plantait avec
-      // "Cannot use 'import.meta' outside a module") : "import.meta.url" n'est valable que dans
-      // un vrai module ES — l'aperçu Claude exécute ce fichier autrement, et rien qu'AVOIR cette
-      // instruction quelque part dans le fichier suffisait à casser TOUT l'aperçu, même si cette
-      // ligne précise n'est jamais appelée (erreur d'analyse, pas d'exécution). Remplacé par une
-      // URL de CDN figée sur la même version que dans package.json — fonctionne à l'identique
-      // dans l'aperçu Claude ET sur le site déployé, sans dépendre du bundleur.
-      pdfjsLib.GlobalWorkerOptions.workerSrc = "https://unpkg.com/pdfjs-dist@4.0.379/build/pdf.worker.min.mjs";
+      // BUG RÉEL CORRIGÉ (signalé par l'utilisateur, message d'erreur précis : "API version
+      // 4.10.38 does not match the Worker version 4.0.379") : la version installée sur
+      // Netlify (via le "^" dans package.json) peut différer de celle figée en dur ici — on
+      // utilise maintenant la version RÉELLEMENT chargée (pdfjsLib.version), qui correspond
+      // toujours exactement, quelle que soit la version que npm installe.
+      pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
       const loadingTask = pdfjsLib.getDocument({ data: bytes });
       const pdf = await loadingTask.promise;
@@ -10422,29 +10423,6 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
   return (
     <div>
       {isCoach && (
-        <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
-          <button onClick={handleExport} disabled={exportBusy || templateLoading} style={{ ...btnPrimary, width: "auto", padding: "9px 18px", display: "flex", alignItems: "center", gap: 8 }}>
-            <Download size={15} /> {exportBusy ? "Exporting…" : "Export"}
-          </button>
-          {exportTemplate && (
-            <button onClick={() => setShowTemplateEditor(s => !s)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontSize: 12.5 }}>
-              {showTemplateEditor ? "Hide template settings" : "Edit export template"}
-            </button>
-          )}
-          {exportError && <span style={{ color: RED, fontSize: 12.5 }}>{exportError}</span>}
-        </div>
-      )}
-      {isCoach && (!exportTemplate || showTemplateEditor) && (
-        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 24 }}>
-          <SectionTitle eyebrow="Planning" title="Export template" />
-          <PlanningExportTemplateEditor
-            template={exportTemplate}
-            onSave={async data => { await saveExportTemplate(data); setShowTemplateEditor(false); }}
-            onClear={async () => { await clearExportTemplate(); setShowTemplateEditor(false); }}
-          />
-        </div>
-      )}
-      {isCoach && (
         <div ref={formRef} style={{ background: PANEL, border: `1px solid ${editingId ? AMBER : LINE}`, borderRadius: 12, padding: 18, marginBottom: 24 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 14 }}>
             <div style={{ fontSize: 14, fontWeight: 700 }}>{editingId ? "Edit event" : "New event"}</div>
@@ -10578,6 +10556,35 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
           );
         })}
       </div>
+
+      {/* Demandé par l'utilisateur : "Export" et "Save template" en bas de la page, pas en
+          haut — déplacé depuis le tout début du composant. */}
+      {isCoach && (
+        <>
+          <div style={{ height: 30 }} />
+          <div style={{ display: "flex", alignItems: "center", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
+            <button onClick={handleExport} disabled={exportBusy || templateLoading} style={{ ...btnPrimary, width: "auto", padding: "9px 18px", display: "flex", alignItems: "center", gap: 8 }}>
+              <Download size={15} /> {exportBusy ? "Exporting…" : "Export"}
+            </button>
+            {exportTemplate && (
+              <button onClick={() => setShowTemplateEditor(s => !s)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontSize: 12.5 }}>
+                {showTemplateEditor ? "Hide template settings" : "Edit export template"}
+              </button>
+            )}
+            {exportError && <span style={{ color: RED, fontSize: 12.5 }}>{exportError}</span>}
+          </div>
+          {(!exportTemplate || showTemplateEditor) && (
+            <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 24 }}>
+              <SectionTitle eyebrow="Planning" title="Export template" />
+              <PlanningExportTemplateEditor
+                template={exportTemplate}
+                onSave={async data => { await saveExportTemplate(data); setShowTemplateEditor(false); }}
+                onClear={async () => { await clearExportTemplate(); setShowTemplateEditor(false); }}
+              />
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }
