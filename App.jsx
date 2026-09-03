@@ -10101,8 +10101,8 @@ const PLANNING_EXPORT_DAYS = ["monday", "tuesday", "wednesday", "thursday", "fri
 const PLANNING_EXPORT_DAY_LABELS = { monday: "Monday", tuesday: "Tuesday", wednesday: "Wednesday", thursday: "Thursday", friday: "Friday", saturday: "Saturday", sunday: "Sunday" };
 // "week" est une zone à part — pas un jour précis — pour afficher la semaine dans son
 // ensemble (ex. "Aug 31 – Sep 6, 2026"), demandé par l'utilisateur.
-const PLANNING_EXPORT_ZONES = [...PLANNING_EXPORT_DAYS, "week"];
-const PLANNING_EXPORT_ZONE_LABELS = { ...PLANNING_EXPORT_DAY_LABELS, week: "Week label" };
+const PLANNING_EXPORT_ZONES = [...PLANNING_EXPORT_DAYS, "week", "notes"];
+const PLANNING_EXPORT_ZONE_LABELS = { ...PLANNING_EXPORT_DAY_LABELS, week: "Week label", notes: "Notes / comment" };
 // "date" = l'en-tête de chaque zone jour (ex. "Monday, September 1"), en plus des événements
 // eux-mêmes — demandé par l'utilisateur, séparé du reste car il ne s'affiche qu'une fois par
 // zone, pas par événement.
@@ -10118,6 +10118,9 @@ const DEFAULT_PLANNING_FIELD_STYLES = {
 // Style de la zone "semaine" — séparé des champs par jour puisqu'elle ne dépend d'aucun
 // événement précis.
 const DEFAULT_PLANNING_WEEK_STYLE = { fontSize: 11, color: "#1a1a1a", useCustomFont: false, align: "left" };
+// Style du commentaire/note libre saisi à chaque export — demandé par l'utilisateur, avec un
+// emplacement décidé une fois pour toutes dans "Edit export template".
+const DEFAULT_PLANNING_NOTES_STYLE = { fontSize: 10, color: "#1a1a1a", useCustomFont: false, align: "left" };
 
 // Conversions binaire <-> base64 — le stockage passe toujours par du JSON (JSON.stringify),
 // qui ne sait pas conserver un Uint8Array tel quel (il le transforme en objet {"0":37,"1":80,
@@ -10191,7 +10194,7 @@ function drawAlignedLine(page, line, { x, y, width, size, font, color, align, is
 // aux coordonnées définies, en respectant le style propre à chaque partie de texte (date,
 // titre, horaire, lieu — police, taille, couleur, alignement, activé ou non) et la police
 // personnalisée si importée, puis déclenche le téléchargement.
-async function exportPlanningWithTemplate(template, events, weekStart) {
+async function exportPlanningWithTemplate(template, events, weekStart, notesText = "") {
   const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
   const pdfDoc = await PDFDocument.load(base64ToBytes(template.pdfBase64));
 
@@ -10205,6 +10208,7 @@ async function exportPlanningWithTemplate(template, events, weekStart) {
   const page = pdfDoc.getPages()[0];
   const styles = { ...DEFAULT_PLANNING_FIELD_STYLES, ...(template.fieldStyles || {}) };
   const weekStyle = { ...DEFAULT_PLANNING_WEEK_STYLE, ...(template.weekStyle || {}) };
+  const notesStyle = { ...DEFAULT_PLANNING_NOTES_STYLE, ...(template.notesStyle || {}) };
 
   function fontFor(style) { return style?.useCustomFont && customFont ? customFont : standardFont; }
   function drawWrapped(text, zone, style, startY) {
@@ -10217,6 +10221,18 @@ async function exportPlanningWithTemplate(template, events, weekStart) {
       cursorY -= style.fontSize + 2;
     });
     return cursorY;
+  }
+
+  // Commentaire/note libre saisi à l'export — demandé par l'utilisateur, placé dans la zone
+  // choisie une fois pour toutes dans "Edit export template". Gère les retours à la ligne
+  // tapés par le coach (une ligne = un paragraphe, chacun retourné à la ligne si trop long).
+  if (template.notesZone && notesText && notesText.trim()) {
+    const zone = template.notesZone;
+    let cursorY = zone.y + zone.height - notesStyle.fontSize;
+    for (const paragraph of notesText.split("\n")) {
+      if (cursorY < zone.y) break;
+      cursorY = drawWrapped(paragraph, zone, notesStyle, cursorY);
+    }
   }
 
   // Zone "semaine" — demandé par l'utilisateur : affiche la semaine dans son ensemble (ex.
@@ -10298,7 +10314,7 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
   const [pageSize, setPageSize] = useState(template ? { width: 0, height: 0 } : null); // en points PDF
   // "zones" regroupe les 7 jours ET la zone "semaine" (clé "week") — un seul système de
   // dessin cliquer-glisser pour les deux, demandé par l'utilisateur pour la zone semaine.
-  const [zones, setZones] = useState({ ...(template?.dayZones || {}), ...(template?.weekZone ? { week: template.weekZone } : {}) });
+  const [zones, setZones] = useState({ ...(template?.dayZones || {}), ...(template?.weekZone ? { week: template.weekZone } : {}), ...(template?.notesZone ? { notes: template.notesZone } : {}) });
   // BUG RÉEL CORRIGÉ (signalé par l'utilisateur, "Edit export template" ne réagissait plus) :
   // un modèle déjà enregistré AVANT l'ajout du champ "date" n'a pas cette clé dans ses données
   // — accéder à "fieldStyles.date.enabled" plantait alors (objet manquant = undefined). On
@@ -10306,6 +10322,7 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
   // tard reste toujours défini, même sur d'anciens modèles.
   const [fieldStyles, setFieldStyles] = useState({ ...DEFAULT_PLANNING_FIELD_STYLES, ...(template?.fieldStyles || {}) });
   const [weekStyle, setWeekStyle] = useState({ ...DEFAULT_PLANNING_WEEK_STYLE, ...(template?.weekStyle || {}) });
+  const [notesStyle, setNotesStyle] = useState({ ...DEFAULT_PLANNING_NOTES_STYLE, ...(template?.notesStyle || {}) });
   const [fontBase64, setFontBase64] = useState(template?.fontBase64 || null);
   const [fontName, setFontName] = useState(template?.fontName || null);
   const [activeZone, setActiveZone] = useState(null); // zone en cours de dessin, ou null
@@ -10382,6 +10399,7 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
 
   function updateFieldStyle(field, changes) { setFieldStyles(s => ({ ...s, [field]: { ...s[field], ...changes } })); }
   function updateWeekStyle(changes) { setWeekStyle(s => ({ ...s, ...changes })); }
+  function updateNotesStyle(changes) { setNotesStyle(s => ({ ...s, ...changes })); }
 
   function startDrawing(zoneKey) { setActiveZone(zoneKey); }
 
@@ -10420,12 +10438,13 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
   function removeZone(zoneKey) { setZones(z => { const n = { ...z }; delete n[zoneKey]; return n; }); }
 
   async function handleSave() {
-    const dayZones = { ...zones }; delete dayZones.week;
+    const dayZones = { ...zones }; delete dayZones.week; delete dayZones.notes;
     const weekZone = zones.week || null;
+    const notesZone = zones.notes || null;
     console.log("[planning export] handleSave — pdfBase64 set:", !!pdfBase64, "| zones count:", Object.keys(zones).length);
     if (!pdfBase64) { setError("Import a PDF first (use the button above, or \"Re-import PDF\" if you already had one)."); return; }
     if (Object.keys(dayZones).length === 0) { setError("Draw at least one day's zone on the preview."); return; }
-    await onSave({ pdfBase64, dayZones, weekZone, fieldStyles, weekStyle, fontBase64, fontName });
+    await onSave({ pdfBase64, dayZones, weekZone, notesZone, fieldStyles, weekStyle, notesStyle, fontBase64, fontName });
   }
 
   return (
@@ -10472,11 +10491,11 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
                 const widthPct = (z.width / pageSize.width) * 100;
                 const topPct = ((pageSize.height - z.y - z.height) / pageSize.height) * 100;
                 const heightPct = (z.height / pageSize.height) * 100;
-                const isWeek = zoneKey === "week";
+                const zoneColor = zoneKey === "week" ? AMBER : zoneKey === "notes" ? "#C97BE0" : TEAL;
                 return (
                   <div key={zoneKey} style={{
                     position: "absolute", left: `${leftPct}%`, top: `${topPct}%`, width: `${widthPct}%`, height: `${heightPct}%`,
-                    border: `2px solid ${isWeek ? AMBER : TEAL}`, background: isWeek ? "rgba(242,169,59,0.15)" : "rgba(47,184,166,0.15)", display: "flex", alignItems: "flex-start", justifyContent: "flex-end", padding: 2,
+                    border: `2px solid ${zoneColor}`, background: `${zoneColor}26`, display: "flex", alignItems: "flex-start", justifyContent: "flex-end", padding: 2,
                   }}>
                     <button onClick={() => removeZone(zoneKey)} style={{ background: RED, border: "none", borderRadius: 4, color: "#fff", cursor: "pointer", fontSize: 9, padding: "1px 5px", pointerEvents: "auto" }}>{PLANNING_EXPORT_ZONE_LABELS[zoneKey]} ✕</button>
                   </div>
@@ -10575,6 +10594,36 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
               </div>
             </div>
           )}
+
+          {/* Style du commentaire/note — demandé par l'utilisateur, saisi à chaque export,
+              affiché ici dans l'emplacement choisi. */}
+          {zones.notes && (
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 11, textTransform: "uppercase", color: "#5C6470", marginBottom: 8 }}>Notes style</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#8B93A1" }}>
+                  Size
+                  <input type="number" min={6} max={32} value={notesStyle.fontSize} onChange={e => updateNotesStyle({ fontSize: Math.max(6, Math.min(32, Number(e.target.value) || 10)) })}
+                    style={{ width: 48, padding: "5px 6px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 6, color: PAPER, fontFamily: "inherit" }} />
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#8B93A1" }}>
+                  Color
+                  <input type="color" value={notesStyle.color} onChange={e => updateNotesStyle({ color: e.target.value })} style={{ width: 30, height: 26, padding: 0, border: "none", borderRadius: 5, background: "none", cursor: "pointer" }} />
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#8B93A1" }}>
+                  Align
+                  <select value={notesStyle.align || "left"} onChange={e => updateNotesStyle({ align: e.target.value })}
+                    style={{ padding: "5px 6px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 6, color: PAPER, fontFamily: "inherit", fontSize: 12 }}>
+                    {PLANNING_TEXT_ALIGNS.map(a => <option key={a} value={a}>{a[0].toUpperCase() + a.slice(1)}</option>)}
+                  </select>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: fontName ? "#8B93A1" : "#3A414C", cursor: fontName ? "pointer" : "default" }}>
+                  <input type="checkbox" checked={notesStyle.useCustomFont} disabled={!fontName} onChange={e => updateNotesStyle({ useCustomFont: e.target.checked })} />
+                  Use "{fontName || "custom font"}"
+                </label>
+              </div>
+            </div>
+          )}
         </>
       )}
 
@@ -10615,8 +10664,9 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
   const [exportError, setExportError] = useState("");
   // Confirmation avant export — demandé par l'utilisateur : les événements "toute l'équipe"
   // partent automatiquement, mais les événements concernant un ou quelques joueurs précis
-  // doivent être confirmés un par un (case à cocher), pas insérés d'office.
-  const [exportConfirm, setExportConfirm] = useState(null); // { teamEvents, individualEvents, selected: Set }
+  // doivent être confirmés un par un (case à cocher), pas insérés d'office. Le même écran sert
+  // aussi à saisir le commentaire/note libre, si une zone "Notes" a été configurée.
+  const [exportConfirm, setExportConfirm] = useState(null); // { teamEvents, individualEvents, selected: Set, notes: string }
 
   function isTeamWideEvent(ev) { return !ev.playerIds || ev.playerIds.length === 0; }
 
@@ -10625,17 +10675,17 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
     if (!exportTemplate) { setShowTemplateEditor(true); return; }
     const teamEvents = events.filter(isTeamWideEvent);
     const individualEvents = events.filter(ev => !isTeamWideEvent(ev));
-    if (individualEvents.length === 0) {
-      await runExport(teamEvents);
+    if (individualEvents.length === 0 && !exportTemplate.notesZone) {
+      await runExport(teamEvents, "");
       return;
     }
-    setExportConfirm({ teamEvents, individualEvents, selected: new Set() });
+    setExportConfirm({ teamEvents, individualEvents, selected: new Set(), notes: "" });
   }
 
-  async function runExport(eventsToExport) {
+  async function runExport(eventsToExport, notesText) {
     setExportBusy(true);
     try {
-      await exportPlanningWithTemplate(exportTemplate, eventsToExport, weekStart);
+      await exportPlanningWithTemplate(exportTemplate, eventsToExport, weekStart, notesText);
     } catch (e) {
       setExportError("Export failed — try re-importing the template PDF.");
     }
@@ -10896,36 +10946,51 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
           {exportConfirm && (
             <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
               <div style={{ background: INK, border: `1px solid ${LINE}`, borderRadius: 14, padding: 22, maxWidth: 560, width: "100%", maxHeight: "80vh", overflow: "auto" }}>
-                <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 6 }}>Include individual events?</div>
-                <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 16 }}>
-                  {exportConfirm.teamEvents.length} whole-team event{exportConfirm.teamEvents.length !== 1 ? "s" : ""} will be exported automatically.
-                  Check any of the events below (concerning specific players) you also want to include.
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
-                  {exportConfirm.individualEvents.map(ev => {
-                    const names = (ev.playerIds || []).map(id => roster.find(p => p.id === id)?.first).filter(Boolean).join(", ");
-                    const checked = exportConfirm.selected.has(ev.id);
-                    return (
-                      <label key={ev.id} style={{ display: "flex", alignItems: "center", gap: 10, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px", cursor: "pointer" }}>
-                        <input type="checkbox" checked={checked} onChange={() => setExportConfirm(c => {
-                          const next = new Set(c.selected);
-                          if (next.has(ev.id)) next.delete(ev.id); else next.add(ev.id);
-                          return { ...c, selected: next };
-                        })} />
-                        <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 13.5, fontWeight: 600 }}>{ev.title} <span style={{ color: "#5C6470", fontWeight: 400 }}>· {ev.date} · {ev.startTime}</span></div>
-                          <div style={{ fontSize: 11.5, color: "#5C6470" }}>{names || "Individual"}</div>
-                        </div>
-                      </label>
-                    );
-                  })}
-                </div>
+                <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 6 }}>Before exporting</div>
+                {exportConfirm.individualEvents.length > 0 && (
+                  <>
+                    <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 16 }}>
+                      {exportConfirm.teamEvents.length} whole-team event{exportConfirm.teamEvents.length !== 1 ? "s" : ""} will be exported automatically.
+                      Check any of the events below (concerning specific players) you also want to include.
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+                      {exportConfirm.individualEvents.map(ev => {
+                        const names = (ev.playerIds || []).map(id => roster.find(p => p.id === id)?.first).filter(Boolean).join(", ");
+                        const checked = exportConfirm.selected.has(ev.id);
+                        return (
+                          <label key={ev.id} style={{ display: "flex", alignItems: "center", gap: 10, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px", cursor: "pointer" }}>
+                            <input type="checkbox" checked={checked} onChange={() => setExportConfirm(c => {
+                              const next = new Set(c.selected);
+                              if (next.has(ev.id)) next.delete(ev.id); else next.add(ev.id);
+                              return { ...c, selected: next };
+                            })} />
+                            <div style={{ flex: 1, minWidth: 0 }}>
+                              <div style={{ fontSize: 13.5, fontWeight: 600 }}>{ev.title} <span style={{ color: "#5C6470", fontWeight: 400 }}>· {ev.date} · {ev.startTime}</span></div>
+                              <div style={{ fontSize: 11.5, color: "#5C6470" }}>{names || "Individual"}</div>
+                            </div>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+                {/* Commentaire/note libre — demandé par l'utilisateur, uniquement si une zone
+                    "Notes" a été configurée dans le modèle. */}
+                {exportTemplate?.notesZone && (
+                  <div style={{ marginBottom: 20 }}>
+                    <label style={labelStyle}>Notes / comment (optional)</label>
+                    <textarea value={exportConfirm.notes} onChange={e => setExportConfirm(c => ({ ...c, notes: e.target.value }))}
+                      rows={3} placeholder="Anything you'd like to add to this week's export…"
+                      style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "100%", resize: "vertical", boxSizing: "border-box" }} />
+                  </div>
+                )}
                 <div style={{ display: "flex", gap: 10 }}>
                   <button onClick={async () => {
                     const chosen = exportConfirm.individualEvents.filter(ev => exportConfirm.selected.has(ev.id));
                     const toExport = [...exportConfirm.teamEvents, ...chosen];
+                    const notes = exportConfirm.notes;
                     setExportConfirm(null);
-                    await runExport(toExport);
+                    await runExport(toExport, notes);
                   }} style={{ ...btnPrimary, width: "auto", padding: "10px 20px" }}>
                     {exportBusy ? "…" : "Export"}
                   </button>
