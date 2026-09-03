@@ -4048,7 +4048,7 @@ function MatchTypeSelect({ value, onChange }) {
 // permettre des pourcentages filtrés librement à l'affichage (demandé par l'utilisateur).
 // ============================================================================
 
-function ShootingGridSituationEditor({ situation, onChange, onRemove }) {
+function ShootingGridSituationEditor({ situation, roster, onChange, onRemove }) {
   const imgRef = useRef();
   async function handleImage(e) {
     const file = e.target.files[0];
@@ -4059,6 +4059,16 @@ function ShootingGridSituationEditor({ situation, onChange, onRemove }) {
   function toggleSide(side) {
     const sides = situation.sides.includes(side) ? situation.sides.filter(s => s !== side) : [...situation.sides, side];
     onChange({ ...situation, sides: sides.length ? sides : situation.sides }); // au moins un côté
+  }
+  // Joueurs concernés par cette situation — demandé par l'utilisateur : une situation n'est
+  // pas forcément faite par tout le monde. Tableau vide = tout le monde (comportement par
+  // défaut, pour ne rien changer aux grilles déjà créées avant cet ajout).
+  const playerIds = situation.playerIds || [];
+  const allSelected = playerIds.length === 0;
+  function togglePlayer(id) {
+    const current = allSelected ? roster.map(p => p.id) : playerIds;
+    const next = current.includes(id) ? current.filter(x => x !== id) : [...current, id];
+    onChange({ ...situation, playerIds: next.length === roster.length ? [] : next });
   }
   return (
     <div style={{ display: "flex", gap: 16, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 16, marginBottom: 12 }}>
@@ -4087,20 +4097,44 @@ function ShootingGridSituationEditor({ situation, onChange, onRemove }) {
             <input type="checkbox" checked={situation.sides.includes("right")} onChange={() => toggleSide("right")} /> Right
           </label>
         </div>
+        {roster && roster.length > 0 && (
+          <div>
+            <div style={{ fontSize: 11.5, color: "#5C6470", marginBottom: 6 }}>
+              Players for this situation
+              <button onClick={() => onChange({ ...situation, playerIds: [] })} style={{ marginLeft: 8, background: "none", border: "none", color: allSelected ? AMBER : TEAL, cursor: "pointer", fontSize: 11 }}>
+                {allSelected ? "All players" : "Select all"}
+              </button>
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {roster.map(p => {
+                const checked = allSelected || playerIds.includes(p.id);
+                return (
+                  <button key={p.id} onClick={() => togglePlayer(p.id)} style={{
+                    padding: "4px 10px", borderRadius: 6, fontSize: 11.5, cursor: "pointer", fontFamily: "inherit",
+                    background: checked ? "rgba(47,184,166,0.15)" : PANEL2, color: checked ? TEAL : "#5C6470",
+                    border: `1px solid ${checked ? TEAL : LINE}`,
+                  }}>
+                    {p.name}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
       </div>
       <button onClick={onRemove} style={{ background: "none", border: "none", color: RED, cursor: "pointer", flexShrink: 0, display: "flex", height: "fit-content" }}><Trash2 size={16} /></button>
     </div>
   );
 }
 
-function ShootingGridEditor({ initialGrid, onSave, onCancel }) {
+function ShootingGridEditor({ initialGrid, onSave, onCancel, roster }) {
   const [label, setLabel] = useState(initialGrid?.label || "");
   const [date, setDate] = useState(initialGrid?.date || todayLocal());
   const [situations, setSituations] = useState(initialGrid?.situations || []);
   const [error, setError] = useState("");
 
   function addSituation() {
-    setSituations(s => [...s, { id: uid(), name: "", image: null, shotsPerSeries: 6, seriesCount: 2, sides: ["left", "right"] }]);
+    setSituations(s => [...s, { id: uid(), name: "", image: null, shotsPerSeries: 6, seriesCount: 2, sides: ["left", "right"], playerIds: [] }]);
   }
   function updateSituation(id, next) { setSituations(s => s.map(x => x.id === id ? next : x)); }
   function removeSituation(id) { setSituations(s => s.filter(x => x.id !== id)); }
@@ -4113,6 +4147,9 @@ function ShootingGridEditor({ initialGrid, onSave, onCancel }) {
     onSave({ label: label.trim(), date, situations });
   }
 
+  // Total de tirs "maximal" (pour un joueur concerné par TOUTES les situations) — donné à
+  // titre indicatif ; chaque joueur peut en avoir moins selon les situations qui lui sont
+  // assignées.
   const totalShots = situations.reduce((sum, s) => sum + s.sides.length * s.seriesCount * s.shotsPerSeries, 0);
 
   return (
@@ -4124,7 +4161,7 @@ function ShootingGridEditor({ initialGrid, onSave, onCancel }) {
       </div>
 
       {situations.map(sit => (
-        <ShootingGridSituationEditor key={sit.id} situation={sit} onChange={next => updateSituation(sit.id, next)} onRemove={() => removeSituation(sit.id)} />
+        <ShootingGridSituationEditor key={sit.id} situation={sit} roster={roster} onChange={next => updateSituation(sit.id, next)} onRemove={() => removeSituation(sit.id)} />
       ))}
 
       <button onClick={addSituation} style={{ padding: "9px 16px", background: "none", border: `1px solid ${LINE}`, borderRadius: 8, color: "#8B93A1", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5, marginBottom: 16 }}>+ Add situation</button>
@@ -4180,7 +4217,17 @@ function ShootingGridScoreEntry({ grid, roster, gridScores, onSavePlayer }) {
         ))}
       </div>
 
-      {player && grid.situations.map(sit => (
+      {/* Demandé par l'utilisateur : une situation n'est pas forcément faite par tout le
+          monde — on ne montre ici que les situations assignées au joueur sélectionné (ou
+          toutes, si aucune sélection précise n'a été faite pour cette situation). */}
+      {player && (() => {
+        const applicable = grid.situations.filter(sit => !sit.playerIds || sit.playerIds.length === 0 || sit.playerIds.includes(player.id));
+        return (
+          <>
+            {applicable.length < grid.situations.length && (
+              <div style={{ fontSize: 12, color: "#5C6470", marginBottom: 12 }}>{applicable.length} of {grid.situations.length} situations apply to {player.name}.</div>
+            )}
+            {applicable.map(sit => (
         <div key={sit.id} style={{ display: "flex", gap: 16, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 16, marginBottom: 12 }}>
           {sit.image && <img src={sit.image} alt="" style={{ width: 64, height: 64, borderRadius: 8, objectFit: "cover", flexShrink: 0 }} />}
           <div style={{ flex: 1 }}>
@@ -4204,6 +4251,9 @@ function ShootingGridScoreEntry({ grid, roster, gridScores, onSavePlayer }) {
           </div>
         </div>
       ))}
+          </>
+        );
+      })()}
 
       {player && (
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -4303,7 +4353,7 @@ function ShootingGridTab({ roster, isCoach }) {
     return (
       <div>
         <SectionTitle eyebrow="Shooting Grid" title="New grid" />
-        <ShootingGridEditor onSave={async data => { const id = await addGrid(data); setCreating(false); setSelectedGridId(id); setMode("scores"); }} onCancel={() => setCreating(false)} />
+        <ShootingGridEditor roster={roster} onSave={async data => { const id = await addGrid(data); setCreating(false); setSelectedGridId(id); setMode("scores"); }} onCancel={() => setCreating(false)} />
       </div>
     );
   }
@@ -4360,7 +4410,7 @@ function ShootingGridTab({ roster, isCoach }) {
       </div>
 
       {mode === "edit" && isCoach && (
-        <ShootingGridEditor initialGrid={grid} onSave={async data => { await editGrid(grid.id, data); setMode("results"); }} onCancel={() => setMode("results")} />
+        <ShootingGridEditor initialGrid={grid} roster={roster} onSave={async data => { await editGrid(grid.id, data); setMode("results"); }} onCancel={() => setMode("results")} />
       )}
       {mode === "scores" && isCoach && (
         <ShootingGridScoreEntry grid={grid} roster={roster} gridScores={gridScores} onSavePlayer={(name, sc) => savePlayerScores(grid.id, name, sc)} />
@@ -10231,7 +10281,12 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
       // taille d'affichage.
       const unscaled = page.getViewport({ scale: 1 });
       setPageSize({ width: unscaled.width, height: unscaled.height });
-      setDayZones({});
+      // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : zones toujours perdues après un
+      // réimport, source probable de confusion) : le PDF réimporté vidait systématiquement
+      // toutes les zones déjà dessinées, même pour re-télécharger le MÊME fichier — le coach
+      // devait tout redessiner à chaque fois. On les garde maintenant telles quelles ; le coach
+      // peut toujours en effacer une manuellement (✕) s'il en a besoin.
+      console.log("[planning export] PDF imported successfully, pdfBase64 set:", true, "length:", bytes.length);
     } catch (err) {
       console.error("[planning export template] PDF load failed:", err);
       setError("Unable to read this PDF (" + (err?.message || "unknown error") + "). Make sure it's a valid, uncorrupted file.");
@@ -10295,7 +10350,8 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
   function removeZone(day) { setDayZones(z => { const n = { ...z }; delete n[day]; return n; }); }
 
   async function handleSave() {
-    if (!pdfBase64) { setError("Import a PDF first."); return; }
+    console.log("[planning export] handleSave — pdfBase64 set:", !!pdfBase64, "| zones count:", Object.keys(dayZones).length);
+    if (!pdfBase64) { setError("Import a PDF first (use the button above, or \"Re-import PDF\" if you already had one)."); return; }
     if (Object.keys(dayZones).length === 0) { setError("Draw at least one day's zone on the preview."); return; }
     await onSave({ pdfBase64, dayZones, fieldStyles, fontBase64, fontName });
   }
@@ -10413,7 +10469,7 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
 
       {error && <div style={{ color: RED, fontSize: 12.5, marginBottom: 12 }}>{error}</div>}
       <div style={{ display: "flex", gap: 10 }}>
-        <button disabled={busy} onClick={handleSave} style={{ ...btnPrimary, width: "auto", padding: "10px 20px" }}>{busy ? "…" : "Save template"}</button>
+        <button disabled={busy || !pdfBase64} onClick={handleSave} style={{ ...btnPrimary, width: "auto", padding: "10px 20px", opacity: (!pdfBase64 && !busy) ? 0.5 : 1, cursor: (!pdfBase64 && !busy) ? "default" : "pointer" }}>{busy ? "…" : "Save template"}</button>
         {template && <button onClick={onClear} style={{ ...btnSecondary, color: RED }}>Remove template</button>}
       </div>
     </div>
