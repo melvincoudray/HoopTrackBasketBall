@@ -10049,6 +10049,35 @@ const PLANNING_COLORS = ["#F2A93B", "#2FBF9C", "#E4231C", "#4A90D9", "#B15FE0", 
 
 const PLANNING_EXPORT_DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
 const PLANNING_EXPORT_DAY_LABELS = { monday: "Monday", tuesday: "Tuesday", wednesday: "Wednesday", thursday: "Thursday", friday: "Friday", saturday: "Saturday", sunday: "Sunday" };
+const PLANNING_EXPORT_FIELDS = ["title", "time", "location"];
+const PLANNING_EXPORT_FIELD_LABELS = { title: "Event title", time: "Time", location: "Location" };
+const DEFAULT_PLANNING_FIELD_STYLES = {
+  title: { enabled: true, fontSize: 9, color: "#1a1a1a", useCustomFont: false },
+  time: { enabled: true, fontSize: 9, color: "#1a1a1a", useCustomFont: false },
+  location: { enabled: false, fontSize: 8, color: "#5c5c5c", useCustomFont: false },
+};
+
+// Conversions binaire <-> base64 — le stockage passe toujours par du JSON (JSON.stringify),
+// qui ne sait pas conserver un Uint8Array tel quel (il le transforme en objet {"0":37,"1":80,
+// ...}, perdant sa nature binaire) — d'où l'échec systématique de l'export signalé par
+// l'utilisateur. Toute donnée binaire (PDF, police) transite donc par une chaîne base64.
+function bytesToBase64(bytes) {
+  let binary = "";
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  return btoa(binary);
+}
+function base64ToBytes(base64) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
+}
+function hexToRgbTriplet(hex) {
+  const h = hex.replace("#", "");
+  const r = parseInt(h.substring(0, 2), 16) / 255, g = parseInt(h.substring(2, 4), 16) / 255, b = parseInt(h.substring(4, 6), 16) / 255;
+  return [r, g, b];
+}
 
 // Découpe un texte en lignes qui tiennent dans une largeur donnée (en points PDF), pour une
 // police et une taille données — pdf-lib ne fait pas de retour à la ligne automatique.
@@ -10071,13 +10100,24 @@ function wrapPdfText(text, font, fontSize, maxWidth) {
 
 // Génère le PDF final à partir du modèle importé (déjà configuré avec l'emplacement de chaque
 // jour) et des événements de la semaine sélectionnée — insère le contenu de chaque jour aux
-// coordonnées définies, puis déclenche le téléchargement.
+// coordonnées définies, en respectant le style propre à chaque partie de texte (titre, horaire,
+// lieu — police, taille, couleur, activé ou non) et la police personnalisée si importée, puis
+// déclenche le téléchargement.
 async function exportPlanningWithTemplate(template, events, weekStart) {
   const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
-  const pdfDoc = await PDFDocument.load(template.pdfBytes);
+  const pdfDoc = await PDFDocument.load(base64ToBytes(template.pdfBase64));
+
+  let customFont = null;
+  if (template.fontBase64) {
+    const fontkit = (await import("@pdf-lib/fontkit")).default;
+    pdfDoc.registerFontkit(fontkit);
+    customFont = await pdfDoc.embedFont(base64ToBytes(template.fontBase64));
+  }
+  const standardFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const page = pdfDoc.getPages()[0];
-  const font = await pdfDoc.embedFont(StandardFonts.Helvetica);
-  const fontSize = template.fontSize || 9;
+  const styles = template.fieldStyles || DEFAULT_PLANNING_FIELD_STYLES;
+
+  function fontFor(field) { return styles[field]?.useCustomFont && customFont ? customFont : standardFont; }
 
   PLANNING_EXPORT_DAYS.forEach((dayKey, i) => {
     const zone = template.dayZones[dayKey];
@@ -10087,14 +10127,32 @@ async function exportPlanningWithTemplate(template, events, weekStart) {
     const dayEvents = events.filter(ev => ev.date === dayKeyStr).sort((a, b) => a.startTime.localeCompare(b.startTime));
     if (!dayEvents.length) return;
 
-    let cursorY = zone.y + zone.height - fontSize; // pdf-lib : origine en bas à gauche, on part du haut de la zone
+    const maxFontSize = Math.max(...PLANNING_EXPORT_FIELDS.filter(f => styles[f]?.enabled).map(f => styles[f].fontSize), 9);
+    let cursorY = zone.y + zone.height - maxFontSize; // pdf-lib : origine en bas à gauche, on part du haut de la zone
     for (const ev of dayEvents) {
-      const line = `${ev.startTime} ${ev.title}`;
-      const wrapped = wrapPdfText(line, font, fontSize, zone.width);
-      for (const wLine of wrapped) {
-        if (cursorY < zone.y) break; // ne dépasse pas le bas de la zone
-        page.drawText(wLine, { x: zone.x, y: cursorY, size: fontSize, font, color: rgb(0.1, 0.1, 0.1) });
-        cursorY -= fontSize + 2;
+      const parts = [];
+      if (styles.time?.enabled) parts.push({ field: "time", text: ev.startTime });
+      if (styles.title?.enabled) parts.push({ field: "title", text: ev.title });
+      // Titre et horaire sur la même ligne (comme avant), le lieu sur sa propre ligne en dessous.
+      const headLine = parts.map(p => p.text).join(" ");
+      if (headLine) {
+        const headStyle = styles.title?.enabled ? styles.title : styles.time;
+        const headFont = fontFor(styles.title?.enabled ? "title" : "time");
+        const wrapped = wrapPdfText(headLine, headFont, headStyle.fontSize, zone.width);
+        for (const wLine of wrapped) {
+          if (cursorY < zone.y) break;
+          page.drawText(wLine, { x: zone.x, y: cursorY, size: headStyle.fontSize, font: headFont, color: rgb(...hexToRgbTriplet(headStyle.color)) });
+          cursorY -= headStyle.fontSize + 2;
+        }
+      }
+      if (styles.location?.enabled && ev.location) {
+        const locFont = fontFor("location");
+        const wrapped = wrapPdfText(ev.location, locFont, styles.location.fontSize, zone.width);
+        for (const wLine of wrapped) {
+          if (cursorY < zone.y) break;
+          page.drawText(wLine, { x: zone.x, y: cursorY, size: styles.location.fontSize, font: locFont, color: rgb(...hexToRgbTriplet(styles.location.color)) });
+          cursorY -= styles.location.fontSize + 2;
+        }
       }
       cursorY -= 3; // petit espace entre deux événements
     }
@@ -10126,17 +10184,20 @@ function formatDayLabel(d) { return d.toLocaleDateString("en-US", { weekday: "sh
 // clique-glisse directement sur l'aperçu pour définir où va le contenu de chaque jour de la
 // semaine — demandé par l'utilisateur.
 function PlanningExportTemplateEditor({ template, onSave, onClear }) {
-  const [pdfBytes, setPdfBytes] = useState(template?.pdfBytes || null);
+  const [pdfBase64, setPdfBase64] = useState(template?.pdfBase64 || null);
   const [pageImage, setPageImage] = useState(null); // data URL de la page rendue, pour l'aperçu cliquable
   const [pageSize, setPageSize] = useState(template ? { width: 0, height: 0 } : null); // en points PDF
   const [dayZones, setDayZones] = useState(template?.dayZones || {});
-  const [fontSize, setFontSize] = useState(template?.fontSize || 9);
+  const [fieldStyles, setFieldStyles] = useState(template?.fieldStyles || DEFAULT_PLANNING_FIELD_STYLES);
+  const [fontBase64, setFontBase64] = useState(template?.fontBase64 || null);
+  const [fontName, setFontName] = useState(template?.fontName || null);
   const [activeDay, setActiveDay] = useState(null); // jour en cours de dessin, ou null
   const [drawing, setDrawing] = useState(null); // { startX, startY, x, y, w, h } en pixels écran, pendant le glissement
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const canvasWrapRef = useRef();
   const fileRef = useRef();
+  const fontFileRef = useRef();
 
   async function handleFile(e) {
     const file = e.target.files[0];
@@ -10146,11 +10207,6 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
       const buf = await file.arrayBuffer();
       const bytes = new Uint8Array(buf);
       const pdfjsLib = await import("pdfjs-dist");
-      // BUG RÉEL CORRIGÉ (signalé par l'utilisateur, message d'erreur précis : "API version
-      // 4.10.38 does not match the Worker version 4.0.379") : la version installée sur
-      // Netlify (via le "^" dans package.json) peut différer de celle figée en dur ici — on
-      // utilise maintenant la version RÉELLEMENT chargée (pdfjsLib.version), qui correspond
-      // toujours exactement, quelle que soit la version que npm installe.
       pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
       const loadingTask = pdfjsLib.getDocument({ data: bytes });
@@ -10163,7 +10219,12 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
       const ctx = canvas.getContext("2d");
       await page.render({ canvasContext: ctx, viewport }).promise;
 
-      setPdfBytes(bytes);
+      // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "Export failed" à chaque fois) : garder
+      // un Uint8Array tel quel en mémoire pour le sauvegarder ensuite (JSON.stringify) le
+      // corrompait silencieusement (transformé en objet {"0":37,...}, plus reconnu par pdf-lib
+      // à la relecture). Converti en base64 dès maintenant — une chaîne de caractères, qui
+      // traverse le stockage JSON sans aucune perte.
+      setPdfBase64(bytesToBase64(bytes));
       setPageImage(canvas.toDataURL("image/png"));
       // Dimensions RÉELLES de la page en points PDF (indépendantes du zoom d'aperçu) — c'est
       // dans ce repère que les zones sont enregistrées, pour rester valides quelle que soit la
@@ -10178,6 +10239,24 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
     setBusy(false);
     if (fileRef.current) fileRef.current.value = "";
   }
+
+  // Import d'une police personnalisée (.ttf/.otf) — demandé par l'utilisateur — utilisable
+  // ensuite pour chaque partie de texte (titre, horaire, lieu), au choix.
+  async function handleFontFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setError("");
+    try {
+      const buf = await file.arrayBuffer();
+      setFontBase64(bytesToBase64(new Uint8Array(buf)));
+      setFontName(file.name.replace(/\.(ttf|otf)$/i, ""));
+    } catch (err) {
+      setError("Unable to read this font file.");
+    }
+    if (fontFileRef.current) fontFileRef.current.value = "";
+  }
+
+  function updateFieldStyle(field, changes) { setFieldStyles(s => ({ ...s, [field]: { ...s[field], ...changes } })); }
 
   function startDrawing(day) { setActiveDay(day); }
 
@@ -10216,9 +10295,9 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
   function removeZone(day) { setDayZones(z => { const n = { ...z }; delete n[day]; return n; }); }
 
   async function handleSave() {
-    if (!pdfBytes) { setError("Import a PDF first."); return; }
+    if (!pdfBase64) { setError("Import a PDF first."); return; }
     if (Object.keys(dayZones).length === 0) { setError("Draw at least one day's zone on the preview."); return; }
-    await onSave({ pdfBytes, dayZones, fontSize });
+    await onSave({ pdfBase64, dayZones, fieldStyles, fontBase64, fontName });
   }
 
   return (
@@ -10228,13 +10307,13 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
         directly on the preview to mark where that day's content should be inserted at export time.
       </div>
 
-      {!pageImage && !pdfBytes ? (
+      {!pageImage && !pdfBase64 ? (
         <div style={{ border: `1px dashed ${LINE}`, borderRadius: 10, padding: 20, textAlign: "center", marginBottom: 20 }}>
           <input ref={fileRef} type="file" accept="application/pdf" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
         </div>
       ) : (
         <>
-          {!pageImage && pdfBytes && <div style={{ fontSize: 12.5, color: TEAL, marginBottom: 12 }}>Template already saved — re-import the PDF to change day zones (kept as-is otherwise).</div>}
+          {!pageImage && pdfBase64 && <div style={{ fontSize: 12.5, color: TEAL, marginBottom: 12 }}>Template already saved — re-import the PDF to change day zones (kept as-is otherwise).</div>}
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
             {PLANNING_EXPORT_DAYS.map(day => (
               <button key={day} onClick={() => startDrawing(day)} disabled={!pageImage} style={{
@@ -10280,12 +10359,55 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
             </div>
           )}
 
-          <label style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12.5, color: "#8B93A1", marginBottom: 16 }}>
-            Text size
-            <input type="number" min={6} max={20} value={fontSize} onChange={e => setFontSize(Math.max(6, Math.min(20, Number(e.target.value) || 9)))}
-              style={{ width: 56, padding: "6px 8px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 6, color: PAPER, fontFamily: "inherit" }} />
-            pt
-          </label>
+          {/* Police personnalisée — demandé par l'utilisateur, importable une fois et
+              réutilisable pour n'importe quelle partie de texte ci-dessous. */}
+          <div style={{ marginBottom: 16 }}>
+            <div style={{ fontSize: 11, textTransform: "uppercase", color: "#5C6470", marginBottom: 8 }}>Custom font</div>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <button onClick={() => fontFileRef.current?.click()} style={{ padding: "7px 14px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 7, color: "#D8DCE2", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>
+                {fontName ? "Change font" : "Import a font (.ttf / .otf)"}
+              </button>
+              {fontName && (
+                <>
+                  <span style={{ fontSize: 12.5, color: TEAL }}>{fontName}</span>
+                  <button onClick={() => { setFontBase64(null); setFontName(null); }} style={{ background: "none", border: "none", color: RED, cursor: "pointer", fontSize: 12 }}>Remove</button>
+                </>
+              )}
+              <input ref={fontFileRef} type="file" accept=".ttf,.otf,font/ttf,font/otf" onChange={handleFontFile} style={{ display: "none" }} />
+            </div>
+          </div>
+
+          {/* Style de chaque partie de texte — demandé par l'utilisateur : activer/désactiver
+              chaque élément, et régler indépendamment sa police, sa taille et sa couleur. */}
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontSize: 11, textTransform: "uppercase", color: "#5C6470", marginBottom: 8 }}>What to include, and how</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {PLANNING_EXPORT_FIELDS.map(field => {
+                const s = fieldStyles[field];
+                return (
+                  <div key={field} style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px" }}>
+                    <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, fontWeight: 600, minWidth: 110, cursor: "pointer" }}>
+                      <input type="checkbox" checked={s.enabled} onChange={e => updateFieldStyle(field, { enabled: e.target.checked })} />
+                      {PLANNING_EXPORT_FIELD_LABELS[field]}
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#8B93A1" }}>
+                      Size
+                      <input type="number" min={6} max={24} value={s.fontSize} onChange={e => updateFieldStyle(field, { fontSize: Math.max(6, Math.min(24, Number(e.target.value) || 9)) })}
+                        style={{ width: 48, padding: "5px 6px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 6, color: PAPER, fontFamily: "inherit" }} />
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#8B93A1" }}>
+                      Color
+                      <input type="color" value={s.color} onChange={e => updateFieldStyle(field, { color: e.target.value })} style={{ width: 30, height: 26, padding: 0, border: "none", borderRadius: 5, background: "none", cursor: "pointer" }} />
+                    </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: fontName ? "#8B93A1" : "#3A414C", cursor: fontName ? "pointer" : "default" }}>
+                      <input type="checkbox" checked={s.useCustomFont} disabled={!fontName} onChange={e => updateFieldStyle(field, { useCustomFont: e.target.checked })} />
+                      Use "{fontName || "custom font"}"
+                    </label>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         </>
       )}
 
