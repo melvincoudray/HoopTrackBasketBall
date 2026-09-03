@@ -10256,6 +10256,13 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
     try {
       const buf = await file.arrayBuffer();
       const bytes = new Uint8Array(buf);
+      // BUG RÉEL CORRIGÉ (signalé par l'utilisateur, confirmé via la console : "pdfBase64 set:
+      // true length: 0") : pdf.js TRANSFÈRE (et donc VIDE) le tableau binaire donné à
+      // "getDocument" vers son propre processus de rendu, pour la performance — le convertir
+      // en base64 APRÈS cet appel donnait donc une chaîne vide (elle-même "fausse" en
+      // JavaScript, d'où le bouton "Save template" bloqué malgré un aperçu visiblement
+      // réussi). Corrigé en calculant le base64 tout de suite, avant que pdf.js n'y touche.
+      const pdfBase64Value = bytesToBase64(bytes);
       const pdfjsLib = await import("pdfjs-dist");
       pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`;
 
@@ -10269,12 +10276,7 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
       const ctx = canvas.getContext("2d");
       await page.render({ canvasContext: ctx, viewport }).promise;
 
-      // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "Export failed" à chaque fois) : garder
-      // un Uint8Array tel quel en mémoire pour le sauvegarder ensuite (JSON.stringify) le
-      // corrompait silencieusement (transformé en objet {"0":37,...}, plus reconnu par pdf-lib
-      // à la relecture). Converti en base64 dès maintenant — une chaîne de caractères, qui
-      // traverse le stockage JSON sans aucune perte.
-      setPdfBase64(bytesToBase64(bytes));
+      setPdfBase64(pdfBase64Value);
       setPageImage(canvas.toDataURL("image/png"));
       // Dimensions RÉELLES de la page en points PDF (indépendantes du zoom d'aperçu) — c'est
       // dans ce repère que les zones sont enregistrées, pour rester valides quelle que soit la
@@ -10286,7 +10288,7 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
       // toutes les zones déjà dessinées, même pour re-télécharger le MÊME fichier — le coach
       // devait tout redessiner à chaque fois. On les garde maintenant telles quelles ; le coach
       // peut toujours en effacer une manuellement (✕) s'il en a besoin.
-      console.log("[planning export] PDF imported successfully, pdfBase64 set:", true, "length:", bytes.length);
+      console.log("[planning export] PDF imported successfully, pdfBase64 set:", !!pdfBase64Value, "length:", pdfBase64Value.length);
     } catch (err) {
       console.error("[planning export template] PDF load failed:", err);
       setError("Unable to read this PDF (" + (err?.message || "unknown error") + "). Make sure it's a valid, uncorrupted file.");
