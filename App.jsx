@@ -10099,13 +10099,25 @@ const PLANNING_COLORS = ["#F2A93B", "#2FBF9C", "#E4231C", "#4A90D9", "#B15FE0", 
 
 const PLANNING_EXPORT_DAYS = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
 const PLANNING_EXPORT_DAY_LABELS = { monday: "Monday", tuesday: "Tuesday", wednesday: "Wednesday", thursday: "Thursday", friday: "Friday", saturday: "Saturday", sunday: "Sunday" };
-const PLANNING_EXPORT_FIELDS = ["title", "time", "location"];
-const PLANNING_EXPORT_FIELD_LABELS = { title: "Event title", time: "Time", location: "Location" };
+// "week" est une zone à part — pas un jour précis — pour afficher la semaine dans son
+// ensemble (ex. "Aug 31 – Sep 6, 2026"), demandé par l'utilisateur.
+const PLANNING_EXPORT_ZONES = [...PLANNING_EXPORT_DAYS, "week"];
+const PLANNING_EXPORT_ZONE_LABELS = { ...PLANNING_EXPORT_DAY_LABELS, week: "Week label" };
+// "date" = l'en-tête de chaque zone jour (ex. "Monday, September 1"), en plus des événements
+// eux-mêmes — demandé par l'utilisateur, séparé du reste car il ne s'affiche qu'une fois par
+// zone, pas par événement.
+const PLANNING_EXPORT_FIELDS = ["date", "title", "time", "location"];
+const PLANNING_EXPORT_FIELD_LABELS = { date: "Day date (in each zone)", title: "Event title", time: "Time", location: "Location" };
+const PLANNING_TEXT_ALIGNS = ["left", "center", "right", "justify"];
 const DEFAULT_PLANNING_FIELD_STYLES = {
-  title: { enabled: true, fontSize: 9, color: "#1a1a1a", useCustomFont: false },
-  time: { enabled: true, fontSize: 9, color: "#1a1a1a", useCustomFont: false },
-  location: { enabled: false, fontSize: 8, color: "#5c5c5c", useCustomFont: false },
+  date: { enabled: false, fontSize: 10, color: "#1a1a1a", useCustomFont: false, align: "left" },
+  title: { enabled: true, fontSize: 9, color: "#1a1a1a", useCustomFont: false, align: "left" },
+  time: { enabled: true, fontSize: 9, color: "#1a1a1a", useCustomFont: false, align: "left" },
+  location: { enabled: false, fontSize: 8, color: "#5c5c5c", useCustomFont: false, align: "left" },
 };
+// Style de la zone "semaine" — séparé des champs par jour puisqu'elle ne dépend d'aucun
+// événement précis.
+const DEFAULT_PLANNING_WEEK_STYLE = { fontSize: 11, color: "#1a1a1a", useCustomFont: false, align: "left" };
 
 // Conversions binaire <-> base64 — le stockage passe toujours par du JSON (JSON.stringify),
 // qui ne sait pas conserver un Uint8Array tel quel (il le transforme en objet {"0":37,"1":80,
@@ -10148,11 +10160,37 @@ function wrapPdfText(text, font, fontSize, maxWidth) {
   return lines;
 }
 
+// Dessine une ligne déjà découpée, en respectant l'alignement choisi (gauche, centré, droite,
+// justifié) — demandé par l'utilisateur. "isLastLine" désactive la justification sur la
+// dernière ligne d'un paragraphe (convention typographique standard : une seule ligne, ou la
+// toute dernière d'un bloc, ne s'étire jamais).
+function drawAlignedLine(page, line, { x, y, width, size, font, color, align, isLastLine }) {
+  const lineWidth = font.widthOfTextAtSize(line, size);
+  if (align === "center") {
+    page.drawText(line, { x: x + Math.max(0, (width - lineWidth) / 2), y, size, font, color });
+  } else if (align === "right") {
+    page.drawText(line, { x: x + Math.max(0, width - lineWidth), y, size, font, color });
+  } else if (align === "justify" && !isLastLine && line.includes(" ")) {
+    // Justifié : répartit l'espace excédentaire entre les mots pour atteindre exactement la
+    // largeur de la zone, mot par mot (pdf-lib ne le fait pas nativement).
+    const words = line.split(" ");
+    const wordsWidth = words.reduce((s, w) => s + font.widthOfTextAtSize(w, size), 0);
+    const gap = words.length > 1 ? (width - wordsWidth) / (words.length - 1) : 0;
+    let cursorX = x;
+    words.forEach((w, i) => {
+      page.drawText(w, { x: cursorX, y, size, font, color });
+      cursorX += font.widthOfTextAtSize(w, size) + Math.max(gap, font.widthOfTextAtSize(" ", size));
+    });
+  } else {
+    page.drawText(line, { x, y, size, font, color }); // gauche, ou justify sur la dernière ligne
+  }
+}
+
 // Génère le PDF final à partir du modèle importé (déjà configuré avec l'emplacement de chaque
-// jour) et des événements de la semaine sélectionnée — insère le contenu de chaque jour aux
-// coordonnées définies, en respectant le style propre à chaque partie de texte (titre, horaire,
-// lieu — police, taille, couleur, activé ou non) et la police personnalisée si importée, puis
-// déclenche le téléchargement.
+// jour et de la zone semaine) et des événements de la semaine sélectionnée — insère le contenu
+// aux coordonnées définies, en respectant le style propre à chaque partie de texte (date,
+// titre, horaire, lieu — police, taille, couleur, alignement, activé ou non) et la police
+// personnalisée si importée, puis déclenche le téléchargement.
 async function exportPlanningWithTemplate(template, events, weekStart) {
   const { PDFDocument, StandardFonts, rgb } = await import("pdf-lib");
   const pdfDoc = await PDFDocument.load(base64ToBytes(template.pdfBase64));
@@ -10166,8 +10204,32 @@ async function exportPlanningWithTemplate(template, events, weekStart) {
   const standardFont = await pdfDoc.embedFont(StandardFonts.Helvetica);
   const page = pdfDoc.getPages()[0];
   const styles = template.fieldStyles || DEFAULT_PLANNING_FIELD_STYLES;
+  const weekStyle = template.weekStyle || DEFAULT_PLANNING_WEEK_STYLE;
 
-  function fontFor(field) { return styles[field]?.useCustomFont && customFont ? customFont : standardFont; }
+  function fontFor(style) { return style?.useCustomFont && customFont ? customFont : standardFont; }
+  function drawWrapped(text, zone, style, startY) {
+    const font = fontFor(style);
+    const wrapped = wrapPdfText(text, font, style.fontSize, zone.width);
+    let cursorY = startY;
+    wrapped.forEach((wLine, i) => {
+      if (cursorY < zone.y) return;
+      drawAlignedLine(page, wLine, { x: zone.x, y: cursorY, width: zone.width, size: style.fontSize, font, color: rgb(...hexToRgbTriplet(style.color)), align: style.align || "left", isLastLine: i === wrapped.length - 1 });
+      cursorY -= style.fontSize + 2;
+    });
+    return cursorY;
+  }
+
+  // Zone "semaine" — demandé par l'utilisateur : affiche la semaine dans son ensemble (ex.
+  // "Aug 31 – Sep 6, 2026"), indépendamment de chaque jour.
+  if (template.weekZone) {
+    const weekEnd = addDays(weekStart, 6);
+    const sameMonth = weekStart.getMonth() === weekEnd.getMonth();
+    const fmtStart = weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+    const fmtEnd = weekEnd.toLocaleDateString("en-US", sameMonth ? { day: "numeric", year: "numeric" } : { month: "short", day: "numeric", year: "numeric" });
+    const weekLabel = `${fmtStart} – ${fmtEnd}`;
+    const zone = template.weekZone;
+    drawWrapped(weekLabel, zone, weekStyle, zone.y + zone.height - weekStyle.fontSize);
+  }
 
   PLANNING_EXPORT_DAYS.forEach((dayKey, i) => {
     const zone = template.dayZones[dayKey];
@@ -10175,34 +10237,31 @@ async function exportPlanningWithTemplate(template, events, weekStart) {
     const dayDate = addDays(weekStart, i);
     const dayKeyStr = toDateKey(dayDate);
     const dayEvents = events.filter(ev => ev.date === dayKeyStr).sort((a, b) => a.startTime.localeCompare(b.startTime));
+
+    let cursorY = zone.y + zone.height - (styles.date?.fontSize || 10);
+
+    // Date du jour (ex. "Monday, September 1"), une seule fois en haut de la zone — demandé
+    // par l'utilisateur, séparément des événements eux-mêmes.
+    if (styles.date?.enabled) {
+      const dateLabel = dayDate.toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric" });
+      cursorY = drawWrapped(dateLabel, zone, styles.date, cursorY);
+      cursorY -= 4;
+    }
+
     if (!dayEvents.length) return;
 
-    const maxFontSize = Math.max(...PLANNING_EXPORT_FIELDS.filter(f => styles[f]?.enabled).map(f => styles[f].fontSize), 9);
-    let cursorY = zone.y + zone.height - maxFontSize; // pdf-lib : origine en bas à gauche, on part du haut de la zone
     for (const ev of dayEvents) {
       const parts = [];
-      if (styles.time?.enabled) parts.push({ field: "time", text: ev.startTime });
-      if (styles.title?.enabled) parts.push({ field: "title", text: ev.title });
+      if (styles.time?.enabled) parts.push(ev.startTime);
+      if (styles.title?.enabled) parts.push(ev.title);
       // Titre et horaire sur la même ligne (comme avant), le lieu sur sa propre ligne en dessous.
-      const headLine = parts.map(p => p.text).join(" ");
+      const headLine = parts.join(" ");
       if (headLine) {
         const headStyle = styles.title?.enabled ? styles.title : styles.time;
-        const headFont = fontFor(styles.title?.enabled ? "title" : "time");
-        const wrapped = wrapPdfText(headLine, headFont, headStyle.fontSize, zone.width);
-        for (const wLine of wrapped) {
-          if (cursorY < zone.y) break;
-          page.drawText(wLine, { x: zone.x, y: cursorY, size: headStyle.fontSize, font: headFont, color: rgb(...hexToRgbTriplet(headStyle.color)) });
-          cursorY -= headStyle.fontSize + 2;
-        }
+        cursorY = drawWrapped(headLine, zone, headStyle, cursorY);
       }
       if (styles.location?.enabled && ev.location) {
-        const locFont = fontFor("location");
-        const wrapped = wrapPdfText(ev.location, locFont, styles.location.fontSize, zone.width);
-        for (const wLine of wrapped) {
-          if (cursorY < zone.y) break;
-          page.drawText(wLine, { x: zone.x, y: cursorY, size: styles.location.fontSize, font: locFont, color: rgb(...hexToRgbTriplet(styles.location.color)) });
-          cursorY -= styles.location.fontSize + 2;
-        }
+        cursorY = drawWrapped(ev.location, zone, styles.location, cursorY);
       }
       cursorY -= 3; // petit espace entre deux événements
     }
@@ -10237,11 +10296,14 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
   const [pdfBase64, setPdfBase64] = useState(template?.pdfBase64 || null);
   const [pageImage, setPageImage] = useState(null); // data URL de la page rendue, pour l'aperçu cliquable
   const [pageSize, setPageSize] = useState(template ? { width: 0, height: 0 } : null); // en points PDF
-  const [dayZones, setDayZones] = useState(template?.dayZones || {});
+  // "zones" regroupe les 7 jours ET la zone "semaine" (clé "week") — un seul système de
+  // dessin cliquer-glisser pour les deux, demandé par l'utilisateur pour la zone semaine.
+  const [zones, setZones] = useState({ ...(template?.dayZones || {}), ...(template?.weekZone ? { week: template.weekZone } : {}) });
   const [fieldStyles, setFieldStyles] = useState(template?.fieldStyles || DEFAULT_PLANNING_FIELD_STYLES);
+  const [weekStyle, setWeekStyle] = useState(template?.weekStyle || DEFAULT_PLANNING_WEEK_STYLE);
   const [fontBase64, setFontBase64] = useState(template?.fontBase64 || null);
   const [fontName, setFontName] = useState(template?.fontName || null);
-  const [activeDay, setActiveDay] = useState(null); // jour en cours de dessin, ou null
+  const [activeZone, setActiveZone] = useState(null); // zone en cours de dessin, ou null
   const [drawing, setDrawing] = useState(null); // { startX, startY, x, y, w, h } en pixels écran, pendant le glissement
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -10314,11 +10376,12 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
   }
 
   function updateFieldStyle(field, changes) { setFieldStyles(s => ({ ...s, [field]: { ...s[field], ...changes } })); }
+  function updateWeekStyle(changes) { setWeekStyle(s => ({ ...s, ...changes })); }
 
-  function startDrawing(day) { setActiveDay(day); }
+  function startDrawing(zoneKey) { setActiveZone(zoneKey); }
 
   function onMouseDown(e) {
-    if (!activeDay || !canvasWrapRef.current) return;
+    if (!activeZone || !canvasWrapRef.current) return;
     const rect = canvasWrapRef.current.getBoundingClientRect();
     const x = e.clientX - rect.left, y = e.clientY - rect.top;
     setDrawing({ startX: x, startY: y, x, y, w: 0, h: 0 });
@@ -10334,7 +10397,7 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
     }));
   }
   function onMouseUp() {
-    if (!drawing || !activeDay || !canvasWrapRef.current || drawing.w < 8 || drawing.h < 8) { setDrawing(null); setActiveDay(null); return; }
+    if (!drawing || !activeZone || !canvasWrapRef.current || drawing.w < 8 || drawing.h < 8) { setDrawing(null); setActiveZone(null); return; }
     // Convertit les pixels écran en points PDF : l'aperçu est affiché à la largeur du
     // conteneur, potentiellement différente de la résolution native du canvas — on calcule le
     // ratio réel, puis on bascule vers le repère PDF (origine en bas à gauche, pas en haut).
@@ -10344,18 +10407,20 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
     const pdfW = drawing.w * scaleX;
     const pdfH = drawing.h * scaleY;
     const pdfY = pageSize.height - (drawing.y * scaleY) - pdfH; // inversion d'axe Y
-    setDayZones(z => ({ ...z, [activeDay]: { x: pdfX, y: pdfY, width: pdfW, height: pdfH } }));
+    setZones(z => ({ ...z, [activeZone]: { x: pdfX, y: pdfY, width: pdfW, height: pdfH } }));
     setDrawing(null);
-    setActiveDay(null);
+    setActiveZone(null);
   }
 
-  function removeZone(day) { setDayZones(z => { const n = { ...z }; delete n[day]; return n; }); }
+  function removeZone(zoneKey) { setZones(z => { const n = { ...z }; delete n[zoneKey]; return n; }); }
 
   async function handleSave() {
-    console.log("[planning export] handleSave — pdfBase64 set:", !!pdfBase64, "| zones count:", Object.keys(dayZones).length);
+    const dayZones = { ...zones }; delete dayZones.week;
+    const weekZone = zones.week || null;
+    console.log("[planning export] handleSave — pdfBase64 set:", !!pdfBase64, "| zones count:", Object.keys(zones).length);
     if (!pdfBase64) { setError("Import a PDF first (use the button above, or \"Re-import PDF\" if you already had one)."); return; }
     if (Object.keys(dayZones).length === 0) { setError("Draw at least one day's zone on the preview."); return; }
-    await onSave({ pdfBase64, dayZones, fieldStyles, fontBase64, fontName });
+    await onSave({ pdfBase64, dayZones, weekZone, fieldStyles, weekStyle, fontBase64, fontName });
   }
 
   return (
@@ -10371,43 +10436,44 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
         </div>
       ) : (
         <>
-          {!pageImage && pdfBase64 && <div style={{ fontSize: 12.5, color: TEAL, marginBottom: 12 }}>Template already saved — re-import the PDF to change day zones (kept as-is otherwise).</div>}
+          {!pageImage && pdfBase64 && <div style={{ fontSize: 12.5, color: TEAL, marginBottom: 12 }}>Template already saved — re-import the PDF to change zones (kept as-is otherwise).</div>}
           <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 16 }}>
-            {PLANNING_EXPORT_DAYS.map(day => (
-              <button key={day} onClick={() => startDrawing(day)} disabled={!pageImage} style={{
+            {PLANNING_EXPORT_ZONES.map(zoneKey => (
+              <button key={zoneKey} onClick={() => startDrawing(zoneKey)} disabled={!pageImage} style={{
                 padding: "6px 12px", borderRadius: 7, fontSize: 12.5, cursor: pageImage ? "pointer" : "default", fontFamily: "inherit",
-                background: activeDay === day ? AMBER : (dayZones[day] ? "rgba(47,184,166,0.15)" : PANEL2),
-                color: activeDay === day ? "#1a1200" : (dayZones[day] ? TEAL : "#8B93A1"),
-                border: `1px solid ${activeDay === day ? AMBER : (dayZones[day] ? TEAL : LINE)}`, opacity: pageImage ? 1 : 0.5,
+                background: activeZone === zoneKey ? AMBER : (zones[zoneKey] ? "rgba(47,184,166,0.15)" : PANEL2),
+                color: activeZone === zoneKey ? "#1a1200" : (zones[zoneKey] ? TEAL : "#8B93A1"),
+                border: `1px solid ${activeZone === zoneKey ? AMBER : (zones[zoneKey] ? TEAL : LINE)}`, opacity: pageImage ? 1 : 0.5,
               }}>
-                {PLANNING_EXPORT_DAY_LABELS[day]} {dayZones[day] ? "✓" : ""}
+                {PLANNING_EXPORT_ZONE_LABELS[zoneKey]} {zones[zoneKey] ? "✓" : ""}
               </button>
             ))}
             <button onClick={() => fileRef.current?.click()} style={{ padding: "6px 12px", borderRadius: 7, fontSize: 12.5, background: "none", border: `1px solid ${LINE}`, color: "#8B93A1", cursor: "pointer", fontFamily: "inherit" }}>Re-import PDF</button>
             <input ref={fileRef} type="file" accept="application/pdf" onChange={handleFile} style={{ display: "none" }} />
           </div>
 
-          {activeDay && <div style={{ fontSize: 12.5, color: AMBER, marginBottom: 10 }}>Click and drag on the preview to mark the zone for {PLANNING_EXPORT_DAY_LABELS[activeDay]}.</div>}
+          {activeZone && <div style={{ fontSize: 12.5, color: AMBER, marginBottom: 10 }}>Click and drag on the preview to mark the zone for {PLANNING_EXPORT_ZONE_LABELS[activeZone]}.</div>}
 
           {pageImage && (
             <div ref={canvasWrapRef} onMouseDown={onMouseDown} onMouseMove={onMouseMove} onMouseUp={onMouseUp} style={{
               position: "relative", width: "100%", maxWidth: 700, border: `1px solid ${LINE}`, borderRadius: 8, overflow: "hidden",
-              cursor: activeDay ? "crosshair" : "default", userSelect: "none", marginBottom: 20,
+              cursor: activeZone ? "crosshair" : "default", userSelect: "none", marginBottom: 20,
             }}>
               <img src={pageImage} alt="" style={{ width: "100%", display: "block", pointerEvents: "none" }} />
-              {Object.entries(dayZones).map(([day, z]) => {
+              {Object.entries(zones).map(([zoneKey, z]) => {
                 // Reconvertit du repère PDF vers des pourcentages d'affichage, pour un survol
                 // toujours juste quelle que soit la taille réelle à l'écran.
                 const leftPct = (z.x / pageSize.width) * 100;
                 const widthPct = (z.width / pageSize.width) * 100;
                 const topPct = ((pageSize.height - z.y - z.height) / pageSize.height) * 100;
                 const heightPct = (z.height / pageSize.height) * 100;
+                const isWeek = zoneKey === "week";
                 return (
-                  <div key={day} style={{
+                  <div key={zoneKey} style={{
                     position: "absolute", left: `${leftPct}%`, top: `${topPct}%`, width: `${widthPct}%`, height: `${heightPct}%`,
-                    border: `2px solid ${TEAL}`, background: "rgba(47,184,166,0.15)", display: "flex", alignItems: "flex-start", justifyContent: "flex-end", padding: 2,
+                    border: `2px solid ${isWeek ? AMBER : TEAL}`, background: isWeek ? "rgba(242,169,59,0.15)" : "rgba(47,184,166,0.15)", display: "flex", alignItems: "flex-start", justifyContent: "flex-end", padding: 2,
                   }}>
-                    <button onClick={() => removeZone(day)} style={{ background: RED, border: "none", borderRadius: 4, color: "#fff", cursor: "pointer", fontSize: 9, padding: "1px 5px", pointerEvents: "auto" }}>{PLANNING_EXPORT_DAY_LABELS[day]} ✕</button>
+                    <button onClick={() => removeZone(zoneKey)} style={{ background: RED, border: "none", borderRadius: 4, color: "#fff", cursor: "pointer", fontSize: 9, padding: "1px 5px", pointerEvents: "auto" }}>{PLANNING_EXPORT_ZONE_LABELS[zoneKey]} ✕</button>
                   </div>
                 );
               })}
@@ -10436,7 +10502,8 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
           </div>
 
           {/* Style de chaque partie de texte — demandé par l'utilisateur : activer/désactiver
-              chaque élément, et régler indépendamment sa police, sa taille et sa couleur. */}
+              chaque élément, et régler indépendamment sa police, sa taille, sa couleur et son
+              alignement (gauche/centré/droite/justifié). */}
           <div style={{ marginBottom: 20 }}>
             <div style={{ fontSize: 11, textTransform: "uppercase", color: "#5C6470", marginBottom: 8 }}>What to include, and how</div>
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -10457,6 +10524,13 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
                       Color
                       <input type="color" value={s.color} onChange={e => updateFieldStyle(field, { color: e.target.value })} style={{ width: 30, height: 26, padding: 0, border: "none", borderRadius: 5, background: "none", cursor: "pointer" }} />
                     </label>
+                    <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#8B93A1" }}>
+                      Align
+                      <select value={s.align || "left"} onChange={e => updateFieldStyle(field, { align: e.target.value })}
+                        style={{ padding: "5px 6px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 6, color: PAPER, fontFamily: "inherit", fontSize: 12 }}>
+                        {PLANNING_TEXT_ALIGNS.map(a => <option key={a} value={a}>{a[0].toUpperCase() + a.slice(1)}</option>)}
+                      </select>
+                    </label>
                     <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: fontName ? "#8B93A1" : "#3A414C", cursor: fontName ? "pointer" : "default" }}>
                       <input type="checkbox" checked={s.useCustomFont} disabled={!fontName} onChange={e => updateFieldStyle(field, { useCustomFont: e.target.checked })} />
                       Use "{fontName || "custom font"}"
@@ -10466,6 +10540,36 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
               })}
             </div>
           </div>
+
+          {/* Style de la zone "semaine" — demandé par l'utilisateur, séparé puisqu'elle ne
+              dépend d'aucun événement précis. */}
+          {zones.week && (
+            <div style={{ marginBottom: 20 }}>
+              <div style={{ fontSize: 11, textTransform: "uppercase", color: "#5C6470", marginBottom: 8 }}>Week label style</div>
+              <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px" }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#8B93A1" }}>
+                  Size
+                  <input type="number" min={6} max={32} value={weekStyle.fontSize} onChange={e => updateWeekStyle({ fontSize: Math.max(6, Math.min(32, Number(e.target.value) || 11)) })}
+                    style={{ width: 48, padding: "5px 6px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 6, color: PAPER, fontFamily: "inherit" }} />
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#8B93A1" }}>
+                  Color
+                  <input type="color" value={weekStyle.color} onChange={e => updateWeekStyle({ color: e.target.value })} style={{ width: 30, height: 26, padding: 0, border: "none", borderRadius: 5, background: "none", cursor: "pointer" }} />
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: "#8B93A1" }}>
+                  Align
+                  <select value={weekStyle.align || "left"} onChange={e => updateWeekStyle({ align: e.target.value })}
+                    style={{ padding: "5px 6px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 6, color: PAPER, fontFamily: "inherit", fontSize: 12 }}>
+                    {PLANNING_TEXT_ALIGNS.map(a => <option key={a} value={a}>{a[0].toUpperCase() + a.slice(1)}</option>)}
+                  </select>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12, color: fontName ? "#8B93A1" : "#3A414C", cursor: fontName ? "pointer" : "default" }}>
+                  <input type="checkbox" checked={weekStyle.useCustomFont} disabled={!fontName} onChange={e => updateWeekStyle({ useCustomFont: e.target.checked })} />
+                  Use "{fontName || "custom font"}"
+                </label>
+              </div>
+            </div>
+          )}
         </>
       )}
 
@@ -10504,13 +10608,29 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
   const [showTemplateEditor, setShowTemplateEditor] = useState(false);
   const [exportBusy, setExportBusy] = useState(false);
   const [exportError, setExportError] = useState("");
+  // Confirmation avant export — demandé par l'utilisateur : les événements "toute l'équipe"
+  // partent automatiquement, mais les événements concernant un ou quelques joueurs précis
+  // doivent être confirmés un par un (case à cocher), pas insérés d'office.
+  const [exportConfirm, setExportConfirm] = useState(null); // { teamEvents, individualEvents, selected: Set }
+
+  function isTeamWideEvent(ev) { return !ev.playerIds || ev.playerIds.length === 0; }
 
   async function handleExport() {
     setExportError("");
     if (!exportTemplate) { setShowTemplateEditor(true); return; }
+    const teamEvents = events.filter(isTeamWideEvent);
+    const individualEvents = events.filter(ev => !isTeamWideEvent(ev));
+    if (individualEvents.length === 0) {
+      await runExport(teamEvents);
+      return;
+    }
+    setExportConfirm({ teamEvents, individualEvents, selected: new Set() });
+  }
+
+  async function runExport(eventsToExport) {
     setExportBusy(true);
     try {
-      await exportPlanningWithTemplate(exportTemplate, events, weekStart);
+      await exportPlanningWithTemplate(exportTemplate, eventsToExport, weekStart);
     } catch (e) {
       setExportError("Export failed — try re-importing the template PDF.");
     }
@@ -10761,6 +10881,52 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
                 onSave={async data => { await saveExportTemplate(data); setShowTemplateEditor(false); }}
                 onClear={async () => { await clearExportTemplate(); setShowTemplateEditor(false); }}
               />
+            </div>
+          )}
+
+          {/* Confirmation avant export — demandé par l'utilisateur : les événements "toute
+              l'équipe" partent automatiquement (non listés ici), mais chaque événement
+              concernant un ou quelques joueurs précis doit être coché individuellement pour
+              être inclus. */}
+          {exportConfirm && (
+            <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 200, display: "flex", alignItems: "center", justifyContent: "center", padding: 20 }}>
+              <div style={{ background: INK, border: `1px solid ${LINE}`, borderRadius: 14, padding: 22, maxWidth: 560, width: "100%", maxHeight: "80vh", overflow: "auto" }}>
+                <div style={{ fontSize: 16, fontWeight: 800, marginBottom: 6 }}>Include individual events?</div>
+                <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 16 }}>
+                  {exportConfirm.teamEvents.length} whole-team event{exportConfirm.teamEvents.length !== 1 ? "s" : ""} will be exported automatically.
+                  Check any of the events below (concerning specific players) you also want to include.
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+                  {exportConfirm.individualEvents.map(ev => {
+                    const names = (ev.playerIds || []).map(id => roster.find(p => p.id === id)?.first).filter(Boolean).join(", ");
+                    const checked = exportConfirm.selected.has(ev.id);
+                    return (
+                      <label key={ev.id} style={{ display: "flex", alignItems: "center", gap: 10, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, padding: "10px 12px", cursor: "pointer" }}>
+                        <input type="checkbox" checked={checked} onChange={() => setExportConfirm(c => {
+                          const next = new Set(c.selected);
+                          if (next.has(ev.id)) next.delete(ev.id); else next.add(ev.id);
+                          return { ...c, selected: next };
+                        })} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13.5, fontWeight: 600 }}>{ev.title} <span style={{ color: "#5C6470", fontWeight: 400 }}>· {ev.date} · {ev.startTime}</span></div>
+                          <div style={{ fontSize: 11.5, color: "#5C6470" }}>{names || "Individual"}</div>
+                        </div>
+                      </label>
+                    );
+                  })}
+                </div>
+                <div style={{ display: "flex", gap: 10 }}>
+                  <button onClick={async () => {
+                    const chosen = exportConfirm.individualEvents.filter(ev => exportConfirm.selected.has(ev.id));
+                    const toExport = [...exportConfirm.teamEvents, ...chosen];
+                    setExportConfirm(null);
+                    await runExport(toExport);
+                  }} style={{ ...btnPrimary, width: "auto", padding: "10px 20px" }}>
+                    {exportBusy ? "…" : "Export"}
+                  </button>
+                  <button onClick={() => setExportConfirm(null)} style={btnSecondary}>Cancel</button>
+                </div>
+              </div>
             </div>
           )}
         </>
