@@ -2236,6 +2236,29 @@ function useShootingGridSessions() {
     setScores(s => ({ ...s, [id]: {} }));
     return id;
   }
+  // Rejoue la même grille (mêmes situations : nom, image, tirs/série, séries, côtés) sous une
+  // nouvelle date, avec des scores vierges — demandé par l'utilisateur, pour ne pas devoir tout
+  // recréer à la main. Les situations gardent leurs joueurs assignés tels quels, mais le coach
+  // peut les réajuster librement ensuite (présence différente d'une séance à l'autre). Les deux
+  // grilles partagent un "groupId" commun, pour permettre de comparer leurs résultats plus tard.
+  async function duplicateGrid(sourceId) {
+    const source = grids[sourceId];
+    if (!source) return null;
+    const groupId = source.groupId || uid();
+    if (!source.groupId) await editGrid(sourceId, { groupId }); // marque aussi l'original, pour le retrouver dans les comparaisons
+    const id = uid();
+    const situations = source.situations.map(s => ({ ...s, id: uid() })); // nouveaux identifiants de situation, scores repartent de zéro
+    const label = source.label;
+    const date = todayLocal();
+    const record = { id, label, date, situations, groupId };
+    await storeSet("shooting_grid:" + id, record);
+    const newIndex = [...index, { id, label, date }];
+    await storeSet("shooting_grid_index", newIndex);
+    setIndex(newIndex);
+    setGrids(g => ({ ...g, [id]: record }));
+    setScores(s => ({ ...s, [id]: {} }));
+    return id;
+  }
   async function editGrid(id, changes) {
     const next = { ...grids[id], ...changes };
     await storeSet("shooting_grid:" + id, next);
@@ -2259,7 +2282,7 @@ function useShootingGridSessions() {
     setScores(s => ({ ...s, [gridId]: next }));
   }
 
-  return { index, grids, scores, loading, addGrid, editGrid, deleteGrid, savePlayerScores, reload: load };
+  return { index, grids, scores, loading, addGrid, duplicateGrid, editGrid, deleteGrid, savePlayerScores, reload: load };
 }
 
 // Gère les sessions de "Rebound Contest" importées — stockage propre à chaque équipe, comme le
@@ -4315,6 +4338,67 @@ function ShootingGridScoreEntry({ grid, roster, gridScores, onSavePlayer }) {
   );
 }
 
+// Compare les résultats d'une même grille rejouée à plusieurs dates (via "Duplicate") — demandé
+// par l'utilisateur, pour suivre la progression d'un joueur sur exactement la même grille.
+// Tient compte du fait que les joueurs présents changent d'une séance à l'autre : un joueur
+// absent à une date donnée affiche simplement "–", sans fausser sa moyenne.
+function ShootingGridCompare({ siblingGrids, grids, scores, roster }) {
+  const sortedGrids = [...siblingGrids].sort((a, b) => a.date.localeCompare(b.date));
+  const statsByGrid = useMemo(() => {
+    const out = {};
+    for (const g of sortedGrids) {
+      const gridData = grids[g.id];
+      if (!gridData) continue;
+      out[g.id] = computeShootingGridStats(gridData, scores[g.id] || {}, {});
+    }
+    return out;
+  }, [sortedGrids, grids, scores]);
+
+  const playersWithData = roster.filter(p => sortedGrids.some(g => statsByGrid[g.id]?.[p.name]?.attempted > 0));
+
+  if (playersWithData.length === 0) return <EmptyState text="No score entered yet on any of these sessions." />;
+
+  return (
+    <div>
+      <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 16 }}>
+        Comparing {sortedGrids.length} sessions of the same grid. A player absent from a given session shows "–" there, without affecting their other results.
+      </div>
+      <div style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+          <thead>
+            <tr>
+              <th style={{ textAlign: "left", padding: "8px 12px", color: "#5C6470", fontSize: 11, textTransform: "uppercase", borderBottom: `1px solid ${LINE}` }}>Player</th>
+              {sortedGrids.map(g => (
+                <th key={g.id} style={{ textAlign: "center", padding: "8px 12px", color: "#5C6470", fontSize: 11, textTransform: "uppercase", borderBottom: `1px solid ${LINE}` }}>{g.date}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {playersWithData.map(p => (
+              <tr key={p.id}>
+                <td style={{ padding: "10px 12px", fontWeight: 600, borderBottom: `1px solid ${LINE}` }}>{p.name}</td>
+                {sortedGrids.map(g => {
+                  const st = statsByGrid[g.id]?.[p.name];
+                  return (
+                    <td key={g.id} style={{ textAlign: "center", padding: "10px 12px", borderBottom: `1px solid ${LINE}`, fontFamily: "ui-monospace, monospace" }}>
+                      {st && st.attempted > 0 ? (
+                        <>
+                          <span style={{ fontWeight: 700, color: AMBER }}>{Math.round(st.pct)}%</span>
+                          <span style={{ color: "#5C6470", fontSize: 11 }}> ({st.made}/{st.attempted})</span>
+                        </>
+                      ) : <span style={{ color: "#3A414C" }}>–</span>}
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 function ShootingGridResults({ grid, gridScores, roster }) {
   const [situationIds, setSituationIds] = useState(new Set(grid.situations.map(s => s.id)));
   const maxSeries = Math.max(1, ...grid.situations.map(s => s.seriesCount));
@@ -4402,11 +4486,12 @@ function ShootingGridResults({ grid, gridScores, roster }) {
 }
 
 function ShootingGridTab({ roster, isCoach }) {
-  const { index, grids, scores, loading, addGrid, editGrid, deleteGrid, savePlayerScores } = useShootingGridSessions();
+  const { index, grids, scores, loading, addGrid, duplicateGrid, editGrid, deleteGrid, savePlayerScores } = useShootingGridSessions();
   const [selectedGridId, setSelectedGridId] = useState(null); // demandé : toujours choisir d'abord, pas de sélection automatique
   const [creating, setCreating] = useState(false);
-  const [mode, setMode] = useState("results"); // edit | scores | results
+  const [mode, setMode] = useState("results"); // edit | scores | results | compare
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [duplicating, setDuplicating] = useState(null); // id de la grille en cours de duplication
 
   if (loading) return <div style={{ color: "#5C6470", fontSize: 13 }}>Loading…</div>;
 
@@ -4440,7 +4525,19 @@ function ShootingGridTab({ roster, isCoach }) {
                       <button onClick={() => setConfirmDeleteId(null)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontSize: 12.5 }}>Cancel</button>
                     </div>
                   ) : (
-                    <button onClick={e => { e.stopPropagation(); setConfirmDeleteId(g.id); }} style={{ background: "none", border: "none", color: RED, cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
+                    <div style={{ display: "flex", gap: 10 }} onClick={e => e.stopPropagation()}>
+                      {/* "Duplicate" : rejoue exactement la même grille (mêmes situations),
+                          demandé par l'utilisateur, sans avoir à tout recréer à la main. */}
+                      <button disabled={duplicating === g.id} onClick={async () => {
+                        setDuplicating(g.id);
+                        const newId = await duplicateGrid(g.id);
+                        setDuplicating(null);
+                        if (newId) { setSelectedGridId(newId); setMode("edit"); } // direction "Edit grid" pour réajuster les joueurs présents
+                      }} style={{ background: "none", border: "none", color: TEAL, cursor: "pointer", fontSize: 12.5 }}>
+                        {duplicating === g.id ? "…" : "Duplicate"}
+                      </button>
+                      <button onClick={() => setConfirmDeleteId(g.id)} style={{ background: "none", border: "none", color: RED, cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
+                    </div>
                   )
                 )}
               </div>
@@ -4455,14 +4552,18 @@ function ShootingGridTab({ roster, isCoach }) {
   const gridScores = scores[selectedGridId] || {};
   if (!grid) return null;
 
+  // Autres grilles partageant le même "groupId" (issues d'une duplication) — demandé par
+  // l'utilisateur, pour comparer les résultats d'une même grille rejouée à plusieurs reprises.
+  const siblingGrids = grid.groupId ? index.filter(g => grids[g.id]?.groupId === grid.groupId) : [];
+
   return (
     <div>
       <button onClick={() => setSelectedGridId(null)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontSize: 12.5, marginBottom: 12, display: "flex", alignItems: "center", gap: 4 }}>
         <ChevronLeft size={14} /> Change grid
       </button>
       <SectionTitle eyebrow="Shooting Grid" title={`${grid.label} — ${grid.date}`} />
-      <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
-        {[["results", "Results"], ["scores", "Enter scores"], ...(isCoach ? [["edit", "Edit grid"]] : [])].map(([id, label]) => (
+      <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
+        {[["results", "Results"], ["scores", "Enter scores"], ...(isCoach ? [["edit", "Edit grid"]] : []), ...(siblingGrids.length > 1 ? [["compare", "Compare"]] : [])].map(([id, label]) => (
           <button key={id} onClick={() => setMode(id)} style={{
             padding: "7px 14px", borderRadius: 7, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
             background: mode === id ? PANEL2 : "transparent", color: mode === id ? AMBER : "#8B93A1", border: "none",
@@ -4477,6 +4578,7 @@ function ShootingGridTab({ roster, isCoach }) {
         <ShootingGridScoreEntry grid={grid} roster={roster} gridScores={gridScores} onSavePlayer={(name, sc) => savePlayerScores(grid.id, name, sc)} />
       )}
       {mode === "results" && <ShootingGridResults grid={grid} gridScores={gridScores} roster={roster} />}
+      {mode === "compare" && <ShootingGridCompare siblingGrids={siblingGrids} grids={grids} scores={scores} roster={roster} />}
     </div>
   );
 }
