@@ -2197,6 +2197,11 @@ function usePlanningExportTemplate() {
   return { template, loading, save, clear };
 }
 
+// Ordre d'affichage et libellés des côtés d'une situation de grille de tir — "Center" ajouté,
+// demandé par l'utilisateur, en plus de "Left"/"Right".
+const SHOOTING_GRID_SIDE_ORDER = ["left", "center", "right"];
+const SHOOTING_GRID_SIDE_LABELS = { left: "Left", center: "Center", right: "Right" };
+
 function useShootingGridSessions() {
   const [index, setIndex] = useState([]);
   const [grids, setGrids] = useState({}); // { id: { id, date, label, situations: [...] } }
@@ -4061,14 +4066,17 @@ function ShootingGridSituationEditor({ situation, roster, onChange, onRemove }) 
     onChange({ ...situation, sides: sides.length ? sides : situation.sides }); // au moins un côté
   }
   // Joueurs concernés par cette situation — demandé par l'utilisateur : une situation n'est
-  // pas forcément faite par tout le monde. Tableau vide = tout le monde (comportement par
-  // défaut, pour ne rien changer aux grilles déjà créées avant cet ajout).
-  const playerIds = situation.playerIds || [];
-  const allSelected = playerIds.length === 0;
+  // pas forcément faite par tout le monde. "playerIds" NON défini = tout le monde (comportement
+  // par défaut, pour ne rien changer aux grilles déjà créées avant cet ajout) ; un tableau VIDE
+  // défini explicitement = personne (nécessaire pour que "Deselect all" ait un sens distinct
+  // de "Select all", qui donnaient sinon exactement le même résultat).
+  const playerIds = situation.playerIds;
+  const allSelected = !playerIds;
+  const noneSelected = playerIds && playerIds.length === 0;
   function togglePlayer(id) {
     const current = allSelected ? roster.map(p => p.id) : playerIds;
     const next = current.includes(id) ? current.filter(x => x !== id) : [...current, id];
-    onChange({ ...situation, playerIds: next.length === roster.length ? [] : next });
+    onChange({ ...situation, playerIds: next.length === roster.length ? undefined : next });
   }
   return (
     <div style={{ display: "flex", gap: 16, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 16, marginBottom: 12 }}>
@@ -4094,20 +4102,29 @@ function ShootingGridSituationEditor({ situation, roster, onChange, onRemove }) 
             <input type="checkbox" checked={situation.sides.includes("left")} onChange={() => toggleSide("left")} /> Left
           </label>
           <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#8B93A1", cursor: "pointer" }}>
+            <input type="checkbox" checked={situation.sides.includes("center")} onChange={() => toggleSide("center")} /> Center
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "#8B93A1", cursor: "pointer" }}>
             <input type="checkbox" checked={situation.sides.includes("right")} onChange={() => toggleSide("right")} /> Right
           </label>
         </div>
         {roster && roster.length > 0 && (
           <div>
-            <div style={{ fontSize: 11.5, color: "#5C6470", marginBottom: 6 }}>
+            <div style={{ fontSize: 11.5, color: "#5C6470", marginBottom: 6, display: "flex", alignItems: "center", gap: 10 }}>
               Players for this situation
-              <button onClick={() => onChange({ ...situation, playerIds: [] })} style={{ marginLeft: 8, background: "none", border: "none", color: allSelected ? AMBER : TEAL, cursor: "pointer", fontSize: 11 }}>
+              <button onClick={() => onChange({ ...situation, playerIds: undefined })} style={{ background: "none", border: "none", color: allSelected ? AMBER : TEAL, cursor: "pointer", fontSize: 11 }}>
                 {allSelected ? "All players" : "Select all"}
+              </button>
+              {/* Demandé par l'utilisateur : un bouton distinct pour tout désélectionner —
+                  auparavant, "vide" voulait déjà dire "tout le monde", donc impossible de
+                  représenter "personne" séparément. */}
+              <button onClick={() => onChange({ ...situation, playerIds: [] })} style={{ background: "none", border: "none", color: noneSelected ? AMBER : "#8B93A1", cursor: "pointer", fontSize: 11 }}>
+                {noneSelected ? "None selected" : "Deselect all"}
               </button>
             </div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
               {roster.map(p => {
-                const checked = allSelected || playerIds.includes(p.id);
+                const checked = allSelected || (playerIds || []).includes(p.id);
                 return (
                   <button key={p.id} onClick={() => togglePlayer(p.id)} style={{
                     padding: "4px 10px", borderRadius: 6, fontSize: 11.5, cursor: "pointer", fontFamily: "inherit",
@@ -4134,7 +4151,7 @@ function ShootingGridEditor({ initialGrid, onSave, onCancel, roster }) {
   const [error, setError] = useState("");
 
   function addSituation() {
-    setSituations(s => [...s, { id: uid(), name: "", image: null, shotsPerSeries: 6, seriesCount: 2, sides: ["left", "right"], playerIds: [] }]);
+    setSituations(s => [...s, { id: uid(), name: "", image: null, shotsPerSeries: 6, seriesCount: 2, sides: ["left", "right"], playerIds: undefined }]);
   }
   function updateSituation(id, next) { setSituations(s => s.map(x => x.id === id ? next : x)); }
   function removeSituation(id) { setSituations(s => s.filter(x => x.id !== id)); }
@@ -4147,10 +4164,33 @@ function ShootingGridEditor({ initialGrid, onSave, onCancel, roster }) {
     onSave({ label: label.trim(), date, situations });
   }
 
-  // Total de tirs "maximal" (pour un joueur concerné par TOUTES les situations) — donné à
-  // titre indicatif ; chaque joueur peut en avoir moins selon les situations qui lui sont
-  // assignées.
-  const totalShots = situations.reduce((sum, s) => sum + s.sides.length * s.seriesCount * s.shotsPerSeries, 0);
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "le nombre de tirs par joueur est faux") :
+  // le total était calculé en additionnant TOUTES les situations, sans tenir compte du fait
+  // qu'une situation peut ne concerner que certains joueurs — donnant un total identique et
+  // FAUX pour tout le monde. Calculé maintenant par joueur (en ne comptant que les situations
+  // qui lui sont réellement assignées), puis regroupé : un seul total si tout le monde tombe
+  // sur le même chiffre, sinon un total par groupe de joueurs, avec leurs noms.
+  function shotsForSituation(s) { return s.sides.length * s.seriesCount * s.shotsPerSeries; }
+  function totalShotsForPlayer(playerId) {
+    return situations
+      .filter(s => !s.playerIds || s.playerIds.includes(playerId))
+      .reduce((sum, s) => sum + shotsForSituation(s), 0);
+  }
+  const shotTotalGroups = useMemo(() => {
+    if (!roster || roster.length === 0) {
+      // Pas de roster disponible ici (cas rare) : retombe sur le total "si tout le monde fait
+      // tout", comme avant.
+      const flat = situations.reduce((sum, s) => sum + shotsForSituation(s), 0);
+      return [{ total: flat, names: [] }];
+    }
+    const byTotal = {};
+    for (const p of roster) {
+      const t = totalShotsForPlayer(p.id);
+      if (!byTotal[t]) byTotal[t] = [];
+      byTotal[t].push(p.name);
+    }
+    return Object.entries(byTotal).map(([total, names]) => ({ total: Number(total), names })).sort((a, b) => b.total - a.total);
+  }, [situations, roster]);
 
   return (
     <div>
@@ -4168,7 +4208,17 @@ function ShootingGridEditor({ initialGrid, onSave, onCancel, roster }) {
 
       {situations.length > 0 && (
         <div style={{ fontSize: 12.5, color: "#5C6470", marginBottom: 16 }}>
-          Total: {situations.length} situation{situations.length !== 1 ? "s" : ""} · {totalShots} shots per player
+          Total: {situations.length} situation{situations.length !== 1 ? "s" : ""} ·{" "}
+          {shotTotalGroups.length === 1 ? (
+            `${shotTotalGroups[0].total} shots per player`
+          ) : (
+            shotTotalGroups.map((g, i) => (
+              <span key={g.total}>
+                {i > 0 && " · "}
+                {g.total} shots ({g.names.join(", ")})
+              </span>
+            ))
+          )}
         </div>
       )}
 
@@ -4221,7 +4271,7 @@ function ShootingGridScoreEntry({ grid, roster, gridScores, onSavePlayer }) {
           monde — on ne montre ici que les situations assignées au joueur sélectionné (ou
           toutes, si aucune sélection précise n'a été faite pour cette situation). */}
       {player && (() => {
-        const applicable = grid.situations.filter(sit => !sit.playerIds || sit.playerIds.length === 0 || sit.playerIds.includes(player.id));
+        const applicable = grid.situations.filter(sit => !sit.playerIds || sit.playerIds.includes(player.id));
         return (
           <>
             {applicable.length < grid.situations.length && (
@@ -4268,7 +4318,15 @@ function ShootingGridScoreEntry({ grid, roster, gridScores, onSavePlayer }) {
 function ShootingGridResults({ grid, gridScores, roster }) {
   const [situationIds, setSituationIds] = useState(new Set(grid.situations.map(s => s.id)));
   const maxSeries = Math.max(1, ...grid.situations.map(s => s.seriesCount));
-  const [sides, setSides] = useState(new Set(["left", "right"]));
+  // Les côtés disponibles dépendent de ce que les situations utilisent réellement (gauche,
+  // centre, droite — "Center" est nouveau, demandé par l'utilisateur), calculé dynamiquement
+  // plutôt que figé en dur.
+  const allSides = useMemo(() => {
+    const set = new Set();
+    grid.situations.forEach(s => s.sides.forEach(side => set.add(side)));
+    return SHOOTING_GRID_SIDE_ORDER.filter(s => set.has(s));
+  }, [grid.situations]);
+  const [sides, setSides] = useState(new Set(allSides));
   const [seriesIndices, setSeriesIndices] = useState(new Set(Array.from({ length: maxSeries }, (_, i) => i)));
 
   function toggleSet(setFn, current, value) {
@@ -4279,7 +4337,7 @@ function ShootingGridResults({ grid, gridScores, roster }) {
 
   const filters = useMemo(() => ({
     situationIds: situationIds.size === grid.situations.length ? null : situationIds,
-    sides: sides.size === 2 ? null : sides,
+    sides: sides.size === allSides.length ? null : sides,
     seriesIndices: seriesIndices.size === maxSeries ? null : seriesIndices,
   }), [situationIds, sides, seriesIndices]);
 
@@ -4305,8 +4363,11 @@ function ShootingGridResults({ grid, gridScores, roster }) {
         <div>
           <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase", marginBottom: 8 }}>Side</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}><input type="checkbox" checked={sides.has("left")} onChange={() => toggleSet(setSides, sides, "left")} /> Left</label>
-            <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}><input type="checkbox" checked={sides.has("right")} onChange={() => toggleSet(setSides, sides, "right")} /> Right</label>
+            {allSides.map(side => (
+              <label key={side} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
+                <input type="checkbox" checked={sides.has(side)} onChange={() => toggleSet(setSides, sides, side)} /> {SHOOTING_GRID_SIDE_LABELS[side]}
+              </label>
+            ))}
           </div>
         </div>
         <div>
@@ -10673,8 +10734,15 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
   async function handleExport() {
     setExportError("");
     if (!exportTemplate) { setShowTemplateEditor(true); return; }
-    const teamEvents = events.filter(isTeamWideEvent);
-    const individualEvents = events.filter(ev => !isTeamWideEvent(ev));
+    // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : la confirmation proposait des événements
+    // d'une AUTRE semaine que celle affichée/exportée) : "events" contient TOUT le planning,
+    // pas seulement la semaine en cours — il faut d'abord ne garder que les jours de la
+    // semaine actuellement affichée (weekStart à weekStart+6), avant de séparer "toute
+    // l'équipe" / "individuel".
+    const weekDateKeys = new Set(Array.from({ length: 7 }, (_, i) => toDateKey(addDays(weekStart, i))));
+    const weekEvents = events.filter(ev => weekDateKeys.has(ev.date));
+    const teamEvents = weekEvents.filter(isTeamWideEvent);
+    const individualEvents = weekEvents.filter(ev => !isTeamWideEvent(ev));
     if (individualEvents.length === 0 && !exportTemplate.notesZone) {
       await runExport(teamEvents, "");
       return;
