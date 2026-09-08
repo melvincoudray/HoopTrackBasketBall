@@ -966,12 +966,22 @@ function SPACING_LIST(cats) { return categoryTags("Spacing", cats); }
 // Reproduit la logique du Dashboard original : top N tags par fréquence, avec un
 // optional "Other" bucket grouping the rest (used for the "Plays" donut).
 function topBucket(plays, labels, n, withOther) {
-  const items = groupBreakdown(plays, labels).sort((a, b) => b.count - a.count).slice(0, n);
+  const raw = groupBreakdown(plays, labels);
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : la somme des % dépassait largement 100%,
+  // ex. 124% sur "Efficiency by playtype") : "freq" venait de groupBreakdown, calculé par
+  // rapport au total de TOUTES les actions offensives/défensives — or une action de Rebound
+  // peut légitimement porter un second tag Playtype en même temps, comptant alors deux fois
+  // sur ce même dénominateur. Recalculé ici par rapport au total des OCCURRENCES DE TAG DE
+  // CETTE CATÉGORIE (comme le fait déjà categoryBreakdown pour "Plays"), pour que la somme
+  // fasse toujours exactement 100%, quel que soit le cumul de tags sur une même action.
+  const categoryTotal = raw.reduce((s, g) => s + g.count, 0);
+  const normalized = raw.map(g => ({ ...g, freq: categoryTotal ? (100 * g.count) / categoryTotal : 0 }));
+  const items = normalized.sort((a, b) => b.count - a.count).slice(0, n);
   const top = items.map(i => ({ name: i.label, value: i.count, freq: i.freq, pppp: i.pppp, open: i.open }));
   if (withOther) {
     const used = top.reduce((s, i) => s + i.value, 0);
-    const other = plays.length - used;
-    if (other > 0) top.push({ name: "Autres", value: other, freq: plays.length ? (100 * other) / plays.length : 0, pppp: null, open: null });
+    const other = categoryTotal - used;
+    if (other > 0) top.push({ name: "Autres", value: other, freq: categoryTotal ? (100 * other) / categoryTotal : 0, pppp: null, open: null });
   }
   return top;
 }
@@ -5848,8 +5858,9 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
             )}
 
             {/* Demandé par l'utilisateur : la partie Rebound Contest doit être dans Match
-                Stats, juste sous le Shot chart — pas dans Role. */}
-            <PlayerReboundContestSection playerName={playerName} />
+                Stats, juste sous le Shot chart — pas dans Role. Corrélée au(x) match(s)
+                sélectionné(s) au-dessus (matchFilter), pas à sa propre sélection locale. */}
+            <PlayerReboundContestSection playerName={playerName} matchFilter={matchFilter} />
 
             {position && (
               <>
@@ -7008,21 +7019,22 @@ function RoleTab({ playerName, isCoach }) {
 
 // Partie rebond de la fiche joueur — demandé par l'utilisateur : le joueur voit son propre %
 // Tag et % Box Out, avec un sélecteur pour choisir sur quelles sessions ("matchs sélectionnés").
-function PlayerReboundContestSection({ playerName }) {
+// Demandé par l'utilisateur : sur la fiche joueur, les pourcentages Tagg/Box Out doivent
+// correspondre aux matchs sélectionnés dans le sélecteur du dessus (pas à leur propre
+// sélection locale, indépendante) — contrairement à l'onglet "Rebound Contest" de Team, qui
+// garde volontairement son propre sélecteur de sessions et ne doit pas changer.
+function PlayerReboundContestSection({ playerName, matchFilter }) {
   const { index, sessions, loading } = useReboundContestSessions();
   const { categories } = useReboundContestCategories();
   const { name: tabName } = useReboundContestTabName();
-  const [selectedIds, setSelectedIds] = useState(null); // null = toutes les sessions
-  const userTouchedRef = useRef(false);
-  useEffect(() => {
-    if (userTouchedRef.current || index.length === 0) return;
-    setSelectedIds(new Set([index[index.length - 1].id]));
-  }, [index.length]);
-  function userSetSelectedIds(next) { userTouchedRef.current = true; setSelectedIds(next); }
 
   if (loading || !index.length) return null;
 
-  const effectiveIds = selectedIds === null ? index.map(s => s.id) : [...selectedIds];
+  // "matchFilter" est soit null (tous les matchs sélectionnés), soit un Set de clés
+  // "date||adversaire" — on ne garde ici que la date, pour ne retenir que les sessions Rebound
+  // Contest dont la date correspond à un match sélectionné.
+  const selectedDates = matchFilter ? new Set([...matchFilter].map(k => k.split("||")[0])) : null;
+  const effectiveIds = selectedDates === null ? index.map(s => s.id) : index.filter(s => selectedDates.has(s.date)).map(s => s.id);
   const events = effectiveIds.flatMap(id => (sessions[id]?.events) || []);
   const stats = computeReboundContestStats(events, [playerName], categories)[playerName];
   if (!stats || stats.total.possible === 0) return null;
@@ -7032,27 +7044,6 @@ function PlayerReboundContestSection({ playerName }) {
   return (
     <div>
       <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 10 }}>{tabName}</div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 14, flexWrap: "wrap" }}>
-        <button onClick={() => userSetSelectedIds(selectedIds === null ? new Set() : null)} style={{
-          padding: "6px 12px", background: selectedIds === null ? PANEL2 : "transparent", border: `1px solid ${LINE}`, borderRadius: 7,
-          color: PAPER, fontSize: 11.5, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
-        }}>
-          {selectedIds === null ? `All sessions (${index.length})` : `${effectiveIds.length} selected`}
-        </button>
-        {index.map(s => {
-          const checked = effectiveIds.includes(s.id);
-          return (
-            <button key={s.id} onClick={() => {
-              const cur = selectedIds === null ? new Set(index.map(x => x.id)) : new Set(selectedIds);
-              if (cur.has(s.id)) cur.delete(s.id); else cur.add(s.id);
-              userSetSelectedIds(cur.size === index.length ? null : cur);
-            }} style={{
-              padding: "5px 9px", borderRadius: 6, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
-              background: checked ? AMBER : "transparent", color: checked ? "#1a1200" : "#8B93A1", border: `1px solid ${checked ? AMBER : LINE}`,
-            }}>{s.label}</button>
-          );
-        })}
-      </div>
       <div style={{ display: "flex", gap: 26, flexWrap: "wrap" }}>
         {categories.map((cat, ci) => {
           const c = stats[cat.key] || { earned: 0, possible: 0, pct: null };
