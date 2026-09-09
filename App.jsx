@@ -3679,7 +3679,10 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
 
   useEffect(() => {
     if (playerName) {
-      storeGet("training:" + playerName).then(t => setTrainings((t || []).slice(0, 3)));
+      // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : les séances n'étaient pas dans l'ordre
+      // chronologique, mais dans l'ordre d'insertion dans l'app) : trié explicitement par date
+      // décroissante avant de ne garder que les 3 plus récentes.
+      storeGet("training:" + playerName).then(t => setTrainings((t || []).slice().sort((a, b) => b.date.localeCompare(a.date)).slice(0, 3)));
       storeGet("mental:" + playerName).then(m => setMentalEntries(m || []));
       storeGet("wellness:" + playerName).then(w => setWellnessEntries(w || []));
       storeGet("role:" + playerName).then(r => setRole(r || null));
@@ -6606,7 +6609,10 @@ function TrainingLog({ playerName, isCoach }) {
   const formRef = useRef();
 
   useEffect(() => { load(); }, [playerName]);
-  async function load() { setEntries((await storeGet("training:" + playerName)) || []); }
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : les séances s'affichaient dans l'ordre
+  // d'insertion dans l'app, pas dans l'ordre chronologique des dates saisies) — trié
+  // explicitement par date décroissante (la plus récente en premier) à chaque chargement.
+  async function load() { setEntries(((await storeGet("training:" + playerName)) || []).slice().sort((a, b) => b.date.localeCompare(a.date))); }
 
   function resetForm() {
     setEditingId(null);
@@ -6623,8 +6629,11 @@ function TrainingLog({ playerName, isCoach }) {
     const next = editingId
       ? entries.map(e => e.id === editingId ? { ...e, ...form } : e)
       : [{ id: uid(), ...form }, ...entries];
-    await storeSet("training:" + playerName, next);
-    setEntries(next);
+    // Trié à nouveau ici aussi (nouvel ajout, ou date modifiée pendant une édition) — pour
+    // rester cohérent avec le tri chronologique appliqué au chargement.
+    const sorted = next.slice().sort((a, b) => b.date.localeCompare(a.date));
+    await storeSet("training:" + playerName, sorted);
+    setEntries(sorted);
     resetForm();
     setBusy(false);
   }
