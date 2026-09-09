@@ -6644,7 +6644,24 @@ function TrainingLog({ playerName, isCoach }) {
     if (editingId === id) resetForm();
   }
 
-  const total = entries.length;
+  // PRÉCISION APPORTÉE PAR L'UTILISATEUR (après le premier correctif, qui comptait simplement
+  // les dates distinctes) : Coll Off + Coll Def le même jour ne comptent que pour 1 séance
+  // (deux moitiés de la même séance collective) — MAIS si "Coll Def" (ou "Coll Off") apparaît
+  // deux fois le même jour, ça signifie deux séances différentes, pas une seule. Toute autre
+  // catégorie (Individual, ou une catégorie personnalisée) compte toujours séparément, jamais
+  // fusionnée avec Coll Off/Coll Def.
+  const total = useMemo(() => {
+    const byDate = {};
+    for (const e of entries) { if (!byDate[e.date]) byDate[e.date] = []; byDate[e.date].push(e); }
+    let sum = 0;
+    for (const dateEntries of Object.values(byDate)) {
+      const collOff = dateEntries.filter(e => e.thematique === "Coll Off").length;
+      const collDef = dateEntries.filter(e => e.thematique === "Coll Def").length;
+      const others = dateEntries.filter(e => e.thematique !== "Coll Off" && e.thematique !== "Coll Def").length;
+      sum += Math.max(collOff, collDef) + others;
+    }
+    return sum;
+  }, [entries]);
   const ratedEntries = entries.filter(e => e.eval !== null && e.eval !== undefined);
   const avgEval = ratedEntries.length ? ratedEntries.reduce((s, e) => s + Number(e.eval), 0) / ratedEntries.length : null;
   const totalDuree = entries.reduce((s, e) => s + (Number(e.duree) || 0), 0);
