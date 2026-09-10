@@ -9094,7 +9094,7 @@ function ScoutingComparison({ teams }) {
 // tags reconnus se configurent au même endroit que pour Import Match : Settings.
 // ---------------------------------------------------------------------------
 
-function ObservationTab() {
+function ObservationTab({ isCoach }) {
   const [observed, setObserved] = useState({}); // { teamName: { plays, importedAt } }
   const [loading, setLoading] = useState(true);
   const [teamName, setTeamName] = useState("");
@@ -9183,39 +9183,45 @@ function ObservationTab() {
 
   return (
     <div>
-      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 22, marginBottom: 24 }}>
-        <p style={{ color: "#8B93A1", fontSize: 13.5, lineHeight: 1.6, margin: "0 0 16px" }}>
-          Import a coding file (same format as Import Match) for an opponent team you've scouted. The app breaks
-          down their tendencies by frequency and efficiency — plays, playtypes, screen defense, defense type, and
-          any other category configured in <b>Settings</b>.
-        </p>
-        <div style={{ marginBottom: 14 }}>
-          <label style={labelStyle}>Observed team name</label>
-          <input type="text" list="observed-team-names" placeholder="e.g. Zalgiris U16" value={teamName} onChange={e => setTeamName(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", maxWidth: 320 }} />
-          <datalist id="observed-team-names">
-            {Object.keys(observed).map(name => <option key={name} value={name} />)}
-          </datalist>
-          {teamName.trim() && observed[teamName.trim()] && (
-            <div style={{ fontSize: 11.5, color: TEAL, marginTop: 6 }}>
-              This team already has {observed[teamName.trim()].imports?.length ?? 1} file(s) imported ({observed[teamName.trim()].plays.length} actions) — this new file will be added to them, not replace them.
+      {/* Demandé par l'utilisateur : les joueurs ne doivent pas pouvoir insérer de fichier ici,
+          même si l'onglet Observation lui-même leur est visible. */}
+      {isCoach && (
+        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 22, marginBottom: 24 }}>
+          <p style={{ color: "#8B93A1", fontSize: 13.5, lineHeight: 1.6, margin: "0 0 16px" }}>
+            Import a coding file (same format as Import Match) for an opponent team you've scouted. The app breaks
+            down their tendencies by frequency and efficiency — plays, playtypes, screen defense, defense type, and
+            any other category configured in <b>Settings</b>.
+          </p>
+          <div style={{ marginBottom: 14 }}>
+            <label style={labelStyle}>Observed team name</label>
+            <input type="text" list="observed-team-names" placeholder="e.g. Zalgiris U16" value={teamName} onChange={e => setTeamName(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", maxWidth: 320 }} />
+            <datalist id="observed-team-names">
+              {Object.keys(observed).map(name => <option key={name} value={name} />)}
+            </datalist>
+            {teamName.trim() && observed[teamName.trim()] && (
+              <div style={{ fontSize: 11.5, color: TEAL, marginTop: 6 }}>
+                This team already has {observed[teamName.trim()].imports?.length ?? 1} file(s) imported ({observed[teamName.trim()].plays.length} actions) — this new file will be added to them, not replace them.
+              </div>
+            )}
+          </div>
+          <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
+          {fileErr && <div style={{ color: RED, fontSize: 13, marginTop: 10 }}>{fileErr}</div>}
+
+          {preview && (
+            <div style={{ marginTop: 18, padding: 16, background: PANEL2, borderRadius: 10, border: `1px solid ${LINE}` }}>
+              <div style={{ fontSize: 13, color: PAPER, marginBottom: 10 }}>
+                Sheet read: <b>{preview.sheetName}</b> · {preview.columnsDetected} columns detected ·
+                {" "}<b>{preview.playsWithPlayer}</b> actions recognized / {preview.totalRows} total rows
+              </div>
+              <button disabled={busy} onClick={confirmImport} style={{ ...btnPrimary, width: "auto", padding: "10px 20px" }}>
+                {busy ? "Import…" : "Confirm import"}
+              </button>
             </div>
           )}
         </div>
-        <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
-        {fileErr && <div style={{ color: RED, fontSize: 13, marginTop: 10 }}>{fileErr}</div>}
+      )}
 
-        {preview && (
-          <div style={{ marginTop: 18, padding: 16, background: PANEL2, borderRadius: 10, border: `1px solid ${LINE}` }}>
-            <div style={{ fontSize: 13, color: PAPER, marginBottom: 10 }}>
-              Sheet read: <b>{preview.sheetName}</b> · {preview.columnsDetected} columns detected ·
-              {" "}<b>{preview.playsWithPlayer}</b> actions recognized / {preview.totalRows} total rows
-            </div>
-            <button disabled={busy} onClick={confirmImport} style={{ ...btnPrimary, width: "auto", padding: "10px 20px" }}>
-              {busy ? "Import…" : "Confirm import"}
-            </button>
-          </div>
-        )}
-      </div>
+      {!isCoach && names.length === 0 && <EmptyState text="No opponent team has been observed yet." />}
 
       {names.length > 0 && (
         <div style={{ marginBottom: 24 }}>
@@ -9358,7 +9364,7 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
 
       {subtab === "comparaison" && (isCoach || v.comparison) && (scouting.loading ? <EmptyState text="Loading…" /> : <ScoutingComparison teams={allTeams} />)}
       {subtab === "rapport" && (isCoach || v.scoutingReport) && <ScoutingReportTab isCoach={isCoach} teamNames={Object.keys(scouting.teams)} scoutingTeams={scouting.teams} onSaveLogo={scouting.saveLogo} initialTeam={initialReportTeam} />}
-      {subtab === "observation" && (isCoach || v.observation) && <ObservationTab />}
+      {subtab === "observation" && (isCoach || v.observation) && <ObservationTab isCoach={isCoach} />}
 
       {subtab === "gerer" && isCoach && (
         <div>
