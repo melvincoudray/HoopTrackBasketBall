@@ -2917,7 +2917,7 @@ export default function App() {
             You don't have the permission to see this.
           </div>
         )}
-        {tab === "scouting" && (session.role === "coach" || visibility.tabs.scouting) && <ScoutingTab isCoach={session.role === "coach"} matchFilter={effectiveMatchFilter} initialSubtab={homeNav?.scoutingSubtab} initialReportTeam={homeNav?.scoutingTeam} />}
+        {tab === "scouting" && (session.role === "coach" || visibility.tabs.scouting) && <ScoutingTab isCoach={session.role === "coach"} matchFilter={effectiveMatchFilter} initialSubtab={homeNav?.scoutingSubtab} initialReportTeam={homeNav?.scoutingTeam} visibility={visibility} />}
         {tab === "scouting" && session.role === "player" && !visibility.tabs.scouting && (
           <div style={{ padding: 30, textAlign: "center", color: "#5C6470", border: `1px dashed ${LINE}`, borderRadius: 12, fontSize: 13.5 }}>
             You don't have the permission to see this.
@@ -3341,7 +3341,7 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
   useEffect(() => {
     if (expanded) {
       rawGet("team_" + team.id + ":app_users").then(u => setUsers(u || {}));
-      rawGet("team_" + team.id + ":visibility_config").then(v => setVisibility(v ? { ...DEFAULT_VISIBILITY, ...v, tabs: { ...DEFAULT_VISIBILITY.tabs, ...(v.tabs || {}) }, playerDetail: { ...DEFAULT_VISIBILITY.playerDetail, ...(v.playerDetail || {}) }, team: { ...DEFAULT_VISIBILITY.team, ...(v.team || {}) } } : DEFAULT_VISIBILITY));
+      rawGet("team_" + team.id + ":visibility_config").then(v => setVisibility(v ? { ...DEFAULT_VISIBILITY, ...v, tabs: { ...DEFAULT_VISIBILITY.tabs, ...(v.tabs || {}) }, playerDetail: { ...DEFAULT_VISIBILITY.playerDetail, ...(v.playerDetail || {}) }, team: { ...DEFAULT_VISIBILITY.team, ...(v.team || {}) }, scouting: { ...DEFAULT_VISIBILITY.scouting, ...(v.scouting || {}) } } : DEFAULT_VISIBILITY));
     }
   }, [expanded]);
 
@@ -3352,6 +3352,7 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
   function toggleTab(key) { saveVisibility({ ...visibility, tabs: { ...visibility.tabs, [key]: !visibility.tabs[key] } }); }
   function togglePlayerDetail(key) { saveVisibility({ ...visibility, playerDetail: { ...visibility.playerDetail, [key]: !visibility.playerDetail[key] } }); }
   function toggleTeamSection(key) { saveVisibility({ ...visibility, team: { ...visibility.team, [key]: !visibility.team[key] } }); }
+  function toggleScouting(key) { saveVisibility({ ...visibility, scouting: { ...visibility.scouting, [key]: !visibility.scouting[key] } }); }
   function toggleWellnessCharts() { saveVisibility({ ...visibility, wellnessCharts: !visibility.wellnessCharts }); }
 
   // Force TOUS les comptes de cette équipe (joueurs, staff) à se reconnecter — chaque appareil
@@ -3427,9 +3428,15 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
                 </label>
               ))}
               <div style={{ height: 1, background: LINE, margin: "4px 0" }} />
-              {[["standings", "Team — Standings"], ["teamPlay", "Team — Team Play"], ["advanced", "Team — Advanced"], ["resources", "Team — Resources"]].map(([key, label]) => (
+              {[["standings", "Team — Standings"], ["teamPlay", "Team — Team Play"], ["advanced", "Team — Advanced"], ["reboundContest", "Team — Rebound Contest"], ["shootingGrid", "Team — Shooting Grid"], ["resources", "Team — Resources"]].map(([key, label]) => (
                 <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
                   <input type="checkbox" checked={visibility.team[key]} onChange={() => toggleTeamSection(key)} /> {label}
+                </label>
+              ))}
+              <div style={{ height: 1, background: LINE, margin: "4px 0" }} />
+              {[["comparison", "Scouting — Comparison"], ["scoutingReport", "Scouting — Scouting Report"], ["observation", "Scouting — Observation"]].map(([key, label]) => (
+                <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
+                  <input type="checkbox" checked={visibility.scouting[key]} onChange={() => toggleScouting(key)} /> {label}
                 </label>
               ))}
               <div style={{ height: 1, background: LINE, margin: "4px 0" }} />
@@ -3899,28 +3906,10 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
             </>
           )}
 
-          {pd.stats && (
-            <>
-              <HomeSectionLink eyebrow="Box score" title="Your totals" onClick={() => goToPlayer("stats")} />
-              {box.loading ? <EmptyState text="Loading…" /> : box.entries.length === 0 ? (
-                <EmptyState text="No box score imported yet." />
-              ) : (
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 26 }}>
-                  {box.statLabels.slice(0, 6).map(l => (
-                    <StatPill key={l} label={friendlyStatLabel(l)} value={formatStatValue(l, box.averages[l])} />
-                  ))}
-                </div>
-              )}
-
-              <HomeSectionLink eyebrow="Coding file" title="Playtypes & shooting selection" onClick={() => goToPlayer("stats")} />
-              {off.length === 0 && def.length === 0 ? (
-                <EmptyState text="No action coded yet (Import Match tab)." />
-              ) : (
-                <OffenseDefenseBreakdown off={off} def={def} detailTables={false} />
-              )}
-            </>
-          )}
-
+          {/* Demandé par l'utilisateur : "Last 3 sessions" (Training), "Objectives" et "Four
+              Factors" déplacés juste après "Wellness" et avant "Box score" — soit juste après
+              le planning du jour. "Four Factors" reste également affichée plus bas pour le
+              coach (elle y était déjà) ; ici, c'est une vue dédiée à la page du joueur. */}
           {pd.training && (
             <>
               <HomeSectionLink eyebrow="Training" title="Last 3 sessions" onClick={() => goToPlayer("training")} />
@@ -3944,6 +3933,46 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
                 <EmptyState text="No objective defined yet." />
               ) : (
                 <div style={{ fontSize: 13, color: "#8B93A1", marginBottom: 26 }}>{objectives.objectives.length} active objective{objectives.objectives.length !== 1 ? "s" : ""} — tap to see progress.</div>
+              )}
+            </>
+          )}
+
+          {(isCoach || (visibility || DEFAULT_VISIBILITY).team.advanced) && (
+            <>
+              <HomeSectionLink eyebrow="Team" title="Four Factors" onClick={goToTeam} />
+              {advanced.loading ? <EmptyState text="Loading…" /> : !advanced.perMatch.length ? (
+                <EmptyState text="No box score found in memory. Import a file from the 'Full Stats' tab (top menu)." />
+              ) : (
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 26 }}>
+                  <StatPill label="ORTG" value={ortg !== null ? ortg.toFixed(1) : "–"} tone="teal" />
+                  <StatPill label="DRTG" value={drtg !== null ? drtg.toFixed(1) : "–"} tone="red" />
+                  <StatPill label="eFG%" value={efg !== null ? efg.toFixed(1) + "%" : "–"} />
+                  <StatPill label="TOV%" value={tovPct !== null ? tovPct.toFixed(1) + "%" : "–"} tone="red" />
+                  <StatPill label="FTA/FGA" value={ftRate !== null ? ftRate.toFixed(2) : "–"} />
+                  <StatPill label="OREB%" value={orebPct !== null ? orebPct.toFixed(1) + "%" : "–"} />
+                </div>
+              )}
+            </>
+          )}
+
+          {pd.stats && (
+            <>
+              <HomeSectionLink eyebrow="Box score" title="Your totals" onClick={() => goToPlayer("stats")} />
+              {box.loading ? <EmptyState text="Loading…" /> : box.entries.length === 0 ? (
+                <EmptyState text="No box score imported yet." />
+              ) : (
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 26 }}>
+                  {box.statLabels.slice(0, 6).map(l => (
+                    <StatPill key={l} label={friendlyStatLabel(l)} value={formatStatValue(l, box.averages[l])} />
+                  ))}
+                </div>
+              )}
+
+              <HomeSectionLink eyebrow="Coding file" title="Playtypes & shooting selection" onClick={() => goToPlayer("stats")} />
+              {off.length === 0 && def.length === 0 ? (
+                <EmptyState text="No action coded yet (Import Match tab)." />
+              ) : (
+                <OffenseDefenseBreakdown off={off} def={def} detailTables={false} />
               )}
             </>
           )}
@@ -6816,6 +6845,10 @@ const DEFAULT_VISIBILITY = {
   tabs: { players: true, team: true, scouting: true, planning: true },
   playerDetail: { stats: true, objectives: true, training: true, mental: true, wellness: true, role: true, meetings: true },
   team: { standings: true, teamPlay: true, advanced: true, resources: true, reboundContest: true, shootingGrid: true },
+  // Demandé par l'utilisateur : Comparison / Scouting Report / Observation, chacune
+  // décochable séparément (auparavant, "Observation" était cachée aux joueurs de façon figée
+  // dans le code, sans case à cocher — et les deux autres restaient toujours visibles).
+  scouting: { comparison: true, scoutingReport: true, observation: true },
   wellnessCharts: false, // les graphiques Wellness sont cachés aux joueurs par défaut
 };
 
@@ -6834,7 +6867,7 @@ function useVisibilityConfig(teamId) {
     if (!teamId) { setConfig(DEFAULT_VISIBILITY); setLoading(false); return; }
     setLoading(true);
     storeGet("visibility_config").then(v => {
-      setConfig(v ? { ...DEFAULT_VISIBILITY, ...v, tabs: { ...DEFAULT_VISIBILITY.tabs, ...(v.tabs || {}) }, playerDetail: { ...DEFAULT_VISIBILITY.playerDetail, ...(v.playerDetail || {}) }, team: { ...DEFAULT_VISIBILITY.team, ...(v.team || {}) } } : DEFAULT_VISIBILITY);
+      setConfig(v ? { ...DEFAULT_VISIBILITY, ...v, tabs: { ...DEFAULT_VISIBILITY.tabs, ...(v.tabs || {}) }, playerDetail: { ...DEFAULT_VISIBILITY.playerDetail, ...(v.playerDetail || {}) }, team: { ...DEFAULT_VISIBILITY.team, ...(v.team || {}) }, scouting: { ...DEFAULT_VISIBILITY.scouting, ...(v.scouting || {}) } } : DEFAULT_VISIBILITY);
       setLoading(false);
     });
   }, [teamId]);
@@ -9253,7 +9286,7 @@ function ScoutingTeamRow({ name, team, onSaveLogo, onDelete }) {
   );
 }
 
-function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam }) {
+function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, visibility }) {
   const scouting = useScoutingTeams();
   const advanced = useTeamAdvancedStats(matchFilter);
   const box = useAllBoxScores(matchFilter);
@@ -9308,11 +9341,14 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam })
     setBusy(false); setPending(null); setReplaceChoice(null);
   }
 
+  const v = (visibility || DEFAULT_VISIBILITY).scouting;
   return (
     <div>
       <SectionTitle eyebrow="Scouting" title="Team comparison" />
       <div style={{ display: "flex", gap: 8, marginBottom: 20, borderBottom: `1px solid ${LINE}`, paddingBottom: 10, flexWrap: "wrap" }}>
-        {[["comparaison", "Comparison"], ["rapport", "Scouting Report"], ...(isCoach ? [["observation", "Observation"]] : []), ...(isCoach ? [["gerer", "Manage teams"]] : [])].map(([id, label]) => (
+        {[["comparaison", "Comparison", "comparison"], ["rapport", "Scouting Report", "scoutingReport"], ["observation", "Observation", "observation"], ...(isCoach ? [["gerer", "Manage teams"]] : [])]
+          .filter(([id, , key]) => id === "gerer" ? isCoach : (isCoach || v[key]))
+          .map(([id, label]) => (
           <button key={id} onClick={() => setSubtab(id)} style={{
             padding: "7px 12px", borderRadius: 7, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit",
             background: subtab === id ? PANEL2 : "transparent", color: subtab === id ? AMBER : "#8B93A1"
@@ -9320,9 +9356,9 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam })
         ))}
       </div>
 
-      {subtab === "comparaison" && (scouting.loading ? <EmptyState text="Loading…" /> : <ScoutingComparison teams={allTeams} />)}
-      {subtab === "rapport" && <ScoutingReportTab isCoach={isCoach} teamNames={Object.keys(scouting.teams)} scoutingTeams={scouting.teams} onSaveLogo={scouting.saveLogo} initialTeam={initialReportTeam} />}
-      {subtab === "observation" && isCoach && <ObservationTab />}
+      {subtab === "comparaison" && (isCoach || v.comparison) && (scouting.loading ? <EmptyState text="Loading…" /> : <ScoutingComparison teams={allTeams} />)}
+      {subtab === "rapport" && (isCoach || v.scoutingReport) && <ScoutingReportTab isCoach={isCoach} teamNames={Object.keys(scouting.teams)} scoutingTeams={scouting.teams} onSaveLogo={scouting.saveLogo} initialTeam={initialReportTeam} />}
+      {subtab === "observation" && (isCoach || v.observation) && <ObservationTab />}
 
       {subtab === "gerer" && isCoach && (
         <div>
