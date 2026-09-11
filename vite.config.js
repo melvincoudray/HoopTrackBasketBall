@@ -8,12 +8,19 @@ const rootDir = fileURLToPath(new URL('.', import.meta.url));
 // Tout est à plat à la racine du dépôt (pas de dossier public/), donc on copie
 // uniquement les icônes nécessaires dans le résultat de build — pas tout le
 // dossier racine (qui contiendrait aussi .git, dangereux à copier tel quel).
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "Enable notifications" échouait avec
+// "SecurityError: Script .../sw.js load failed") : "sw.js" n'était PAS dans cette liste —
+// il n'était donc jamais copié dans "dist/", et n'existait tout simplement pas sur le site
+// déployé. La règle de redirection générale (SPA, "/* -> /index.html") servait alors la
+// page d'accueil (du HTML) à la place quand le navigateur demandait "/sw.js", ce que le
+// navigateur refuse catégoriquement d'exécuter comme service worker.
 const iconFiles = [
   'apple-touch-icon.png',
   'apple-touch-icon-152.png',
   'apple-touch-icon-167.png',
   'icon-512.png',
   'icon-1024.png',
+  'sw.js',
 ];
 
 export default defineConfig({
