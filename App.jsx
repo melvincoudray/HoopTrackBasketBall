@@ -2244,14 +2244,20 @@ function usePushNotifications(teamId) {
     const isSupported = "serviceWorker" in navigator && "PushManager" in window && typeof Notification !== "undefined";
     setSupported(isSupported);
     if (!isSupported) return;
-    navigator.serviceWorker.register("/sw.js").catch(() => {});
-    navigator.serviceWorker.ready.then(reg => reg.pushManager.getSubscription()).then(sub => setSubscribed(!!sub)).catch(() => {});
+    console.log("[push] registering service worker…");
+    navigator.serviceWorker.register("/sw.js")
+      .then(reg => console.log("[push] service worker registered:", reg.scope))
+      .catch(err => console.error("[push] service worker registration FAILED:", err));
+    navigator.serviceWorker.ready.then(reg => reg.pushManager.getSubscription()).then(sub => setSubscribed(!!sub)).catch(err => console.error("[push] initial getSubscription check failed:", err));
   }, []);
 
   async function enable() {
     setError(""); setBusy(true);
+    console.log("[push] enable() started");
     try {
+      console.log("[push] requesting permission…");
       const perm = await Notification.requestPermission();
+      console.log("[push] permission result:", perm);
       setPermission(perm);
       if (perm !== "granted") { setBusy(false); return; }
       // BUG ÉVITÉ (déjà rencontré et corrigé une fois dans ce projet) : "import.meta" fait
@@ -2261,17 +2267,26 @@ function usePushNotifications(teamId) {
       // en dur ici plutôt que lue via une variable d'environnement.
       const VAPID_PUBLIC_KEY = VAPID_PUBLIC_KEY_CONST;
       if (!VAPID_PUBLIC_KEY) throw new Error("Notifications are not configured for this deployment yet.");
+      console.log("[push] waiting for service worker to be ready…");
       const reg = await navigator.serviceWorker.ready;
+      console.log("[push] service worker ready:", reg.scope);
       let sub = await reg.pushManager.getSubscription();
+      console.log("[push] existing subscription found?", !!sub);
       if (!sub) {
+        console.log("[push] subscribing to push manager…");
         sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) });
+        console.log("[push] subscribed successfully:", sub.endpoint);
       }
+      console.log("[push] saving subscription locally…");
       await rawSet("push_subscription:" + sub.endpoint.slice(-40), { teamId, endpoint: sub.endpoint, subscription: sub.toJSON() });
       // Enregistré aussi directement dans Supabase (table dédiée), pas seulement dans
       // app_storage — c'est là que la fonction serveur va chercher les abonnements à notifier.
+      console.log("[push] saving subscription to Supabase…");
       await savePushSubscriptionToSupabase(teamId, sub.toJSON());
+      console.log("[push] all done, subscribed!");
       setSubscribed(true);
     } catch (err) {
+      console.error("[push] enable() FAILED:", err);
       setError(err.message || "Unable to enable notifications.");
     }
     setBusy(false);
