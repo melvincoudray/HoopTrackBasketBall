@@ -2579,6 +2579,28 @@ function PlayerAvatar({ playerName, size = 34, editable = false }) {
   );
 }
 
+// Affiche "Online" (point vert) si le dernier signal de présence de cette personne date de
+// moins de 90 secondes (le signal est envoyé toutes les 30s tant que l'app reste ouverte — 90s
+// laisse une marge de 2-3 signaux manqués avant de considérer la personne hors ligne), sinon
+// "Last seen ...", ou "Never connected" si aucun signal n'a jamais été reçu.
+function OnlineStatus({ lastSeenAt }) {
+  if (!lastSeenAt) return <span style={{ fontSize: 11, color: "#5C6470" }}>Never connected</span>;
+  const secondsAgo = (Date.now() - lastSeenAt) / 1000;
+  if (secondsAgo < 90) {
+    return (
+      <span style={{ fontSize: 11, color: TEAL, display: "inline-flex", alignItems: "center", gap: 4 }}>
+        <span style={{ width: 6, height: 6, borderRadius: "50%", background: TEAL, display: "inline-block" }} />
+        Online
+      </span>
+    );
+  }
+  const minutesAgo = Math.round(secondsAgo / 60);
+  const label = minutesAgo < 60 ? `${minutesAgo}m ago`
+    : minutesAgo < 1440 ? `${Math.round(minutesAgo / 60)}h ago`
+    : `${Math.round(minutesAgo / 1440)}d ago`;
+  return <span style={{ fontSize: 11, color: "#5C6470" }}>Last seen {label}</span>;
+}
+
 function StatPill({ label, value, sub, tone = "amber" }) {
   const color = tone === "amber" ? AMBER : tone === "teal" ? TEAL : tone === "red" ? RED : PAPER;
   return (
@@ -2633,6 +2655,22 @@ export default function App() {
   }, []);
 
   useEffect(() => { if (team) bootstrap(); }, [team]);
+
+  // Demandé par l'utilisateur : savoir si un utilisateur est actuellement en ligne. Pas de
+  // connexion permanente en temps réel dans cette app — on envoie donc un signal "toujours là"
+  // toutes les 30 secondes tant que l'app reste ouverte, sous team_<id>:last_seen (un objet
+  // { nomUtilisateur: horodatage }, un seul par équipe pour éviter une clé par personne).
+  useEffect(() => {
+    if (!team || !session?.name) return;
+    async function sendHeartbeat() {
+      const key = "team_" + team.id + ":last_seen";
+      const current = (await rawGet(key)) || {};
+      await rawSet(key, { ...current, [session.name]: Date.now() });
+    }
+    sendHeartbeat();
+    const interval = setInterval(sendHeartbeat, 30000);
+    return () => clearInterval(interval);
+  }, [team, session?.name]);
 
   function selectTeam(t) {
     setActiveTeam(t.id); // toutes les clés de stockage sont désormais préfixées pour cette équipe
@@ -3473,6 +3511,7 @@ function AdminPanel({ onClose, teams, onTeamsChange }) {
 
 function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, onCancelDelete, onConfirmDelete, onUpdateLogo, refreshKey }) {
   const [users, setUsers] = useState(null);
+  const [lastSeen, setLastSeen] = useState({});
   const [newCode, setNewCode] = useState("");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
@@ -3491,6 +3530,7 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
     return Promise.all([
       rawGet("team_" + team.id + ":app_users").then(u => setUsers(u || {})),
       rawGet("team_" + team.id + ":visibility_config").then(v => setVisibility(v ? { ...DEFAULT_VISIBILITY, ...v, tabs: { ...DEFAULT_VISIBILITY.tabs, ...(v.tabs || {}) }, playerDetail: { ...DEFAULT_VISIBILITY.playerDetail, ...(v.playerDetail || {}) }, team: { ...DEFAULT_VISIBILITY.team, ...(v.team || {}) }, scouting: { ...DEFAULT_VISIBILITY.scouting, ...(v.scouting || {}) } } : DEFAULT_VISIBILITY)),
+      rawGet("team_" + team.id + ":last_seen").then(ls => setLastSeen(ls || {})),
     ]);
   }
 
@@ -3621,7 +3661,10 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
               {Object.entries(users).map(([name, u]) => (
                 <div key={name} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 12px" }}>
-                  <div style={{ fontSize: 13 }}>{name} <span style={{ fontSize: 11, color: "#5C6470" }}>· {u.role === "coach" ? "Staff" : "Player"}</span></div>
+                  <div style={{ fontSize: 13 }}>
+                    {name} <span style={{ fontSize: 11, color: "#5C6470" }}>· {u.role === "coach" ? "Staff" : "Player"}</span>
+                    {" · "}<OnlineStatus lastSeenAt={lastSeen[name]} />
+                  </div>
                   {confirmRemoveUser === name ? (
                     <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
                       <button onClick={() => { removeUser(name); setConfirmRemoveUser(null); }} style={{ background: RED, border: "none", borderRadius: 6, color: "#fff", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Yes</button>
