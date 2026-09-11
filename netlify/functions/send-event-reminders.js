@@ -1,18 +1,59 @@
 // Fonction planifiée (Netlify Scheduled Function) — tourne toutes les 15 minutes, vérifie les
-// événements du planning de TOUTES les équipes, et envoie une notification 2h avant le début de
-// chacun. Chaque événement n'est notifié qu'une seule fois (table "sent_event_reminders"),
-// même si cette fonction tourne plusieurs fois avant l'heure du rappel.
+// événements du planning de TOUTES les équipes, et envoie :
+//   1. une notification 2h avant le début de chaque événement,
+//   2. une notification au moment exact où l'événement commence.
+// Chaque type de rappel n'est envoyé qu'une seule fois par événement (table
+// "sent_event_reminders"), même si cette fonction tourne plusieurs fois avant l'heure visée.
 
 import webpush from "web-push";
 import { createClient } from "@supabase/supabase-js";
 
-const REMINDER_HOURS_BEFORE = 2;
 // Fenêtre de tolérance : la fonction tourne toutes les 15 min, donc un événement "tombe" dans
-// la fenêtre de rappel à un moment ou un autre dans les 15 minutes qui suivent son passage à
-// "il reste exactement 2h" — élargi ici à 20 minutes pour absorber tout retard d'exécution.
+// la fenêtre d'un rappel à un moment ou un autre dans les 15 minutes qui suivent le passage au
+// moment théorique du rappel — élargi ici à 20 minutes pour absorber tout retard d'exécution.
 const WINDOW_MINUTES = 20;
 // Identique à celle fixée en dur côté client (App.jsx) et dans send-push.js.
 const VAPID_PUBLIC_KEY = "BBkeNtAnlqwbvvUBohClr7rqRoeFqo89NNDfOr24wDzI2Ebb-ssWKwyywfYj2nWGOXTkwhxe0-WpYMsbi47xw2Q";
+
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur : un événement à 14h — heure française — déclenchait
+// le rappel "2h avant" à 14h au lieu de 12h) : le serveur Netlify tourne en UTC, alors que les
+// heures saisies dans le planning sont toujours en heure de Paris (été ou hiver). Sans cette
+// conversion explicite, "14:00" était compris comme 14h UTC (= 16h à Paris), décalant tout de 2h.
+// Calcule le décalage réel Paris/UTC pour une date donnée (gère automatiquement l'heure d'été
+// UTC+2 et l'heure d'hiver UTC+1, sans dépendre d'une bibliothèque externe).
+function getParisOffsetMinutes(date) {
+  const utcDate = new Date(date.toLocaleString("en-US", { timeZone: "UTC" }));
+  const parisDate = new Date(date.toLocaleString("en-US", { timeZone: "Europe/Paris" }));
+  return (parisDate - utcDate) / 60000;
+}
+function parisTimeToUTC(dateStr, timeStr) {
+  const naive = new Date(`${dateStr}T${timeStr}:00Z`); // traité provisoirement comme si "Z" (UTC)
+  const offsetMinutes = getParisOffsetMinutes(naive);
+  return new Date(naive.getTime() - offsetMinutes * 60000);
+}
+
+// Les deux rappels possibles pour un même événement : combien de minutes avant son début, le
+// suffixe à ajouter à sa clé de déduplication, et comment construire le message envoyé.
+const REMINDER_KINDS = [
+  {
+    minutesBefore: 120,
+    suffix: ":2h",
+    buildPayload: (ev) => ({
+      title: `In 2h: ${ev.title}`,
+      body: `${ev.startTime} · ${ev.type}${ev.location ? " · " + ev.location : ""}`,
+      url: "/",
+    }),
+  },
+  {
+    minutesBefore: 0,
+    suffix: ":start",
+    buildPayload: (ev) => ({
+      title: `Starting now: ${ev.title}`,
+      body: `${ev.type}${ev.location ? " · " + ev.location : ""}`,
+      url: "/",
+    }),
+  },
+];
 
 export const handler = async () => {
   const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
@@ -35,34 +76,33 @@ export const handler = async () => {
     const events = Array.isArray(row.value) ? row.value : [];
     for (const ev of events) {
       if (!ev.date || !ev.startTime || !ev.id) continue;
-      const startsAt = new Date(`${ev.date}T${ev.startTime}:00`);
+      const startsAt = parisTimeToUTC(ev.date, ev.startTime);
       const minutesUntilStart = (startsAt - now) / 60000;
-      const minutesUntilReminder = minutesUntilStart - REMINDER_HOURS_BEFORE * 60;
-      // L'événement "entre" dans la fenêtre de rappel si on est entre 0 et WINDOW_MINUTES
-      // minutes APRÈS le moment théorique du rappel (jamais avant, jamais trop après).
-      if (minutesUntilReminder > 0 || minutesUntilReminder < -WINDOW_MINUTES) continue;
 
-      const eventId = "reminder:" + ev.id;
-      const { data: already } = await supabase.from("sent_event_reminders").select("event_id").eq("event_id", eventId).maybeSingle();
-      if (already) continue;
+      for (const kind of REMINDER_KINDS) {
+        const minutesUntilReminder = minutesUntilStart - kind.minutesBefore;
+        // L'événement "entre" dans la fenêtre de ce rappel si on est entre 0 et WINDOW_MINUTES
+        // minutes APRÈS le moment théorique du rappel (jamais avant, jamais trop après).
+        if (minutesUntilReminder > 0 || minutesUntilReminder < -WINDOW_MINUTES) continue;
 
-      const { data: subs } = await supabase.from("push_subscriptions").select("endpoint, subscription").eq("team_id", teamId);
-      const payload = JSON.stringify({
-        title: `In 2h: ${ev.title}`,
-        body: `${ev.startTime} · ${ev.type}${ev.location ? " · " + ev.location : ""}`,
-        url: "/",
-      });
-      for (const sub of subs || []) {
-        try {
-          await webpush.sendNotification(sub.subscription, payload);
-        } catch (err) {
-          if (err.statusCode === 410 || err.statusCode === 404) {
-            await supabase.from("push_subscriptions").delete().eq("endpoint", sub.endpoint);
+        const eventId = "reminder:" + ev.id + kind.suffix;
+        const { data: already } = await supabase.from("sent_event_reminders").select("event_id").eq("event_id", eventId).maybeSingle();
+        if (already) continue;
+
+        const { data: subs } = await supabase.from("push_subscriptions").select("endpoint, subscription").eq("team_id", teamId);
+        const payload = JSON.stringify(kind.buildPayload(ev));
+        for (const sub of subs || []) {
+          try {
+            await webpush.sendNotification(sub.subscription, payload);
+          } catch (err) {
+            if (err.statusCode === 410 || err.statusCode === 404) {
+              await supabase.from("push_subscriptions").delete().eq("endpoint", sub.endpoint);
+            }
           }
         }
+        await supabase.from("sent_event_reminders").insert({ event_id: eventId });
+        notified++;
       }
-      await supabase.from("sent_event_reminders").insert({ event_id: eventId });
-      notified++;
     }
   }
 
