@@ -2212,6 +2212,97 @@ function usePlanningExportTemplate() {
 const SHOOTING_GRID_SIDE_ORDER = ["left", "center", "right"];
 const SHOOTING_GRID_SIDE_LABELS = { left: "Left", center: "Center", right: "Right" };
 
+// Clé publique VAPID — pas sensible (conçue pour être connue des navigateurs), fixée en dur
+// pour éviter toute dépendance à "import.meta" (voir note plus bas). Générée une seule fois
+// pour ce projet ; la clé PRIVÉE correspondante ne va, elle, jamais dans le code — uniquement
+// dans les variables d'environnement Netlify (VAPID_PRIVATE_KEY).
+const VAPID_PUBLIC_KEY_CONST = "BBkeNtAnlqwbvvUBohClr7rqRoeFqo89NNDfOr24wDzI2Ebb-ssWKwyywfYj2nWGOXTkwhxe0-WpYMsbi47xw2Q";
+
+// Convertit une clé VAPID (base64 URL-safe) en tableau d'octets — format attendu par
+// pushManager.subscribe(). Fonction standard, identique dans toute documentation Web Push.
+function urlBase64ToUint8Array(base64String) {
+  const padding = "=".repeat((4 - (base64String.length % 4)) % 4);
+  const base64 = (base64String + padding).replace(/-/g, "+").replace(/_/g, "/");
+  const rawData = atob(base64);
+  const outputArray = new Uint8Array(rawData.length);
+  for (let i = 0; i < rawData.length; i++) outputArray[i] = rawData.charCodeAt(i);
+  return outputArray;
+}
+
+// Notifications push — demandé par l'utilisateur, pour recevoir une vraie notification sur
+// l'appareil (même app fermée) à 4 moments précis : nouveau match importé, nouvelle ressource
+// partagée, message d'accueil modifié (texte exact du coach), et rappel 2h avant un événement
+// du planning (ce dernier géré côté serveur, voir netlify/functions/send-event-reminders.js).
+function usePushNotifications(teamId) {
+  const [supported, setSupported] = useState(false);
+  const [permission, setPermission] = useState(typeof Notification !== "undefined" ? Notification.permission : "default");
+  const [subscribed, setSubscribed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const isSupported = "serviceWorker" in navigator && "PushManager" in window && typeof Notification !== "undefined";
+    setSupported(isSupported);
+    if (!isSupported) return;
+    navigator.serviceWorker.register("/sw.js").catch(() => {});
+    navigator.serviceWorker.ready.then(reg => reg.pushManager.getSubscription()).then(sub => setSubscribed(!!sub)).catch(() => {});
+  }, []);
+
+  async function enable() {
+    setError(""); setBusy(true);
+    try {
+      const perm = await Notification.requestPermission();
+      setPermission(perm);
+      if (perm !== "granted") { setBusy(false); return; }
+      // BUG ÉVITÉ (déjà rencontré et corrigé une fois dans ce projet) : "import.meta" fait
+      // planter l'aperçu Claude entier, même si cette ligne n'est jamais exécutée là-bas
+      // (erreur d'analyse du fichier, pas d'exécution). La clé publique VAPID n'étant pas
+      // sensible (elle est justement faite pour être connue des navigateurs), elle est fixée
+      // en dur ici plutôt que lue via une variable d'environnement.
+      const VAPID_PUBLIC_KEY = VAPID_PUBLIC_KEY_CONST;
+      if (!VAPID_PUBLIC_KEY) throw new Error("Notifications are not configured for this deployment yet.");
+      const reg = await navigator.serviceWorker.ready;
+      let sub = await reg.pushManager.getSubscription();
+      if (!sub) {
+        sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: urlBase64ToUint8Array(VAPID_PUBLIC_KEY) });
+      }
+      await rawSet("push_subscription:" + sub.endpoint.slice(-40), { teamId, endpoint: sub.endpoint, subscription: sub.toJSON() });
+      // Enregistré aussi directement dans Supabase (table dédiée), pas seulement dans
+      // app_storage — c'est là que la fonction serveur va chercher les abonnements à notifier.
+      await savePushSubscriptionToSupabase(teamId, sub.toJSON());
+      setSubscribed(true);
+    } catch (err) {
+      setError(err.message || "Unable to enable notifications.");
+    }
+    setBusy(false);
+  }
+
+  return { supported, permission, subscribed, busy, error, enable };
+}
+
+// Enregistre l'abonnement directement dans Supabase — passe par le même client déjà initialisé
+// pour le reste du stockage (pas de branchement séparé), avec repli silencieux si Supabase
+// n'est pas configuré (ex. environnement de test).
+async function savePushSubscriptionToSupabase(teamId, subscriptionJson) {
+  await supabaseInit;
+  if (!supabase) return;
+  await supabase.from("push_subscriptions").upsert({ team_id: teamId, endpoint: subscriptionJson.endpoint, subscription: subscriptionJson }, { onConflict: "endpoint" });
+}
+
+// Déclenche l'envoi d'une notification à toute l'équipe, via la fonction serveur — jamais
+// directement depuis le navigateur (la clé privée ne doit jamais y être exposée). Échoue
+// silencieusement si la fonction serveur n'est pas déployée ou injoignable : ça ne doit jamais
+// bloquer l'action principale (importer un match, ajouter une ressource...).
+async function notifyTeam(teamId, title, body) {
+  try {
+    await fetch("/.netlify/functions/send-push", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ teamId, title, body }),
+    });
+  } catch (e) { /* pas de connexion, ou fonction non déployée — on n'interrompt jamais l'action principale pour ça */ }
+}
+
 function useShootingGridSessions() {
   const [index, setIndex] = useState([]);
   const [grids, setGrids] = useState({}); // { id: { id, date, label, situations: [...] } }
@@ -2824,6 +2915,9 @@ export default function App() {
                 const toAdd = newPlayers.filter(n => !playerList.has(String(n).trim().toLowerCase()));
                 if (toAdd.length) await saveTagCategories({ ...cats, "Player": [...(cats["Player"] || []), ...toAdd.map(n => n.trim())] });
               }
+              // Demandé par l'utilisateur : notifier toute l'équipe à chaque nouveau match
+              // importé (coding file).
+              notifyTeam(team.id, "New match imported", `${meta.opponent} · ${meta.date}`);
             }}
             matchesIndex={matchesIndex}
             onDeleteMatch={async (id, label) => {
@@ -3336,6 +3430,7 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [visibility, setVisibility] = useState(null);
+  const [confirmRemoveUser, setConfirmRemoveUser] = useState(null);
   const logoRef = useRef();
 
   useEffect(() => {
@@ -3473,7 +3568,14 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
               {Object.entries(users).map(([name, u]) => (
                 <div key={name} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 12px" }}>
                   <div style={{ fontSize: 13 }}>{name} <span style={{ fontSize: 11, color: "#5C6470" }}>· {u.role === "coach" ? "Staff" : "Player"}</span></div>
-                  <button onClick={() => removeUser(name)} title="Revoke access" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={14} /></button>
+                  {confirmRemoveUser === name ? (
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <button onClick={() => { removeUser(name); setConfirmRemoveUser(null); }} style={{ background: RED, border: "none", borderRadius: 6, color: "#fff", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Yes</button>
+                      <button onClick={() => setConfirmRemoveUser(null)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Cancel</button>
+                    </div>
+                  ) : (
+                    <button onClick={() => setConfirmRemoveUser(name)} title="Revoke access" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={14} /></button>
+                  )}
                 </div>
               ))}
             </div>
@@ -3638,6 +3740,7 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   const box = useBoxScore(playerName, matchFilter);
   const advanced = useTeamAdvancedStats(matchFilter);
   const objectives = useObjectives(playerName || "");
+  const push = usePushNotifications(team?.id);
   const [trainings, setTrainings] = useState([]);
   const [mentalEntries, setMentalEntries] = useState([]);
   const [wellnessEntries, setWellnessEntries] = useState([]);
@@ -3653,13 +3756,20 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   const [todayEvents, setTodayEvents] = useState([]);
   const [homeMessage, setHomeMessage] = useState("");
   const [editingMessage, setEditingMessage] = useState(false);
+  const [confirmClearMessage, setConfirmClearMessage] = useState(false);
   const [messageDraft, setMessageDraft] = useState("");
   const [messageBusy, setMessageBusy] = useState(false);
 
   useEffect(() => { storeGet("home_message").then(m => setHomeMessage(m || "")); }, []);
   async function saveHomeMessage() {
     setMessageBusy(true);
-    try { await storeSet("home_message", messageDraft.trim()); setHomeMessage(messageDraft.trim()); }
+    try {
+      await storeSet("home_message", messageDraft.trim());
+      setHomeMessage(messageDraft.trim());
+      // Demandé par l'utilisateur : la notification reprend le texte EXACT tapé par le coach,
+      // mot pour mot — pas un texte générique du type "nouveau message".
+      if (messageDraft.trim()) notifyTeam(team.id, "HoopTrack", messageDraft.trim());
+    }
     finally { setMessageBusy(false); setEditingMessage(false); }
   }
   async function clearHomeMessage() {
@@ -3771,7 +3881,14 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
                 <div style={{ fontSize: 12.5, color: PAPER, lineHeight: 1.5, whiteSpace: "pre-wrap", marginBottom: 8 }}>{homeMessage}</div>
                 <div style={{ display: "flex", gap: 12 }}>
                   <button onClick={() => { setMessageDraft(homeMessage); setEditingMessage(true); }} style={{ fontSize: 11.5, color: AMBER, background: "none", border: "none", cursor: "pointer" }}>Edit</button>
-                  <button onClick={clearHomeMessage} style={{ fontSize: 11.5, color: "#5C6470", background: "none", border: "none", cursor: "pointer" }}>Remove</button>
+                  {confirmClearMessage ? (
+                    <>
+                      <button onClick={() => { clearHomeMessage(); setConfirmClearMessage(false); }} style={{ fontSize: 11.5, color: RED, background: "none", border: "none", cursor: "pointer" }}>Confirm</button>
+                      <button onClick={() => setConfirmClearMessage(false)} style={{ fontSize: 11.5, color: "#8B93A1", background: "none", border: "none", cursor: "pointer" }}>Cancel</button>
+                    </>
+                  ) : (
+                    <button onClick={() => setConfirmClearMessage(true)} style={{ fontSize: 11.5, color: "#5C6470", background: "none", border: "none", cursor: "pointer" }}>Remove</button>
+                  )}
                 </div>
               </div>
             ) : (
@@ -3789,6 +3906,18 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
           )}
         </div>
       </div>
+
+      {/* Demandé par l'utilisateur : possibilité d'activer les notifications push, pour
+          recevoir sur l'appareil (même app fermée) : nouveau match importé, nouvelle
+          ressource, message d'accueil, et rappel 2h avant un événement du planning. Visible
+          pour tout le monde (coach et joueurs), pas seulement le coach. */}
+      {push.supported && !push.subscribed && push.permission !== "denied" && (
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: "12px 16px", marginBottom: 26 }}>
+          <div style={{ fontSize: 12.5, color: "#8B93A1" }}>Get notified on this device for new matches, resources, coach messages, and event reminders.</div>
+          <button disabled={push.busy} onClick={push.enable} style={{ ...btnPrimary, width: "auto", padding: "8px 16px", fontSize: 12.5, flexShrink: 0 }}>{push.busy ? "…" : "Enable notifications"}</button>
+        </div>
+      )}
+      {push.error && <div style={{ color: RED, fontSize: 12, marginBottom: 16 }}>{push.error}</div>}
 
       {(isCoach || (nextGame && (visibility || DEFAULT_VISIBILITY).tabs.scouting)) && (
         <div style={{ marginBottom: 26 }}>
@@ -4120,6 +4249,7 @@ function MatchTypeSelect({ value, onChange }) {
 
 function ShootingGridSituationEditor({ situation, roster, onChange, onRemove }) {
   const imgRef = useRef();
+  const [confirmRemove, setConfirmRemove] = useState(false);
   async function handleImage(e) {
     const file = e.target.files[0];
     if (!file) return;
@@ -4204,7 +4334,14 @@ function ShootingGridSituationEditor({ situation, roster, onChange, onRemove }) 
           </div>
         )}
       </div>
-      <button onClick={onRemove} style={{ background: "none", border: "none", color: RED, cursor: "pointer", flexShrink: 0, display: "flex", height: "fit-content" }}><Trash2 size={16} /></button>
+      {confirmRemove ? (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, flexShrink: 0 }}>
+          <button onClick={onRemove} style={{ background: "none", border: "none", color: RED, cursor: "pointer", fontSize: 11 }}>Confirm</button>
+          <button onClick={() => setConfirmRemove(false)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontSize: 11 }}>Cancel</button>
+        </div>
+      ) : (
+        <button onClick={() => setConfirmRemove(true)} style={{ background: "none", border: "none", color: RED, cursor: "pointer", flexShrink: 0, display: "flex", height: "fit-content" }}><Trash2 size={16} /></button>
+      )}
     </div>
   );
 }
@@ -6455,6 +6592,7 @@ function ObjectiveTrack({ startValue, currentValue, targetValue, progressPct, co
 }
 
 function ObjectiveCard({ objective, currentValue, isCoach, onEdit, onDelete }) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
   const hasCurrent = currentValue !== null && currentValue !== undefined;
   const hasStart = objective.startValue !== null && objective.startValue !== undefined;
   let progressPct = null, onTrack = null, delta = null;
@@ -6481,7 +6619,14 @@ function ObjectiveCard({ objective, currentValue, isCoach, onEdit, onDelete }) {
         {isCoach && (
           <div style={{ display: "flex", gap: 10, flexShrink: 0 }}>
             <button onClick={onEdit} style={{ fontSize: 11.5, color: AMBER, background: "none", border: "none", cursor: "pointer" }}>Edit</button>
-            <button onClick={onDelete} style={{ fontSize: 11.5, color: RED, background: "none", border: "none", cursor: "pointer" }}>Suppr.</button>
+            {confirmDelete ? (
+              <>
+                <button onClick={() => { onDelete(); setConfirmDelete(false); }} style={{ fontSize: 11.5, color: RED, background: "none", border: "none", cursor: "pointer" }}>Confirm</button>
+                <button onClick={() => setConfirmDelete(false)} style={{ fontSize: 11.5, color: "#8B93A1", background: "none", border: "none", cursor: "pointer" }}>Cancel</button>
+              </>
+            ) : (
+              <button onClick={() => setConfirmDelete(true)} style={{ fontSize: 11.5, color: RED, background: "none", border: "none", cursor: "pointer" }}>Delete</button>
+            )}
           </div>
         )}
       </div>
@@ -6634,6 +6779,7 @@ function TrainingLog({ playerName, isCoach }) {
   const [newThemeName, setNewThemeName] = useState("");
   const [form, setForm] = useState({ date: todayLocal(), thematique: themes[0], theme: "", objectif: "", commentaire: "", eval: 3, duree: 15 });
   const [busy, setBusy] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const { plan, save: savePlan } = useTrainingPlan(playerName);
   const formRef = useRef();
 
@@ -6813,7 +6959,14 @@ function TrainingLog({ playerName, isCoach }) {
               {isCoach && (
                 <div style={{ position: "absolute", top: 12, right: 12, display: "flex", gap: 10 }}>
                   <button onClick={() => startEdit(e)} title="Edit" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><ClipboardList size={14} /></button>
-                  <button onClick={() => remove(e.id)} title="Delete" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><X size={14} /></button>
+                  {confirmDeleteId === e.id ? (
+                    <>
+                      <button onClick={() => { remove(e.id); setConfirmDeleteId(null); }} style={{ background: "none", border: "none", color: RED, cursor: "pointer", fontSize: 11.5 }}>Confirm</button>
+                      <button onClick={() => setConfirmDeleteId(null)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontSize: 11.5 }}>Cancel</button>
+                    </>
+                  ) : (
+                    <button onClick={() => setConfirmDeleteId(e.id)} title="Delete" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><X size={14} /></button>
+                  )}
                 </div>
               )}
             </div>
@@ -7559,6 +7712,7 @@ function CustomStatForm({ initial, availableStats, onSave, onCancel }) {
 function CustomStatsPanel({ statsObj, isCoach }) {
   const { customStats, loading, saveStat, deleteStat } = useCustomStats();
   const [editing, setEditing] = useState(null); // null | "new" | stat object
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const availableStats = Object.keys(statsObj).filter(k => typeof statsObj[k] === "number");
 
   if (loading) return null;
@@ -7591,7 +7745,14 @@ function CustomStatsPanel({ statsObj, isCoach }) {
                 {isCoach && (
                   <div style={{ display: "flex", gap: 8 }}>
                     <button onClick={() => setEditing(s)} style={{ fontSize: 11, color: AMBER, background: "none", border: "none", cursor: "pointer" }}>Edit</button>
-                    <button onClick={() => deleteStat(s.id)} style={{ fontSize: 11, color: RED, background: "none", border: "none", cursor: "pointer" }}>Delete</button>
+                    {confirmDeleteId === s.id ? (
+                      <>
+                        <button onClick={() => { deleteStat(s.id); setConfirmDeleteId(null); }} style={{ fontSize: 11, color: RED, background: "none", border: "none", cursor: "pointer" }}>Confirm</button>
+                        <button onClick={() => setConfirmDeleteId(null)} style={{ fontSize: 11, color: "#8B93A1", background: "none", border: "none", cursor: "pointer" }}>Cancel</button>
+                      </>
+                    ) : (
+                      <button onClick={() => setConfirmDeleteId(s.id)} style={{ fontSize: 11, color: RED, background: "none", border: "none", cursor: "pointer" }}>Delete</button>
+                    )}
                   </div>
                 )}
               </div>
@@ -8465,6 +8626,7 @@ function ScoutingLayoutEditor({ player, layout, onSave, onResetShape, onClose, b
 }
 
 function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, teamLogo, onEdit, onDelete, printMode, onMoveUp, onMoveDown, isFirst, isLast, chartScale, layout, onEditLayout }) {
+  const [confirmDelete, setConfirmDelete] = useState(false);
   // 0 = aucun voile (photo visible à 100%), 100 = fond entièrement noir (photo invisible).
   const darkness = Math.max(0, Math.min(100, bgDarkness ?? 70)) / 100;
   // Étirement optionnel (activé par défaut, comme avant) : "100% 100%" remplit tout le cadre
@@ -8560,7 +8722,14 @@ function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, t
       {isCoach && !printMode && (
         <div style={{ position: "absolute", bottom: 10, left: 28, display: "flex", gap: 10, alignItems: "center" }}>
           <button onClick={onEdit} style={{ fontSize: 12, color: AMBER, background: "none", border: "none", cursor: "pointer" }}>Edit</button>
-          <button onClick={onDelete} style={{ fontSize: 12, color: RED, background: "none", border: "none", cursor: "pointer" }}>Delete</button>
+          {confirmDelete ? (
+            <>
+              <button onClick={() => { onDelete(); setConfirmDelete(false); }} style={{ fontSize: 12, color: RED, background: "none", border: "none", cursor: "pointer" }}>Confirm</button>
+              <button onClick={() => setConfirmDelete(false)} style={{ fontSize: 12, color: "#8B93A1", background: "none", border: "none", cursor: "pointer" }}>Cancel</button>
+            </>
+          ) : (
+            <button onClick={() => setConfirmDelete(true)} style={{ fontSize: 12, color: RED, background: "none", border: "none", cursor: "pointer" }}>Delete</button>
+          )}
           {onEditLayout && <button onClick={onEditLayout} style={{ fontSize: 12, color: "#8B93A1", background: "none", border: "none", cursor: "pointer" }}>Edit layout</button>}
           {(onMoveUp || onMoveDown) && (
             <div style={{ display: "flex", gap: 4 }}>
@@ -8581,6 +8750,7 @@ function ScoutingStaffPanel({ teamName, isCoach }) {
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [observation, setObservation] = useState(null); // { plays, imports } | null
+  const [confirmRemoveFileId, setConfirmRemoveFileId] = useState(null);
   const fileRef = useRef();
 
   useEffect(() => { load(); }, [teamName]);
@@ -8649,7 +8819,16 @@ function ScoutingStaffPanel({ teamName, isCoach }) {
                 {f.type?.startsWith("image/") ? <img src={f.dataUrl} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <ClipboardList size={26} color="#5C6470" />}
               </button>
               <div style={{ fontSize: 11.5, color: "#D8DCE2", wordBreak: "break-word", marginBottom: 6 }}>{f.name}</div>
-              {isCoach && <button onClick={() => removeFile(f.id)} style={{ fontSize: 11, color: RED, background: "none", border: "none", cursor: "pointer" }}>Remove</button>}
+              {isCoach && (
+                confirmRemoveFileId === f.id ? (
+                  <div style={{ display: "flex", gap: 8 }}>
+                    <button onClick={() => { removeFile(f.id); setConfirmRemoveFileId(null); }} style={{ fontSize: 11, color: RED, background: "none", border: "none", cursor: "pointer" }}>Confirm</button>
+                    <button onClick={() => setConfirmRemoveFileId(null)} style={{ fontSize: 11, color: "#8B93A1", background: "none", border: "none", cursor: "pointer" }}>Cancel</button>
+                  </div>
+                ) : (
+                  <button onClick={() => setConfirmRemoveFileId(f.id)} style={{ fontSize: 11, color: RED, background: "none", border: "none", cursor: "pointer" }}>Remove</button>
+                )
+              )}
             </div>
           ))}
         </div>
@@ -8671,6 +8850,7 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
   const report = useScoutingReport(selectedTeam || null);
   const [subtab, setSubtab] = useState("collectif");
   const [editing, setEditing] = useState(null); // null | "new" | player object
+  const [confirmDeletePlayerId, setConfirmDeletePlayerId] = useState(null);
   const [busy, setBusy] = useState(false);
   // Le logo est le MÊME que celui déjà géré dans "Manage teams" (pas une copie séparée) — on
   // le lit directement depuis là, pour que le mettre à jour ici ou là-bas revienne au même.
@@ -9102,6 +9282,7 @@ function ObservationTab({ isCoach }) {
   const [fileErr, setFileErr] = useState("");
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState(null);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const fileRef = useRef();
 
   useEffect(() => { load(); }, []);
@@ -9262,7 +9443,19 @@ function ObservationTab({ isCoach }) {
           {names.map(name => (
             <div key={name} style={{ ...btnRow, cursor: "default" }}>
               <span>{name} <span style={{ color: "#5C6470", fontSize: 12 }}>· {observed[name].plays.length} actions · imported {new Date(observed[name].importedAt).toLocaleDateString("en-US")}</span></span>
-              <button onClick={() => removeObserved(name)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
+              {/* Demandé par l'utilisateur : les joueurs (lecture seule) ne doivent RIEN
+                  pouvoir supprimer, sur tout le site — et toute suppression doit demander une
+                  confirmation, jamais au premier clic. */}
+              {isCoach && (
+                confirmDeleteId === name ? (
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                    <button onClick={() => { removeObserved(name); setConfirmDeleteId(null); }} style={{ background: RED, border: "none", borderRadius: 6, color: "#fff", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Yes</button>
+                    <button onClick={() => setConfirmDeleteId(null)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Cancel</button>
+                  </div>
+                ) : (
+                  <button onClick={() => setConfirmDeleteId(name)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
+                )
+              )}
             </div>
           ))}
         </div>
@@ -9273,6 +9466,7 @@ function ObservationTab({ isCoach }) {
 
 function ScoutingTeamRow({ name, team, onSaveLogo, onDelete }) {
   const logoRef = useRef();
+  const [confirmDelete, setConfirmDelete] = useState(false);
   async function handleLogo(e) {
     const file = e.target.files[0];
     if (!file) return;
@@ -9287,7 +9481,14 @@ function ScoutingTeamRow({ name, team, onSaveLogo, onDelete }) {
         <input ref={logoRef} type="file" accept="image/*" onChange={handleLogo} style={{ display: "none" }} />
         <span>{name} <span style={{ color: "#5C6470", fontSize: 12 }}>· source: {team.source} · updated {team.updatedAt}</span></span>
       </div>
-      <button onClick={onDelete} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
+      {confirmDelete ? (
+        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button onClick={() => { onDelete(); setConfirmDelete(false); }} style={{ background: RED, border: "none", borderRadius: 6, color: "#fff", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Confirm</button>
+          <button onClick={() => setConfirmDelete(false)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Cancel</button>
+        </div>
+      ) : (
+        <button onClick={() => setConfirmDelete(true)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
+      )}
     </div>
   );
 }
@@ -9471,6 +9672,7 @@ function ReboundContestSettings() {
   const { categories, save: saveCategories } = useReboundContestCategories();
   const [draftName, setDraftName] = useState(tabName);
   const [draftCats, setDraftCats] = useState(categories);
+  const [confirmRemoveIdx, setConfirmRemoveIdx] = useState(null);
   useEffect(() => setDraftName(tabName), [tabName]);
   useEffect(() => setDraftCats(categories), [categories]);
   const nameDirty = draftName !== tabName;
@@ -9523,7 +9725,14 @@ function ReboundContestSettings() {
                 <input value={cat.matchValues.join(", ")} onChange={e => updateMatchValues(i, e.target.value)}
                   style={{ padding: "7px 10px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 7, color: PAPER, fontFamily: "inherit" }} />
               </label>
-              <button onClick={() => removeCategory(i)} style={{ alignSelf: "flex-end", padding: "7px 12px", background: "none", border: `1px solid ${RED}`, borderRadius: 7, color: RED, cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>Remove</button>
+              {confirmRemoveIdx === i ? (
+                <div style={{ display: "flex", gap: 6, alignSelf: "flex-end" }}>
+                  <button onClick={() => { removeCategory(i); setConfirmRemoveIdx(null); }} style={{ padding: "7px 12px", background: RED, border: "none", borderRadius: 7, color: "#fff", cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>Confirm</button>
+                  <button onClick={() => setConfirmRemoveIdx(null)} style={{ padding: "7px 12px", background: "none", border: `1px solid ${LINE}`, borderRadius: 7, color: "#8B93A1", cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>Cancel</button>
+                </div>
+              ) : (
+                <button onClick={() => setConfirmRemoveIdx(i)} style={{ alignSelf: "flex-end", padding: "7px 12px", background: "none", border: `1px solid ${RED}`, borderRadius: 7, color: RED, cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>Remove</button>
+              )}
             </div>
             <div style={{ fontSize: 11, color: "#5C6470", marginBottom: 6 }}>Point descriptions (shown in the scoring legend)</div>
             {[2, 1, 0].map(pts => (
@@ -9708,6 +9917,7 @@ function TagCategoriesSettings({ roster, title = "Column categories (coding file
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [chartStyles, setChartStyles] = useState(currentCategoryChartStyles());
+  const [confirmRemoveCategory, setConfirmRemoveCategory] = useState(null);
 
   const BUILTIN_CATEGORIES = new Set(["Player", "Playtypes", "Plays", "Shot selection", "Defensive mistakes", "Screen defense", "Spacing", "Shot zone", "Results & misc."]);
 
@@ -9787,7 +9997,14 @@ function TagCategoriesSettings({ roster, title = "Column categories (coding file
                 <button onClick={syncPlayersFromRoster} style={{ fontSize: 11.5, color: AMBER, background: "none", border: "none", cursor: "pointer" }}>Sync with roster</button>
               )}
               {catName !== "Player" && (
-                <button onClick={() => removeCategory(catName)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }} title="Delete category"><Trash2 size={14} /></button>
+                confirmRemoveCategory === catName ? (
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <button onClick={() => { removeCategory(catName); setConfirmRemoveCategory(null); }} style={{ background: RED, border: "none", borderRadius: 6, color: "#fff", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Confirm</button>
+                    <button onClick={() => setConfirmRemoveCategory(null)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Cancel</button>
+                  </div>
+                ) : (
+                  <button onClick={() => setConfirmRemoveCategory(catName)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }} title="Delete category"><Trash2 size={14} /></button>
+                )
               )}
             </div>
           </div>
@@ -10547,6 +10764,7 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
   const [notesStyle, setNotesStyle] = useState({ ...DEFAULT_PLANNING_NOTES_STYLE, ...(template?.notesStyle || {}) });
   const [fontBase64, setFontBase64] = useState(template?.fontBase64 || null);
   const [fontName, setFontName] = useState(template?.fontName || null);
+  const [confirmRemoveFont, setConfirmRemoveFont] = useState(false);
   const [activeZone, setActiveZone] = useState(null); // zone en cours de dessin, ou null
   const [drawing, setDrawing] = useState(null); // { startX, startY, x, y, w, h } en pixels écran, pendant le glissement
   const [error, setError] = useState("");
@@ -10740,7 +10958,14 @@ function PlanningExportTemplateEditor({ template, onSave, onClear }) {
               {fontName && (
                 <>
                   <span style={{ fontSize: 12.5, color: TEAL }}>{fontName}</span>
-                  <button onClick={() => { setFontBase64(null); setFontName(null); }} style={{ background: "none", border: "none", color: RED, cursor: "pointer", fontSize: 12 }}>Remove</button>
+                  {confirmRemoveFont ? (
+                    <>
+                      <button onClick={() => { setFontBase64(null); setFontName(null); setConfirmRemoveFont(false); }} style={{ background: "none", border: "none", color: RED, cursor: "pointer", fontSize: 12 }}>Confirm</button>
+                      <button onClick={() => setConfirmRemoveFont(false)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontSize: 12 }}>Cancel</button>
+                    </>
+                  ) : (
+                    <button onClick={() => setConfirmRemoveFont(true)} style={{ background: "none", border: "none", color: RED, cursor: "pointer", fontSize: 12 }}>Remove</button>
+                  )}
                 </>
               )}
               <input ref={fontFileRef} type="file" accept=".ttf,.otf,font/ttf,font/otf" onChange={handleFontFile} style={{ display: "none" }} />
@@ -11274,6 +11499,8 @@ function TeamResourcesTab({ isCoach, team }) {
     setResources(next);
     setTitle(""); setUrl("");
     setBusy(false);
+    // Demandé par l'utilisateur : notifier toute l'équipe à chaque nouvelle ressource partagée.
+    notifyTeam(team.id, "New resource shared", entry.title);
   }
 
   async function togglePin(r) {
