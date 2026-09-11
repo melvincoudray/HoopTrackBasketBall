@@ -2248,8 +2248,21 @@ function usePushNotifications(teamId) {
     navigator.serviceWorker.register("/sw.js")
       .then(reg => console.log("[push] service worker registered:", reg.scope))
       .catch(err => console.error("[push] service worker registration FAILED:", err));
-    navigator.serviceWorker.ready.then(reg => reg.pushManager.getSubscription()).then(sub => setSubscribed(!!sub)).catch(err => console.error("[push] initial getSubscription check failed:", err));
-  }, []);
+    // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : une personne gérant plusieurs équipes sur le
+    // même appareil continuait de recevoir les notifications de l'ÉQUIPE PRÉCÉDENTE au lieu de
+    // celle qu'elle consultait actuellement) : un abonnement push est propre à l'APPAREIL, pas à
+    // l'équipe — donc si l'appareil avait déjà un abonnement (peu importe pour quelle équipe), on
+    // se contentait de vérifier "suis-je abonné ?" sans jamais remettre à jour l'équipe associée
+    // côté serveur. Corrigé : à chaque chargement, si un abonnement existe déjà, on le
+    // ré-associe systématiquement à l'équipe ACTUELLEMENT consultée.
+    navigator.serviceWorker.ready.then(reg => reg.pushManager.getSubscription()).then(sub => {
+      setSubscribed(!!sub);
+      if (sub && teamId) {
+        console.log("[push] existing subscription found on load — re-syncing to current team:", teamId);
+        savePushSubscriptionToSupabase(teamId, sub.toJSON()).catch(err => console.error("[push] re-sync to current team failed:", err));
+      }
+    }).catch(err => console.error("[push] initial getSubscription check failed:", err));
+  }, [teamId]);
 
   async function enable() {
     setError(""); setBusy(true);
@@ -3453,14 +3466,22 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
   const [busy, setBusy] = useState(false);
   const [visibility, setVisibility] = useState(null);
   const [confirmRemoveUser, setConfirmRemoveUser] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
   const logoRef = useRef();
 
   useEffect(() => {
-    if (expanded) {
-      rawGet("team_" + team.id + ":app_users").then(u => setUsers(u || {}));
-      rawGet("team_" + team.id + ":visibility_config").then(v => setVisibility(v ? { ...DEFAULT_VISIBILITY, ...v, tabs: { ...DEFAULT_VISIBILITY.tabs, ...(v.tabs || {}) }, playerDetail: { ...DEFAULT_VISIBILITY.playerDetail, ...(v.playerDetail || {}) }, team: { ...DEFAULT_VISIBILITY.team, ...(v.team || {}) }, scouting: { ...DEFAULT_VISIBILITY.scouting, ...(v.scouting || {}) } } : DEFAULT_VISIBILITY));
-    }
+    if (expanded) loadAdminData();
   }, [expanded]);
+
+  // Demandé par l'utilisateur : les données de cette carte (utilisateurs, visibilité) ne se
+  // chargeaient qu'une seule fois à l'ouverture — un bouton "Refresh" permet maintenant de les
+  // recharger à la demande, sans avoir à se déconnecter/reconnecter pour forcer une actualisation.
+  function loadAdminData() {
+    return Promise.all([
+      rawGet("team_" + team.id + ":app_users").then(u => setUsers(u || {})),
+      rawGet("team_" + team.id + ":visibility_config").then(v => setVisibility(v ? { ...DEFAULT_VISIBILITY, ...v, tabs: { ...DEFAULT_VISIBILITY.tabs, ...(v.tabs || {}) }, playerDetail: { ...DEFAULT_VISIBILITY.playerDetail, ...(v.playerDetail || {}) }, team: { ...DEFAULT_VISIBILITY.team, ...(v.team || {}) }, scouting: { ...DEFAULT_VISIBILITY.scouting, ...(v.scouting || {}) } } : DEFAULT_VISIBILITY)),
+    ]);
+  }
 
   async function saveVisibility(next) {
     setVisibility(next);
@@ -3580,7 +3601,10 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
             {resetStatus && <div style={{ fontSize: 12, color: TEAL, marginTop: 8 }}>{resetStatus}</div>}
           </div>
 
-          <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 8 }}>Players & coaches with an account</div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase" }}>Players & coaches with an account</div>
+            <button onClick={() => { setRefreshing(true); loadAdminData().finally(() => setRefreshing(false)); }} disabled={refreshing} style={{ fontSize: 11.5, color: refreshing ? "#5C6470" : TEAL, background: "none", border: "none", cursor: refreshing ? "default" : "pointer" }}>{refreshing ? "Refreshing…" : "↻ Refresh"}</button>
+          </div>
           {users === null ? (
             <div style={{ fontSize: 12.5, color: "#5C6470" }}>Loading…</div>
           ) : Object.keys(users).length === 0 ? (
