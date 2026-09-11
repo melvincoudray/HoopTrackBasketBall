@@ -6,3 +6,18 @@
   from = "/*"
   to = "/index.html"
   status = 200
+
+# BUG RÉEL CORRIGÉ (signalé par l'utilisateur : les fonctions serveur échouaient avec
+# "Cannot find module 'web-push'") : sans cette configuration explicite, l'empaqueteur de
+# fonctions de Netlify (esbuild) échoue parfois à inclure correctement certains modules aux
+# dépendances complexes — "web-push" en fait partie. Les marquer "external" force Netlify à
+# copier leur vrai dossier node_modules tel quel avec la fonction, au lieu d'essayer de les
+# fusionner dans un seul fichier (ce qui échouait silencieusement).
+[functions]
+  node_bundler = "esbuild"
+  external_node_modules = ["web-push", "@supabase/supabase-js"]
+
+# Vérifie les événements du planning toutes les 15 minutes, pour envoyer un rappel 2h avant
+# chacun (voir netlify/functions/send-event-reminders.js).
+[functions."send-event-reminders"]
+  schedule = "*/15 * * * *"
