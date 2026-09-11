@@ -3339,11 +3339,15 @@ function AdminGate({ onClose, teams, onTeamsChange }) {
   );
 }
 
-function PendingDeletionsBox() {
+function PendingDeletionsBox({ refreshKey }) {
   const [pending, setPending] = useState(null);
   const [busy, setBusy] = useState(null);
 
-  useEffect(() => { load(); }, []);
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : cette boîte ne se rechargeait jamais après son
+  // premier affichage — si elle était vide à l'ouverture de la page, elle restait invisible pour
+  // toujours, même si une nouvelle demande de suppression arrivait ensuite). Elle réagit
+  // maintenant aussi au bouton "Refresh" global de la page.
+  useEffect(() => { load(); }, [refreshKey]);
   async function load() { setPending((await rawGet("pending_deletions")) || []); }
 
   async function approve(req) { setBusy(req.id); await approveDeletion(req); await load(); setBusy(null); }
@@ -3380,6 +3384,7 @@ function AdminPanel({ onClose, teams, onTeamsChange }) {
   const [confirmDeleteTeam, setConfirmDeleteTeam] = useState(null);
   const [expandedTeam, setExpandedTeam] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
   const newLogoRef = useRef();
 
   async function handleNewLogo(e) {
@@ -3424,10 +3429,16 @@ function AdminPanel({ onClose, teams, onTeamsChange }) {
             <div style={{ fontFamily: "ui-monospace, monospace", color: AMBER, fontSize: 12, letterSpacing: "0.18em", marginBottom: 6 }}>ADMIN</div>
             <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>Teams & access</h1>
           </div>
-          <button onClick={onClose} style={btnSecondary}>Close</button>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            {/* Demandé par l'utilisateur : un seul bouton commun pour toute la page, pas un par
+                équipe — recharge à la fois les demandes de suppression en attente et toutes les
+                équipes actuellement dépliées. */}
+            <button onClick={() => setRefreshKey(k => k + 1)} style={btnSecondary}>↻ Refresh</button>
+            <button onClick={onClose} style={btnSecondary}>Close</button>
+          </div>
         </div>
 
-        <PendingDeletionsBox />
+        <PendingDeletionsBox refreshKey={refreshKey} />
 
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 24 }}>
           <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 12 }}>Add a team</div>
@@ -3452,6 +3463,7 @@ function AdminPanel({ onClose, teams, onTeamsChange }) {
             onCancelDelete={() => setConfirmDeleteTeam(null)}
             onConfirmDelete={() => removeTeam(team.id)}
             onUpdateLogo={(logo) => updateTeam(team.id, { logo })}
+            refreshKey={refreshKey}
           />
         ))}
       </div>
@@ -3459,19 +3471,18 @@ function AdminPanel({ onClose, teams, onTeamsChange }) {
   );
 }
 
-function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, onCancelDelete, onConfirmDelete, onUpdateLogo }) {
+function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, onCancelDelete, onConfirmDelete, onUpdateLogo, refreshKey }) {
   const [users, setUsers] = useState(null);
   const [newCode, setNewCode] = useState("");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [visibility, setVisibility] = useState(null);
   const [confirmRemoveUser, setConfirmRemoveUser] = useState(null);
-  const [refreshing, setRefreshing] = useState(false);
   const logoRef = useRef();
 
   useEffect(() => {
     if (expanded) loadAdminData();
-  }, [expanded]);
+  }, [expanded, refreshKey]);
 
   // Demandé par l'utilisateur : les données de cette carte (utilisateurs, visibilité) ne se
   // chargeaient qu'une seule fois à l'ouverture — un bouton "Refresh" permet maintenant de les
@@ -3601,10 +3612,7 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
             {resetStatus && <div style={{ fontSize: 12, color: TEAL, marginTop: 8 }}>{resetStatus}</div>}
           </div>
 
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-            <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase" }}>Players & coaches with an account</div>
-            <button onClick={() => { setRefreshing(true); loadAdminData().finally(() => setRefreshing(false)); }} disabled={refreshing} style={{ fontSize: 11.5, color: refreshing ? "#5C6470" : TEAL, background: "none", border: "none", cursor: refreshing ? "default" : "pointer" }}>{refreshing ? "Refreshing…" : "↻ Refresh"}</button>
-          </div>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 8 }}>Players & coaches with an account</div>
           {users === null ? (
             <div style={{ fontSize: 12.5, color: "#5C6470" }}>Loading…</div>
           ) : Object.keys(users).length === 0 ? (
