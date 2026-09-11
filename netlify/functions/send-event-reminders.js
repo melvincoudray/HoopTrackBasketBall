@@ -69,32 +69,47 @@ export const handler = async () => {
   if (error) return { statusCode: 500, body: "Supabase error: " + error.message };
 
   const now = new Date();
+  console.log("[reminders] run started at", now.toISOString(), "— found", (rows || []).length, "team(s) with planning events");
   let notified = 0;
 
   for (const row of rows || []) {
     const teamId = row.key.replace(/^team_/, "").replace(/:planning_events$/, "");
     const events = Array.isArray(row.value) ? row.value : [];
+    console.log("[reminders] team", teamId, "—", events.length, "event(s) in planning");
     for (const ev of events) {
-      if (!ev.date || !ev.startTime || !ev.id) continue;
+      if (!ev.date || !ev.startTime || !ev.id) {
+        console.log("[reminders]   event skipped (missing date/startTime/id):", JSON.stringify(ev));
+        continue;
+      }
       const startsAt = parisTimeToUTC(ev.date, ev.startTime);
       const minutesUntilStart = (startsAt - now) / 60000;
+      console.log(`[reminders]   event "${ev.title}" (${ev.id}) — ${ev.date} ${ev.startTime} Paris → ${startsAt.toISOString()} UTC — ${minutesUntilStart.toFixed(1)} min until start`);
 
       for (const kind of REMINDER_KINDS) {
         const minutesUntilReminder = minutesUntilStart - kind.minutesBefore;
         // L'événement "entre" dans la fenêtre de ce rappel si on est entre 0 et WINDOW_MINUTES
         // minutes APRÈS le moment théorique du rappel (jamais avant, jamais trop après).
-        if (minutesUntilReminder > 0 || minutesUntilReminder < -WINDOW_MINUTES) continue;
+        if (minutesUntilReminder > 0 || minutesUntilReminder < -WINDOW_MINUTES) {
+          console.log(`[reminders]     ${kind.suffix} — hors fenêtre (${minutesUntilReminder.toFixed(1)} min par rapport au moment visé) → ignoré`);
+          continue;
+        }
 
         const eventId = "reminder:" + ev.id + kind.suffix;
         const { data: already } = await supabase.from("sent_event_reminders").select("event_id").eq("event_id", eventId).maybeSingle();
-        if (already) continue;
+        if (already) {
+          console.log(`[reminders]     ${kind.suffix} — déjà envoyé précédemment → ignoré`);
+          continue;
+        }
 
         const { data: subs } = await supabase.from("push_subscriptions").select("endpoint, subscription").eq("team_id", teamId);
+        console.log(`[reminders]     ${kind.suffix} — DANS la fenêtre, envoi à ${(subs || []).length} abonnement(s)…`);
         const payload = JSON.stringify(kind.buildPayload(ev));
         for (const sub of subs || []) {
           try {
             await webpush.sendNotification(sub.subscription, payload);
+            console.log(`[reminders]       envoyé avec succès à ${sub.endpoint.slice(-30)}`);
           } catch (err) {
+            console.error(`[reminders]       ÉCHEC d'envoi à ${sub.endpoint.slice(-30)} —`, err.statusCode, err.message);
             if (err.statusCode === 410 || err.statusCode === 404) {
               await supabase.from("push_subscriptions").delete().eq("endpoint", sub.endpoint);
             }
@@ -106,5 +121,6 @@ export const handler = async () => {
     }
   }
 
+  console.log("[reminders] run finished — total notified:", notified);
   return { statusCode: 200, body: JSON.stringify({ notified }) };
 };
