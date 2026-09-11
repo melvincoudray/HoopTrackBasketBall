@@ -2309,13 +2309,20 @@ async function savePushSubscriptionToSupabase(teamId, subscriptionJson) {
 // silencieusement si la fonction serveur n'est pas déployée ou injoignable : ça ne doit jamais
 // bloquer l'action principale (importer un match, ajouter une ressource...).
 async function notifyTeam(teamId, title, body) {
+  console.log("[push] notifyTeam called —", { teamId, title, body });
   try {
-    await fetch("/.netlify/functions/send-push", {
+    const res = await fetch("/.netlify/functions/send-push", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ teamId, title, body }),
     });
-  } catch (e) { /* pas de connexion, ou fonction non déployée — on n'interrompt jamais l'action principale pour ça */ }
+    const text = await res.text();
+    console.log("[push] send-push response —", res.status, text);
+  } catch (e) {
+    // pas de connexion, ou fonction non déployée — on n'interrompt jamais l'action principale
+    // pour ça, mais on garde une trace pour pouvoir diagnostiquer si besoin.
+    console.error("[push] notifyTeam FAILED:", e);
+  }
 }
 
 function useShootingGridSessions() {
