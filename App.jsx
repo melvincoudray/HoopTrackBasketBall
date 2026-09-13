@@ -2661,11 +2661,13 @@ export default function App() {
   // toutes les 30 secondes tant que l'app reste ouverte, sous team_<id>:last_seen (un objet
   // { nomUtilisateur: horodatage }, un seul par équipe pour éviter une clé par personne).
   useEffect(() => {
-    if (!team || !session?.name) return;
+    if (!team || !session?.name) { console.log("[heartbeat] skipped — team or session missing", { team: team?.id, sessionName: session?.name }); return; }
+    console.log("[heartbeat] starting for", session.name, "on team", team.id);
     async function sendHeartbeat() {
       const key = "team_" + team.id + ":last_seen";
       const current = (await rawGet(key)) || {};
       await rawSet(key, { ...current, [session.name]: Date.now() });
+      console.log("[heartbeat] sent for", session.name, "at", new Date().toLocaleTimeString());
     }
     sendHeartbeat();
     const interval = setInterval(sendHeartbeat, 30000);
@@ -10777,7 +10779,14 @@ async function exportPlanningWithTemplate(template, events, weekStart, notesText
     const weekEnd = addDays(weekStart, 6);
     const sameMonth = weekStart.getMonth() === weekEnd.getMonth();
     const fmtStart = weekStart.toLocaleDateString("en-US", { month: "short", day: "numeric" });
-    const fmtEnd = weekEnd.toLocaleDateString("en-US", sameMonth ? { day: "numeric", year: "numeric" } : { month: "short", day: "numeric", year: "numeric" });
+    // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : le titre du PDF affichait "Sep 14 – 2026" au
+    // lieu de "Sep 14 – 20, 2026") : demander à toLocaleDateString le jour et l'année SANS le
+    // mois (pour éviter de répéter "Sep" deux fois dans le même mois) produit un format cassé
+    // dans ce moteur JS ("2026 (day: 20)" au lieu de "20, 2026"). Construit maintenant le
+    // libellé à la main dans ce cas, sans dépendre de ce format non fiable.
+    const fmtEnd = sameMonth
+      ? `${weekEnd.getDate()}, ${weekEnd.getFullYear()}`
+      : weekEnd.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
     const weekLabel = `${fmtStart} – ${fmtEnd}`;
     const zone = template.weekZone;
     drawWrapped(weekLabel, zone, weekStyle, zone.y + zone.height - weekStyle.fontSize);
