@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
-import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon, Calendar, Star } from "lucide-react";
+import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon, Calendar, Star, Bell, BellOff } from "lucide-react";
 import {
   PieChart, Pie, Cell, ComposedChart, Bar as RBar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
   RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar,
@@ -2233,7 +2233,7 @@ function urlBase64ToUint8Array(base64String) {
 // l'appareil (même app fermée) à 4 moments précis : nouveau match importé, nouvelle ressource
 // partagée, message d'accueil modifié (texte exact du coach), et rappel 2h avant un événement
 // du planning (ce dernier géré côté serveur, voir netlify/functions/send-event-reminders.js).
-function usePushNotifications(teamId) {
+function usePushNotifications(teamId, username) {
   const [supported, setSupported] = useState(false);
   const [permission, setPermission] = useState(typeof Notification !== "undefined" ? Notification.permission : "default");
   const [subscribed, setSubscribed] = useState(false);
@@ -2259,10 +2259,10 @@ function usePushNotifications(teamId) {
       setSubscribed(!!sub);
       if (sub && teamId) {
         console.log("[push] existing subscription found on load — re-syncing to current team:", teamId);
-        savePushSubscriptionToSupabase(teamId, sub.toJSON()).catch(err => console.error("[push] re-sync to current team failed:", err));
+        savePushSubscriptionToSupabase(teamId, username, sub.toJSON()).catch(err => console.error("[push] re-sync to current team failed:", err));
       }
     }).catch(err => console.error("[push] initial getSubscription check failed:", err));
-  }, [teamId]);
+  }, [teamId, username]);
 
   async function enable() {
     setError(""); setBusy(true);
@@ -2295,7 +2295,7 @@ function usePushNotifications(teamId) {
       // Enregistré aussi directement dans Supabase (table dédiée), pas seulement dans
       // app_storage — c'est là que la fonction serveur va chercher les abonnements à notifier.
       console.log("[push] saving subscription to Supabase…");
-      await savePushSubscriptionToSupabase(teamId, sub.toJSON());
+      await savePushSubscriptionToSupabase(teamId, username, sub.toJSON());
       console.log("[push] all done, subscribed!");
       setSubscribed(true);
     } catch (err) {
@@ -2311,10 +2311,19 @@ function usePushNotifications(teamId) {
 // Enregistre l'abonnement directement dans Supabase — passe par le même client déjà initialisé
 // pour le reste du stockage (pas de branchement séparé), avec repli silencieux si Supabase
 // n'est pas configuré (ex. environnement de test).
-async function savePushSubscriptionToSupabase(teamId, subscriptionJson) {
+async function savePushSubscriptionToSupabase(teamId, username, subscriptionJson) {
   await supabaseInit;
   if (!supabase) return;
-  await supabase.from("push_subscriptions").upsert({ team_id: teamId, endpoint: subscriptionJson.endpoint, subscription: subscriptionJson }, { onConflict: "endpoint" });
+  await supabase.from("push_subscriptions").upsert({ team_id: teamId, username: username || null, endpoint: subscriptionJson.endpoint, subscription: subscriptionJson }, { onConflict: "endpoint" });
+}
+
+// Lit la liste des personnes ayant activé les notifications pour cette équipe (une même
+// personne peut avoir plusieurs abonnements — plusieurs appareils — d'où le Set pour dédupliquer).
+async function getTeamPushSubscribers(teamId) {
+  await supabaseInit;
+  if (!supabase) return new Set();
+  const { data } = await supabase.from("push_subscriptions").select("username").eq("team_id", teamId);
+  return new Set((data || []).map(r => r.username).filter(Boolean));
 }
 
 // Déclenche l'envoi d'une notification à toute l'équipe, via la fonction serveur — jamais
@@ -3514,6 +3523,7 @@ function AdminPanel({ onClose, teams, onTeamsChange }) {
 function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, onCancelDelete, onConfirmDelete, onUpdateLogo, refreshKey }) {
   const [users, setUsers] = useState(null);
   const [lastSeen, setLastSeen] = useState({});
+  const [notificationSubscribers, setNotificationSubscribers] = useState(new Set());
   const [newCode, setNewCode] = useState("");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
@@ -3533,6 +3543,7 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
       rawGet("team_" + team.id + ":app_users").then(u => setUsers(u || {})),
       rawGet("team_" + team.id + ":visibility_config").then(v => setVisibility(v ? { ...DEFAULT_VISIBILITY, ...v, tabs: { ...DEFAULT_VISIBILITY.tabs, ...(v.tabs || {}) }, playerDetail: { ...DEFAULT_VISIBILITY.playerDetail, ...(v.playerDetail || {}) }, team: { ...DEFAULT_VISIBILITY.team, ...(v.team || {}) }, scouting: { ...DEFAULT_VISIBILITY.scouting, ...(v.scouting || {}) } } : DEFAULT_VISIBILITY)),
       rawGet("team_" + team.id + ":last_seen").then(ls => setLastSeen(ls || {})),
+      getTeamPushSubscribers(team.id).then(setNotificationSubscribers),
     ]);
   }
 
@@ -3663,9 +3674,12 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
               {Object.entries(users).map(([name, u]) => (
                 <div key={name} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 12px" }}>
-                  <div style={{ fontSize: 13 }}>
-                    {name} <span style={{ fontSize: 11, color: "#5C6470" }}>· {u.role === "coach" ? "Staff" : "Player"}</span>
-                    {" · "}<OnlineStatus lastSeenAt={lastSeen[name]} />
+                  <div style={{ fontSize: 13, display: "flex", alignItems: "center", gap: 6 }}>
+                    <span>{name} <span style={{ fontSize: 11, color: "#5C6470" }}>· {u.role === "coach" ? "Staff" : "Player"}</span>
+                    {" · "}<OnlineStatus lastSeenAt={lastSeen[name]} /></span>
+                    {notificationSubscribers.has(name)
+                      ? <span title="Notifications enabled" style={{ display: "flex" }}><Bell size={13} color={TEAL} /></span>
+                      : <span title="Notifications not enabled" style={{ display: "flex" }}><BellOff size={13} color="#5C6470" /></span>}
                   </div>
                   {confirmRemoveUser === name ? (
                     <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
@@ -3839,7 +3853,7 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   const box = useBoxScore(playerName, matchFilter);
   const advanced = useTeamAdvancedStats(matchFilter);
   const objectives = useObjectives(playerName || "");
-  const push = usePushNotifications(team?.id);
+  const push = usePushNotifications(team?.id, session?.name);
   const [trainings, setTrainings] = useState([]);
   const [mentalEntries, setMentalEntries] = useState([]);
   const [wellnessEntries, setWellnessEntries] = useState([]);
