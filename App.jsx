@@ -580,6 +580,8 @@ const SCOUT_STAT_SCHEMA = [
   { key: "poss", label: "Possessions", group: "Ratings" },
   { key: "ortg", label: "ORTG", group: "Ratings" },
   { key: "drtg", label: "DRTG", lowerBetter: true, group: "Ratings" },
+  { key: "nrtg", label: "Net rating", group: "Ratings" },
+  { key: "pct3poss", label: "% 3pts/Poss", pct: true, group: "Ratings" },
   { key: "pct3tst", label: "3pt shot frequency (share of shots attempted)", pct: true, group: "Shooting" },
   // Métriques propres aux exports FIBA — gardées sous leur nom d'origine (pas retraduites)
   // pour éviter de leur donner un sens que je ne suis pas sûr de connaître avec certitude.
@@ -710,6 +712,85 @@ function parseFibaLeaderboardFile(arrayBuffer, side = "offense") {
       stats.ortg = (100 * stats.pts) / stats.poss;
     }
     if (Object.keys(stats).length) teams.push({ name, stats });
+  }
+  return { sheetName, teams };
+}
+
+// Format "Classic" (demandé par l'utilisateur) : une ligne par équipe avec des MOYENNES PAR
+// MATCH déjà calculées (pas des totaux de saison) — ÉQUIPE, MJ, PTS, EVA, 2R, 2T, 2%, 3R, 3T,
+// 3%, LFR, LFT, LF%, RT, RO, RD, PD, IN, BP, CT, FTE, FPR. N'importe ni "Points allowed" (à
+// saisir manuellement ensuite) ni les possessions (calculées ici) — cf. la demande initiale.
+const CLASSIC_HEADER_ALIASES = {
+  name: ["équipe", "equipe", "team"], mj: ["mj"], pts: ["pts"], eff: ["eva"],
+  r2: ["2r"], t2: ["2t"], r3: ["3r"], t3: ["3t"], lfr: ["lfr"], lft: ["lft"],
+  rt: ["rt"], ro: ["ro"], rd: ["rd"], pd: ["pd"], int: ["in"], bp: ["bp"], ct: ["ct"], fte: ["fte"],
+};
+function parseClassicScoutingFile(arrayBuffer) {
+  const wb = XLSX.read(arrayBuffer, { type: "array" });
+  const sheetName = wb.SheetNames[0];
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[sheetName], { header: 1, raw: true, defval: "" });
+  const headerRowIdx = rows.findIndex(r => r && r.some(c => CLASSIC_HEADER_ALIASES.name.some(a => normTag(a) === normTag(c))));
+  if (headerRowIdx === -1) throw new Error("'Classic' format not recognized (no 'ÉQUIPE' column found).");
+  const headerRow = rows[headerRowIdx].map(h => String(h ?? "").trim());
+
+  const colToKey = {};
+  headerRow.forEach((h, i) => {
+    if (!h) return;
+    const norm = normTag(h);
+    for (const [key, aliases] of Object.entries(CLASSIC_HEADER_ALIASES)) {
+      if (aliases.some(a => normTag(a) === norm)) { colToKey[i] = key; break; }
+    }
+  });
+  const nameCol = Object.entries(colToKey).find(([, key]) => key === "name")?.[0];
+  if (nameCol === undefined) throw new Error("'Classic' format not recognized (no 'ÉQUIPE' column found).");
+
+  const teams = [];
+  for (let r = headerRowIdx + 1; r < rows.length; r++) {
+    const row = rows[r];
+    const name = row && row[Number(nameCol)] ? String(row[Number(nameCol)]).trim() : "";
+    if (!name) continue;
+    const raw = {};
+    Object.entries(colToKey).forEach(([idx, key]) => {
+      if (key === "name") return;
+      const v = row[Number(idx)];
+      if (v !== "" && v !== undefined && v !== null && !isNaN(Number(v))) raw[key] = Number(v);
+    });
+
+    const stats = { ...raw };
+    // Tirs tentés/manqués dérivés des réussis/tentés — jamais des colonnes % du fichier
+    // (ambiguïté fraction 0-1 vs 0-100), toujours recalculés depuis les comptages bruts.
+    const fga = (raw.t2 ?? 0) + (raw.t3 ?? 0);
+    const fgm = (raw.r2 ?? 0) + (raw.r3 ?? 0);
+    const missedFG = ((raw.t2 ?? 0) - (raw.r2 ?? 0)) + ((raw.t3 ?? 0) - (raw.r3 ?? 0));
+    const missedFT = (raw.lft ?? 0) - (raw.lfr ?? 0);
+    if (raw.t2 !== undefined && raw.r2 !== undefined && raw.t2 > 0) stats.pct2 = (100 * raw.r2) / raw.t2;
+    if (raw.t3 !== undefined && raw.r3 !== undefined && raw.t3 > 0) stats.pct3 = (100 * raw.r3) / raw.t3;
+    if (raw.lft !== undefined && raw.lfr !== undefined && raw.lft > 0) stats.pctlf = (100 * raw.lfr) / raw.lft;
+    if (fga > 0) stats.efg = (100 * (fgm + 0.5 * (raw.r3 ?? 0))) / fga;
+    if (fga > 0) stats.ftafga = (raw.lft ?? 0) / fga;
+
+    // Possessions (Dean Oliver, moyenne par match puisque les colonnes sources le sont déjà) :
+    // FGA - OREB + TOV + 0.44*FTA.
+    const poss = (raw.t2 !== undefined && raw.t3 !== undefined && raw.ro !== undefined && raw.bp !== undefined && raw.lft !== undefined)
+      ? fga - raw.ro + raw.bp + 0.44 * raw.lft : undefined;
+    if (poss !== undefined && poss > 0) {
+      stats.poss = poss;
+      if (raw.pts !== undefined) stats.ortg = (100 * raw.pts) / poss;
+      if (raw.bp !== undefined) stats.pctbp = (100 * raw.bp) / poss;
+      if (raw.t3 !== undefined) stats.pct3poss = (100 * raw.t3) / poss;
+      const orebOpportunities = missedFG + 0.44 * missedFT;
+      if (raw.ro !== undefined && orebOpportunities > 0) stats.pctro = (100 * raw.ro) / orebOpportunities;
+      const astOpportunities = fgm + 0.44 * (raw.lfr ?? 0);
+      if (raw.pd !== undefined && astOpportunities > 0) stats.pctpad = (100 * raw.pd) / astOpportunities;
+    }
+    // "FPR" (fautes provoquées/subies) n'a pas d'équivalent garanti dans le schéma existant
+    // ("fo" désigne les fautes offensives, un sens différent) — conservé tel quel, à part.
+    if (row[headerRow.findIndex(h => normTag(h) === "fpr")] !== undefined) {
+      const fprRaw = Number(row[headerRow.findIndex(h => normTag(h) === "fpr")]);
+      if (!isNaN(fprRaw)) stats.fpr = fprRaw;
+    }
+
+    teams.push({ name, stats });
   }
   return { sheetName, teams };
 }
@@ -8377,22 +8458,91 @@ function embedUrl(url) {
   return url; // lien direct (mp4, Vimeo déjà en /embed, etc.)
 }
 
+// Demandé par l'utilisateur : plusieurs liens vidéo par équipe scoutée (aller, retour, Coupe de
+// France, playoffs...), chacun conservé séparément — au lieu d'un seul lien qui écrasait le
+// précédent. Migration automatique : les anciennes données ({videoUrl, notes}) sont converties
+// en une liste à un seul élément dès le premier chargement, sans rien perdre.
+function getCollectiveVideos(collective) {
+  if (Array.isArray(collective.videos)) return collective.videos;
+  if (collective.videoUrl) return [{ id: "legacy", label: "Video", url: collective.videoUrl }];
+  return [];
+}
+
+// Affiche un seul lien vidéo (parmi potentiellement plusieurs) : son libellé, son lecteur
+// intégré si possible, un lien "ouvrir directement", et — pour le coach — un bouton de
+// suppression avec confirmation (jamais de suppression directe au premier clic).
+function ScoutingVideoBlock({ video, isCoach, confirming, onAskRemove, onCancelRemove, onConfirmRemove }) {
+  const [embedFailed, setEmbedFailed] = useState(false);
+  const embed = embedUrl(video.url);
+  return (
+    <div style={{ marginBottom: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8, gap: 10 }}>
+        <div style={{ fontSize: 14, fontWeight: 700 }}>{video.label}</div>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <a href={video.url} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12.5, color: AMBER, textDecoration: "none", whiteSpace: "nowrap" }}>Open the video ↗</a>
+          {isCoach && (
+            confirming ? (
+              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                <button onClick={onConfirmRemove} style={{ background: "none", border: "none", color: RED, cursor: "pointer", fontSize: 12 }}>Confirm</button>
+                <button onClick={onCancelRemove} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontSize: 12 }}>Cancel</button>
+              </div>
+            ) : (
+              <button onClick={onAskRemove} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={14} /></button>
+            )
+          )}
+        </div>
+      </div>
+      {embed && !embedFailed ? (
+        <div style={{ position: "relative", paddingBottom: "56.25%", height: 0, borderRadius: 12, overflow: "hidden", border: `1px solid ${LINE}`, background: PANEL }}>
+          <iframe src={embed} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", border: "none" }}
+            allow="autoplay; fullscreen" allowFullScreen title={video.label} onError={() => setEmbedFailed(true)} />
+        </div>
+      ) : (
+        <div style={{ padding: 16, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, fontSize: 12.5, color: "#8B93A1" }}>
+          Preview not available in this environment — use "Open the video" above.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ScoutingCollective({ collective, onSave, isCoach }) {
-  const [videoUrl, setVideoUrl] = useState(collective.videoUrl || "");
+  const videos = getCollectiveVideos(collective);
+  const [newLabel, setNewLabel] = useState("");
+  const [newUrl, setNewUrl] = useState("");
   const [notes, setNotes] = useState(collective.notes || "");
   const [busy, setBusy] = useState(false);
-  const [embedFailed, setEmbedFailed] = useState(false);
+  const [confirmRemoveId, setConfirmRemoveId] = useState(null);
   const [localVideo, setLocalVideo] = useState(null); // {url, name} — session uniquement, jamais sauvegardé
   const fileRef = useRef();
-  useEffect(() => { setVideoUrl(collective.videoUrl || ""); setNotes(collective.notes || ""); setEmbedFailed(false); }, [collective.videoUrl, collective.notes]);
+  useEffect(() => { setNotes(collective.notes || ""); }, [collective.notes]);
   useEffect(() => () => { if (localVideo) URL.revokeObjectURL(localVideo.url); }, [localVideo]); // libère la mémoire au démontage
-  const embed = embedUrl(collective.videoUrl);
 
   function handleLocalFile(e) {
     const file = e.target.files[0];
     if (!file) return;
     if (localVideo) URL.revokeObjectURL(localVideo.url);
     setLocalVideo({ url: URL.createObjectURL(file), name: file.name });
+  }
+
+  async function addVideo() {
+    if (!newUrl.trim()) return;
+    setBusy(true);
+    const next = [...videos, { id: uid(), label: newLabel.trim() || "Video", url: newUrl.trim() }];
+    await onSave({ videos: next, notes });
+    setNewLabel(""); setNewUrl("");
+    setBusy(false);
+  }
+
+  async function removeVideo(id) {
+    await onSave({ videos: videos.filter(v => v.id !== id), notes });
+    setConfirmRemoveId(null);
+  }
+
+  async function saveNotes() {
+    setBusy(true);
+    await onSave({ videos, notes });
+    setBusy(false);
   }
 
   return (
@@ -8403,11 +8553,11 @@ function ScoutingCollective({ collective, onSave, isCoach }) {
             <AlertTriangle size={15} color={AMBER} style={{ marginTop: 2, flexShrink: 0 }} />
             <div style={{ fontSize: 12, color: "#8B93A1", lineHeight: 1.5 }}>
               The file import below plays the video right away in your browser, but is <b>not saved</b> —
-              you'll need to re-import it on every visit, and only you can see it. The link, on the other hand, is saved and shared with the whole team.
+              you'll need to re-import it on every visit, and only you can see it. Video links, on the other hand, are saved and shared with the whole team — add as many as you need (home leg, away leg, cup, playoffs…).
             </div>
           </div>
 
-          <div style={{ marginBottom: 12 }}>
+          <div style={{ marginBottom: 16 }}>
             <label style={labelStyle}>Import a local video file (plays immediately, not saved)</label>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
               <input ref={fileRef} type="file" accept="video/*" onChange={handleLocalFile} style={{ color: "#8B93A1", fontSize: 13 }} />
@@ -8415,17 +8565,20 @@ function ScoutingCollective({ collective, onSave, isCoach }) {
             </div>
           </div>
 
-          <div style={{ marginBottom: 12 }}>
-            <label style={labelStyle}>— OR — Video link (YouTube, Google Drive, Vimeo, direct mp4…), saved and shared</label>
-            <input value={videoUrl} onChange={e => setVideoUrl(e.target.value)} placeholder="https://…" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }} />
+          <div style={{ marginBottom: 16, paddingTop: 12, borderTop: `1px solid ${LINE}` }}>
+            <label style={labelStyle}>— OR — Add a video link (YouTube, Google Drive, Vimeo, direct mp4…), saved and shared</label>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <MatchTypeSelect value={newLabel} onChange={setNewLabel} />
+              <input value={newUrl} onChange={e => setNewUrl(e.target.value)} placeholder="https://…" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", flex: "2 1 280px" }} />
+              <button disabled={busy || !newUrl.trim() || !newLabel} onClick={addVideo} style={{ ...btnPrimary, width: "auto", padding: "10px 20px" }}>{busy ? "…" : "+ Add video"}</button>
+            </div>
           </div>
-          <div style={{ marginBottom: 12 }}>
+
+          <div>
             <label style={labelStyle}>Game plan / team notes</label>
-            <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={5} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", resize: "vertical" }} />
+            <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={5} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", resize: "vertical", marginBottom: 10 }} />
+            <button disabled={busy} onClick={saveNotes} style={{ ...btnPrimary, width: "auto", padding: "10px 20px" }}>{busy ? "…" : "Save notes"}</button>
           </div>
-          <button disabled={busy} onClick={async () => { setBusy(true); await onSave({ videoUrl, notes }); setBusy(false); }} style={{ ...btnPrimary, width: "auto", padding: "10px 20px" }}>
-            {busy ? "…" : "Save link + notes"}
-          </button>
         </div>
       )}
 
@@ -8435,21 +8588,16 @@ function ScoutingCollective({ collective, onSave, isCoach }) {
         </div>
       )}
 
-      {embed ? (
-        <>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-            <div style={{ fontSize: 12.5, color: "#8B93A1" }}>If the video doesn't show below (blocked by the environment), open it directly:</div>
-            <a href={collective.videoUrl} target="_blank" rel="noopener noreferrer" style={{ fontSize: 12.5, color: AMBER, textDecoration: "none", whiteSpace: "nowrap", marginLeft: 10 }}>Open the video ↗</a>
-          </div>
-          {!embedFailed && (
-            <div style={{ position: "relative", paddingBottom: "56.25%", height: 0, borderRadius: 12, overflow: "hidden", border: `1px solid ${LINE}`, marginBottom: 20, background: PANEL }}>
-              <iframe src={embed} style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", border: "none" }}
-                allow="autoplay; fullscreen" allowFullScreen title="Scouting video" onError={() => setEmbedFailed(true)} />
-            </div>
-          )}
-        </>
+      {videos.length === 0 && !localVideo ? (
+        <EmptyState text="No video added yet." />
       ) : (
-        !localVideo && <EmptyState text="No video added yet." />
+        videos.map(v => (
+          <ScoutingVideoBlock key={v.id} video={v} isCoach={isCoach}
+            confirming={confirmRemoveId === v.id}
+            onAskRemove={() => setConfirmRemoveId(v.id)}
+            onCancelRemove={() => setConfirmRemoveId(null)}
+            onConfirmRemove={() => removeVideo(v.id)} />
+        ))
       )}
 
       {collective.notes && (
@@ -9577,22 +9725,50 @@ function ObservationTab({ isCoach }) {
   );
 }
 
-function ScoutingTeamRow({ name, team, onSaveLogo, onDelete }) {
+function ScoutingTeamRow({ name, team, onSaveLogo, onDelete, onSaveStats }) {
   const logoRef = useRef();
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [ptse, setPtse] = useState(team.stats?.ptse ?? "");
+  const [savingPtse, setSavingPtse] = useState(false);
+  useEffect(() => { setPtse(team.stats?.ptse ?? ""); }, [team.stats?.ptse]);
+
   async function handleLogo(e) {
     const file = e.target.files[0];
     if (!file) return;
     onSaveLogo(await fileToResizedDataURL(file, 200, 0.9));
   }
+
+  // Demandé par l'utilisateur : le fichier "Classic" ne fournit pas les points encaissés par
+  // match (pas dans ce format) — saisie manuelle ici, qui recalcule DRTG et le Net rating à
+  // partir des possessions déjà calculées lors de l'import, sans jamais y toucher elle-même.
+  async function savePtse() {
+    setSavingPtse(true);
+    const val = ptse === "" ? undefined : Number(ptse);
+    const poss = team.stats?.poss;
+    const nextStats = { ...team.stats, ptse: val };
+    if (val !== undefined && poss) {
+      nextStats.drtg = (100 * val) / poss;
+      if (nextStats.ortg !== undefined) nextStats.nrtg = nextStats.ortg - nextStats.drtg;
+    } else {
+      delete nextStats.drtg; delete nextStats.nrtg;
+    }
+    await onSaveStats(nextStats);
+    setSavingPtse(false);
+  }
+
   return (
-    <div style={{ ...btnRow, cursor: "default" }}>
+    <div style={{ ...btnRow, cursor: "default", flexWrap: "wrap", gap: 10 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
         <button type="button" onClick={() => logoRef.current && logoRef.current.click()} title="Set logo" style={{ width: 26, height: 26, borderRadius: 6, background: PANEL2, border: `1px solid ${LINE}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0, cursor: "pointer", padding: 0 }}>
           {team.logo ? <img src={team.logo} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }} /> : <Camera size={12} color="#5C6470" />}
         </button>
         <input ref={logoRef} type="file" accept="image/*" onChange={handleLogo} style={{ display: "none" }} />
         <span>{name} <span style={{ color: "#5C6470", fontSize: 12 }}>· source: {team.source} · updated {team.updatedAt}</span></span>
+      </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+        <label style={{ fontSize: 11, color: "#5C6470" }}>Points allowed:</label>
+        <input type="number" value={ptse} onChange={e => setPtse(e.target.value)} placeholder="—" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 70, padding: "5px 8px", fontSize: 12 }} />
+        <button disabled={savingPtse} onClick={savePtse} style={{ fontSize: 11, color: TEAL, background: "none", border: "none", cursor: "pointer" }}>{savingPtse ? "…" : "Save"}</button>
       </div>
       {confirmDelete ? (
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
@@ -9618,6 +9794,7 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
   const [fileErr, setFileErr] = useState("");
   const fileOffRef = useRef();
   const fileDefRef = useRef();
+  const fileClassicRef = useRef();
 
   // "Our team" est injectée automatiquement à partir des box scores déjà importés,
   // en plus des équipes de scouting enregistrées manuellement/via fichier/photo.
@@ -9646,16 +9823,30 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
     e.target.value = "";
   }
 
+  async function handleClassicFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setFileErr("");
+    try {
+      const buf = await file.arrayBuffer();
+      const parsed = parseClassicScoutingFile(buf);
+      if (!parsed.teams.length) throw new Error("No team detected in this file.");
+      startPending(parsed.teams, "excel-classic");
+    } catch (err) { setFileErr(err.message || "File format not recognized — tell me how it's structured and I'll add detection for it."); }
+    e.target.value = "";
+  }
+
   async function confirmPending() {
     setBusy(true);
     if (replaceChoice === "replace") {
       for (const name of Object.keys(scouting.teams)) await scouting.deleteTeam(name);
     }
     for (const t of pending.teams.filter(x => x.selected)) {
-      // Import défensif : on FUSIONNE avec les stats offensives déjà enregistrées pour cette
-      // équipe (même nom) plutôt que de les écraser, pour obtenir une fiche complète.
+      // Import défensif OU réimport "Classic" : on FUSIONNE avec les stats déjà enregistrées
+      // pour cette équipe (même nom) plutôt que de les écraser — pour "Classic", ça préserve
+      // en particulier les "Points allowed" saisis à la main lors d'un précédent import.
       const existing = scouting.teams[t.name];
-      const mergedStats = existing && pending.kind === "excel-def" ? { ...existing.stats, ...t.stats } : t.stats;
+      const mergedStats = existing && (pending.kind === "excel-def" || pending.kind === "excel-classic") ? { ...existing.stats, ...t.stats } : t.stats;
       await scouting.saveTeam(t.name, mergedStats, pending.kind.startsWith("excel") ? "excel" : "photo");
     }
     setBusy(false); setPending(null); setReplaceChoice(null);
@@ -9691,6 +9882,10 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
               <Upload size={14} /> Import file — Defense
             </button>
             <input ref={fileDefRef} type="file" accept=".xlsx,.xls,.csv" onChange={e => handleExcelFile(e, "defense")} style={{ display: "none" }} />
+            <button onClick={() => fileClassicRef.current && fileClassicRef.current.click()} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+              <Upload size={14} /> Import file — Classic
+            </button>
+            <input ref={fileClassicRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleClassicFile} style={{ display: "none" }} />
             <button onClick={() => setShowManual(s => !s)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
               <Plus size={14} /> Manual entry
             </button>
@@ -9698,6 +9893,9 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
           <div style={{ fontSize: 11.5, color: "#5C6470", marginBottom: 14 }}>
             "Offense" file: Poss, Pts, %2pt, %3pt, ORTG… "Defense" file (same FIBA format, stats allowed):
             DRTG is automatically derived from its PPP column. Import both for the same team to complete its profile.
+            {" "}"Classic" file: one row per team (ÉQUIPE, MJ, PTS, 2R/2T, 3R/3T, LFR/LFT, RO/RD, PD, BP, CT…) — advanced
+            stats (Possessions, ORTG, eFG%, TOV%, etc.) are calculated automatically. "Points allowed" isn't in this
+            format — enter it by hand per team below once imported, to unlock DRTG and Net rating for it.
           </div>
           {fileErr && <div style={{ color: RED, fontSize: 13, marginBottom: 14 }}>{fileErr}</div>}
 
@@ -9750,7 +9948,7 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
           {Object.keys(scouting.teams).length === 0 ? <EmptyState text="No scouting team saved yet." /> : (
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
               {Object.entries(scouting.teams).map(([name, t]) => (
-                <ScoutingTeamRow key={name} name={name} team={t} onSaveLogo={logo => scouting.saveLogo(name, logo)} onDelete={() => scouting.deleteTeam(name)} />
+                <ScoutingTeamRow key={name} name={name} team={t} onSaveLogo={logo => scouting.saveLogo(name, logo)} onDelete={() => scouting.deleteTeam(name)} onSaveStats={(stats) => scouting.saveTeam(name, stats, t.source)} />
               ))}
             </div>
           )}
