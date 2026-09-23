@@ -8816,7 +8816,7 @@ function StatShapeBadge({ label, value, size = 74, fontScale = 1, color = TEAL }
 // l'export garde sa mise en page fixe, déjà calibrée pour tenir à 2 joueurs par page). Les
 // valeurs par défaut reproduisent exactement la disposition actuelle, en pourcentages d'une
 // zone de référence de 900×560 — pour que rien ne change tant que le coach n'a pas personnalisé.
-const SCOUTING_LAYOUT_REF_W = 900, SCOUTING_LAYOUT_REF_H = 560;
+const SCOUTING_LAYOUT_REF_W = 900, SCOUTING_LAYOUT_REF_H = 640;
 const DEFAULT_SCOUTING_LAYOUT = {
   logo: { x: 850, y: 16, w: 30, h: 30 },
   photo: { x: 28, y: 28, w: 260, h: 260 },
@@ -8945,7 +8945,7 @@ function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, t
   const badgeMinSize = Math.round(40 * scaleFactor);
   const highlightsBox = L.highlights || DEFAULT_SCOUTING_LAYOUT.highlights;
   const highlightsBoxWpx = highlightsBox.w * scaleFactor;
-  const highlightsAvailableHpx = Math.max(highlightsBox.h, SCOUTING_LAYOUT_REF_H - highlightsBox.y) * scaleFactor;
+  const highlightsAvailableHpx = (SCOUTING_LAYOUT_REF_H - highlightsBox.y) * scaleFactor;
   const highlightsGap = 14;
   function autoFitBadgeSize(count, preferredSize) {
     if (count === 0) return preferredSize;
