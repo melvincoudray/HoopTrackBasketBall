@@ -966,6 +966,7 @@ function parseMatchFile(arrayBuffer, cats, unknownColumnDefault = "player") {
 
   const playerColIdx = [];
   const tagColIdx = [];
+  const unconfirmedTagColIdx = []; // colonnes tombées dans "tag" par défaut, sans correspondre à une catégorie connue
   const knownPlayers = knownPlayersSet(cats);
   cols.forEach((c, i) => {
     if (i <= 1 || !c) return;
@@ -973,11 +974,12 @@ function parseMatchFile(arrayBuffer, cats, unknownColumnDefault = "player") {
     if (knownPlayers.has(normTag(c))) { playerColIdx.push(i); return; } // in the "Player" list → confirmed
     if (allKnownTagsSet(cats).has(normTag(c))) { tagColIdx.push(i); return; }
     if (/^\d+$/.test(trimmed)) return; // en-tête purement numérique (ex. "0") = ligne d'équipe, pas un joueur
-    if (unknownColumnDefault === "tag") { tagColIdx.push(i); return; }
+    if (unknownColumnDefault === "tag") { tagColIdx.push(i); unconfirmedTagColIdx.push(i); return; }
     playerColIdx.push(i); // neither a known tag nor in the "Player" list → treated as a player by default, to confirm
   });
   const detectedPlayers = playerColIdx.map(i => cols[i]);
   const unconfirmedPlayers = detectedPlayers.filter(p => !knownPlayers.has(normTag(p)));
+  const unconfirmedTags = unconfirmedTagColIdx.map(i => cols[i]);
 
   // Les données commencent juste après la ligne d'en-tête. On filtre les lignes vides.
   const dataRows = rows.slice(headerRowIdx + 1).filter(r => Array.isArray(r) && r.some(v => v !== 0 && v !== "" && v !== undefined));
@@ -1000,7 +1002,7 @@ function parseMatchFile(arrayBuffer, cats, unknownColumnDefault = "player") {
     return flaggedPlayers.map(player => ({ category: String(category), button: String(button), player, tags }));
   });
 
-  return { sheetName, columnsDetected: cols.length, boundaryColumn: boundary, totalRows: dataRows.length, playsWithPlayer: plays.length, detectedPlayers, unconfirmedPlayers, plays };
+  return { sheetName, columnsDetected: cols.length, boundaryColumn: boundary, totalRows: dataRows.length, playsWithPlayer: plays.length, detectedPlayers, unconfirmedPlayers, unconfirmedTags, plays };
 }
 
 function playPoints(tags) {
@@ -1912,6 +1914,9 @@ const STAT_PATTERNS = {
   reb: [/^Reb\s*Tot\.?$/i, /^Reb$/i, /^Rebonds?$/i, /^R\.?D\.?$/i], // rebonds TOTAUX (offensifs+défensifs) — informatif
   ast: [/^Pad$/i, /^P\.?D\.?$/i, /passes?\s*d[ée]cisives?/i, /^AST$/i, /assists?/i],
   tov: [/^Bp$/i, /^B\.?P\.?$/i, /balles?\s*perdues?/i, /pertes?\s*(de\s*)?balles?/i, /^TOV$/i, /^TO$/i, /turn\s*overs?/i],
+  blk: [/^Ct$/i, /^C\.?T\.?$/i, /contres?/i, /^BLK$/i, /^BL$/i, /blocks?/i],
+  stl: [/^In$/i, /^I\.?N\.?$/i, /interceptions?/i, /^STL$/i, /^ST$/i, /steals?/i],
+  fouls: [/^Fte$/i, /^F\.?T\.?E\.?$/i, /fautes?(\s*commises?)?/i, /^PF$/i, /fouls?/i],
   pts: [/^Pts?$/i, /^Points?$/i],
   ftPct: [/^LF\s*%$/i, /^FT\s*%$/i, /^FT%$/i, /%\s*LF$/i],
   tpmPct: [/^3\s*pts?\s*%$/i, /^3P\s*%$/i, /^3PT\s*%$/i],
@@ -1933,6 +1938,7 @@ const STAT_KEY_FRIENDLY_NAME = {
   minutes: "Minutes / Playing time", made2: "2PT Made", missed2: "2PT Missed", made3: "3PT Made", missed3: "3PT Missed",
   madeFT: "FT Made", missedFT: "FT Missed", fga: "FG Attempted (total)", fta: "FT Attempted (total)",
   tov: "Turnovers", oreb: "Offensive Rebounds", reb: "Rebounds (total)", ast: "Assists", pts: "Points",
+  blk: "Blocks", stl: "Steals", fouls: "Fouls",
   twoPct: "% 2PT (if already in the file)", tpmPct: "% 3PT (if already in the file)", ftPct: "% FT (if already in the file)",
 };
 
@@ -2095,6 +2101,9 @@ function computeWeightedTeamPercentages(perMatch) {
   const astOpportunities = sumFgm + 0.44 * sumMadeFT;
   const astPct = (has("ast") && has("fgm") && has("madeFT") && astOpportunities > 0) ? (100 * sumAst) / astOpportunities : null;
 
+  const sumPoss3 = sumPoss;
+  const pct3poss = (has("made3") && has("missed3") && has("poss") && sumPoss3 > 0) ? (100 * (sumMade3 + sumMissed3)) / sumPoss3 : null;
+
   // BUG RÉEL CORRIGÉ (signalé par l'utilisateur, sur un vrai fichier — écart entre 68 affiché
   // et 87 attendu) : ORTG/DRTG/FT Rate étaient calculés en faisant la MOYENNE SIMPLE du
   // ORTG/DRTG/FT Rate de chaque match — exactement la même erreur que celle déjà corrigée
@@ -2107,7 +2116,7 @@ function computeWeightedTeamPercentages(perMatch) {
   const drtg = (has("opponentScore") && has("poss") && sumPoss > 0) ? (100 * sumOpponentScore) / sumPoss : null;
   const ftRate = (has("fta") && has("fga") && sumFga > 0) ? sumFta / sumFga : null;
 
-  return { pct2, pct3, pctFT, efg, tovPct, orebPct, astPct, ortg, drtg, ftRate };
+  return { pct2, pct3, pctFT, efg, tovPct, orebPct, astPct, ortg, drtg, ftRate, pct3poss };
 }
 
 // Même correctif, au niveau INDIVIDUEL cette fois : les pourcentages d'un joueur sur
@@ -2207,6 +2216,9 @@ function useTeamAdvancedStats(filterKeys) {
       const reb = s(columns.reb); // rebonds totaux (non séparés off/def) — informatif
       const tov = s(columns.tov);
       const ast = s(columns.ast);
+      const blk = s(columns.blk);
+      const stl = s(columns.stl);
+      const fouls = s(columns.fouls);
       const pts = s(columns.pts) ?? ((made2 !== null || made3 !== null || madeFT !== null)
         ? 2 * (made2 || 0) + 3 * (made3 || 0) + (madeFT || 0) : null);
       const dreb = (reb !== null && oreb !== null) ? reb - oreb : null; // rebonds défensifs déduits si on a le total ET l'offensif
@@ -2247,7 +2259,7 @@ function useTeamAdvancedStats(filterKeys) {
       const astPct = (ast !== null && astOpportunities) ? (100 * ast) / astOpportunities : null;
       return {
         date: m.date, opponent: m.opponent, opponentScore: m.opponentScore, pts, poss, approxPoss, efg, tovPct, oreb, dreb, reb, ftRate, ortg, drtg,
-        fga, fta, tov, made2, missed2, made3, missed3, madeFT, missedFT, ast, pct2, pct3, pctFT, orebPct, astPct, fgm, tpm,
+        fga, fta, tov, made2, missed2, made3, missed3, madeFT, missedFT, ast, pct2, pct3, pctFT, orebPct, astPct, fgm, tpm, blk, stl, fouls,
       };
     });
 
@@ -6900,7 +6912,7 @@ function useMatchTypes() {
   return { types, addType };
 }
 const TRAINING_THEME_COLORS = { "Pts + Indiv": AMBER, "Pts - Indiv": "#C97BE0", "Coll Off": TEAL, "Coll Def": "#7C9CF2" };
-const TRAINING_THEME_FALLBACK_COLORS = ["#E4231C", "#4A90D9", "#B15FE0", "#8B93A1", "#F2A93B", "#2FBF9C"];
+const TRAINING_THEME_FALLBACK_COLORS = ["#E4231C", "#4A90D9", "#B15FE0", "#8B93A1", "#EC4899", "#2FBF9C"];
 // Couleurs personnalisées par le coach (propres à chaque équipe) — chargées une fois au
 // démarrage (comme TAG_CATEGORIES), pour que trainingThemeColor() reste une simple fonction
 // synchrone utilisable partout sans changer sa signature dans tous les appels existants.
@@ -6915,7 +6927,14 @@ async function saveTrainingThemeColors(colors) {
 function trainingThemeColor(name, allThemes) {
   if (CUSTOM_TRAINING_THEME_COLORS[name]) return CUSTOM_TRAINING_THEME_COLORS[name];
   if (TRAINING_THEME_COLORS[name]) return TRAINING_THEME_COLORS[name];
-  const idx = Math.max(0, allThemes.indexOf(name));
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : une nouvelle catégorie ajoutée reprenait une
+  // couleur déjà utilisée) : la position comptait tous les thèmes, y compris les 4 par défaut
+  // qui ont déjà leur propre couleur fixe — la première catégorie perso tombait donc pile sur
+  // l'index correspondant à la même couleur orange qu'AMBER ("Pts + Indiv"). Compte maintenant
+  // la position uniquement PARMI les thèmes SANS couleur dédiée, pour ne jamais entrer en
+  // collision avec les 4 couleurs fixes.
+  const themesWithoutDedicatedColor = allThemes.filter(t => !TRAINING_THEME_COLORS[t]);
+  const idx = Math.max(0, themesWithoutDedicatedColor.indexOf(name));
   return TRAINING_THEME_FALLBACK_COLORS[idx % TRAINING_THEME_FALLBACK_COLORS.length];
 }
 function useTrainingThemes() {
@@ -8140,11 +8159,16 @@ function ourTeamAsScoutStats(advanced, box) {
     return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : undefined;
   };
   const weighted = computeWeightedTeamPercentages(advanced.perMatch);
+  const ortgVal = weighted.ortg ?? undefined, drtgVal = weighted.drtg ?? undefined;
   const stats = {
     mj: advanced.perMatch.length || undefined,
-    poss: avg("poss"), ortg: weighted.ortg ?? undefined, drtg: weighted.drtg ?? undefined,
+    poss: avg("poss"), ortg: ortgVal, drtg: drtgVal,
+    nrtg: (ortgVal !== undefined && drtgVal !== undefined) ? ortgVal - drtgVal : undefined,
     efg: weighted.efg ?? undefined,
     pctbp: weighted.tovPct ?? undefined,
+    pctro: weighted.orebPct ?? undefined,
+    pctpad: weighted.astPct ?? undefined,
+    pct3poss: weighted.pct3poss ?? undefined,
     ftafga: weighted.ftRate ?? undefined,
     pts: avg("pts"),
     ptse: advanced.perMatch.some(m => m.opponentScore !== null && m.opponentScore !== undefined)
@@ -8157,6 +8181,7 @@ function ourTeamAsScoutStats(advanced, box) {
     pctlf: weighted.pctFT ?? undefined,
     ro: avg("oreb"), rd: avg("dreb"), rt: avg("reb"),
     pd: avg("ast"), bp: avg("tov"),
+    ct: avg("blk"), int: avg("stl"), fte: avg("fouls"),
   };
   Object.keys(stats).forEach(k => { if (stats[k] === undefined || Number.isNaN(stats[k])) delete stats[k]; });
   return stats;
@@ -8528,7 +8553,10 @@ function ScoutingCollective({ collective, onSave, isCoach }) {
   async function addVideo() {
     if (!newUrl.trim()) return;
     setBusy(true);
-    const next = [...videos, { id: uid(), label: newLabel.trim() || "Video", url: newUrl.trim() }];
+    // Demandé par l'utilisateur : la vidéo la plus récemment ajoutée doit apparaître en premier
+    // (ordre inverse d'ajout) — ex. Coupe de France ajoutée en premier dans la saison, puis
+    // Aller, puis Retour à la fin -> affichage : Retour, Aller, Coupe de France.
+    const next = [{ id: uid(), label: newLabel.trim() || "Video", url: newUrl.trim() }, ...videos];
     await onSave({ videos: next, notes });
     setNewLabel(""); setNewUrl("");
     setBusy(false);
@@ -9655,6 +9683,16 @@ function ObservationTab({ isCoach }) {
                 Sheet read: <b>{preview.sheetName}</b> · {preview.columnsDetected} columns detected ·
                 {" "}<b>{preview.playsWithPlayer}</b> actions recognized / {preview.totalRows} total rows
               </div>
+              {preview.unconfirmedTags && preview.unconfirmedTags.length > 0 && (
+                <div style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: 10, background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 8, marginBottom: 12 }}>
+                  <AlertTriangle size={14} color={AMBER} style={{ marginTop: 2, flexShrink: 0 }} />
+                  <div style={{ fontSize: 12, color: "#D8DCE2", lineHeight: 1.5 }}>
+                    <b>{preview.unconfirmedTags.join(", ")}</b> {preview.unconfirmedTags.length > 1 ? "are" : "is"} not recognized as
+                    {" "}{preview.unconfirmedTags.length > 1 ? "known tags" : "a known tag"} (Settings → Column categories — Scouting Observation)
+                    {" "}— imported anyway, but won't show up under their proper category until added there.
+                  </div>
+                </div>
+              )}
               <button disabled={busy} onClick={confirmImport} style={{ ...btnPrimary, width: "auto", padding: "10px 20px" }}>
                 {busy ? "Import…" : "Confirm import"}
               </button>
