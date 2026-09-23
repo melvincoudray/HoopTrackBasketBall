@@ -8942,15 +8942,16 @@ function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, t
   const nameSize = Math.round(26 * scaleFactor);
   const subSize = Math.round(16 * scaleFactor);
   const chartSize = Math.round((L.chart?.w ?? DEFAULT_SCOUTING_LAYOUT.chart.w) * scaleFactor);
-  const badgeMinSize = Math.round(48 * scaleFactor);
+  const badgeMinSize = Math.round(40 * scaleFactor);
   const highlightsBox = L.highlights || DEFAULT_SCOUTING_LAYOUT.highlights;
-  const highlightsBoxWpx = highlightsBox.w * scaleFactor, highlightsBoxHpx = highlightsBox.h * scaleFactor;
+  const highlightsBoxWpx = highlightsBox.w * scaleFactor;
+  const highlightsAvailableHpx = Math.max(highlightsBox.h, SCOUTING_LAYOUT_REF_H - highlightsBox.y) * scaleFactor;
   const highlightsGap = 14;
   function autoFitBadgeSize(count, preferredSize) {
     if (count === 0) return preferredSize;
     let size = preferredSize;
     const perRow = (s) => Math.max(1, Math.floor((highlightsBoxWpx + highlightsGap) / (s + highlightsGap)));
-    const fitsHeight = (s) => Math.ceil(count / perRow(s)) * (s + highlightsGap) - highlightsGap <= highlightsBoxHpx;
+    const fitsHeight = (s) => Math.ceil(count / perRow(s)) * (s + highlightsGap) - highlightsGap <= highlightsAvailableHpx;
     while (size > badgeMinSize && !fitsHeight(size)) size -= 2;
     return Math.max(badgeMinSize, size);
   }
