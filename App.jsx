@@ -8942,7 +8942,18 @@ function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, t
   const nameSize = Math.round(26 * scaleFactor);
   const subSize = Math.round(16 * scaleFactor);
   const chartSize = Math.round((L.chart?.w ?? DEFAULT_SCOUTING_LAYOUT.chart.w) * scaleFactor);
-  const badgeMinSize = Math.round(90 * scaleFactor);
+  const badgeMinSize = Math.round(48 * scaleFactor);
+  const highlightsBox = L.highlights || DEFAULT_SCOUTING_LAYOUT.highlights;
+  const highlightsBoxWpx = highlightsBox.w * scaleFactor, highlightsBoxHpx = highlightsBox.h * scaleFactor;
+  const highlightsGap = 14;
+  function autoFitBadgeSize(count, preferredSize) {
+    if (count === 0) return preferredSize;
+    let size = preferredSize;
+    const perRow = (s) => Math.max(1, Math.floor((highlightsBoxWpx + highlightsGap) / (s + highlightsGap)));
+    const fitsHeight = (s) => Math.ceil(count / perRow(s)) * (s + highlightsGap) - highlightsGap <= highlightsBoxHpx;
+    while (size > badgeMinSize && !fitsHeight(size)) size -= 2;
+    return Math.max(badgeMinSize, size);
+  }
 
   return (
     <div data-no-split="true" style={{
@@ -8996,13 +9007,19 @@ function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, t
 
       <div style={{ ...shapeStyle("closeOut"), fontSize: Math.round(15 * scaleFactor), overflow: "hidden" }}>Close Out : <CloseOutBadge level={player.closeOut} /></div>
 
-      {player.highlights?.length > 0 && (
-        <div style={{ ...shapeStyle("highlights"), display: "flex", gap: 14, flexWrap: "wrap", overflow: "hidden" }}>
-          {player.highlights.map((h, i) => (
-            <StatShapeBadge key={i} label={h.label} value={h.value} size={Math.max(badgeMinSize, Math.round((h.size ?? 74) * scaleFactor))} fontScale={(h.fontScale ?? 1) * 1.15} color={h.color ?? TEAL} />
-          ))}
-        </div>
-      )}
+      {player.highlights?.length > 0 && (() => {
+        const maxPreferred = Math.max(...player.highlights.map(h => h.size ?? 74));
+        const maxPreferredPx = Math.round(maxPreferred * scaleFactor);
+        const fitSize = autoFitBadgeSize(player.highlights.length, maxPreferredPx);
+        const shrinkRatio = fitSize / maxPreferredPx;
+        return (
+          <div style={{ ...shapeStyle("highlights"), display: "flex", gap: highlightsGap, flexWrap: "wrap", alignContent: "flex-start" }}>
+            {player.highlights.map((h, i) => (
+              <StatShapeBadge key={i} label={h.label} value={h.value} size={Math.max(badgeMinSize, Math.round((h.size ?? 74) * scaleFactor * shrinkRatio))} fontScale={(h.fontScale ?? 1) * 1.15} color={h.color ?? TEAL} />
+            ))}
+          </div>
+        );
+      })()}
 
       <div style={{ ...shapeStyle("chart"), display: "flex", alignItems: "center", justifyContent: "center" }}>
         <RoseChart ratings={player.ratings} size={chartSize} />
