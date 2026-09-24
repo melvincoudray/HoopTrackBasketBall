@@ -8931,21 +8931,53 @@ function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, t
   // l'export, pour tenir à 2 joueurs par page A4 portrait — 380px, déjà vérifié ; responsive à
   // l'écran, via une largeur CSS à 100%).
   const L = layout || DEFAULT_SCOUTING_LAYOUT;
-  const pctX = (v) => `${(v / SCOUTING_LAYOUT_REF_W) * 100}%`;
-  const pctY = (v) => `${(v / SCOUTING_LAYOUT_REF_H) * 100}%`;
-  const shapeStyle = (key) => {
-    const s = L[key] || DEFAULT_SCOUTING_LAYOUT[key];
-    return { position: "absolute", left: pctX(s.x), top: pctY(s.y), width: pctX(s.w), height: pctY(s.h) };
-  };
   const cardWidthPx = printMode ? 720 : Math.round(640 * Math.max(0.75, Math.min(1.8, chartScale ?? 1)) * (SCOUTING_LAYOUT_REF_W / 500));
   const scaleFactor = cardWidthPx / SCOUTING_LAYOUT_REF_W; // pour mettre à l'échelle les tailles de police et la roue
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "Game Plan" coupait la 3ᵉ ligne dès que le
+  // texte dépassait la hauteur fixe prévue) : demandé — que la carte s'adapte réellement, au
+  // lieu d'une hauteur figée. Le positionnement passe donc du pourcentage (qui redimensionne
+  // TOUT proportionnellement dès que la hauteur totale change, y compris les éléments SANS
+  // rapport avec Game Plan) au pixel direct : chaque élément garde sa position exacte, et seuls
+  // "Close Out" et "Stat badges" (qui suivent Game Plan) se décalent vers le bas si besoin,
+  // pendant que la carte elle-même s'agrandit d'autant — jamais de texte coupé, quelle que soit
+  // sa longueur.
+  const gamePlanBox = L.gamePlan || DEFAULT_SCOUTING_LAYOUT.gamePlan;
+  const gamePlanLines = String(player.plan || "").split("\n").filter(l => l.trim()).length || 1;
+  const gamePlanLineHeightPx = Math.round(15 * scaleFactor * 1.4);
+  // Le petit titre "GAME PLAN" (fontSize 13, marginBottom 4) partage la même boîte que le
+  // texte — son espace doit être compté aussi, sans quoi le calcul sous-estimait toujours
+  // légèrement l'espace réellement nécessaire (bug initial : ratait pile le cas à 3 lignes).
+  const gamePlanLabelHpx = Math.round(13 * scaleFactor * 1.2) + Math.round(4 * scaleFactor);
+  const gamePlanNeededHpx = gamePlanLabelHpx + gamePlanLines * gamePlanLineHeightPx + Math.round(6 * scaleFactor); // petite marge de respiration
+  const gamePlanBoxHpx = Math.round(gamePlanBox.h * scaleFactor);
+  const extraYpx = Math.max(0, gamePlanNeededHpx - gamePlanBoxHpx);
+  function shapeStyle(key, { afterGamePlan = false } = {}) {
+    const s = L[key] || DEFAULT_SCOUTING_LAYOUT[key];
+    return {
+      position: "absolute",
+      left: Math.round(s.x * scaleFactor), top: Math.round(s.y * scaleFactor) + (afterGamePlan ? extraYpx : 0),
+      width: Math.round(s.w * scaleFactor), height: Math.round(s.h * scaleFactor),
+    };
+  }
+  const cardHeightPx = Math.round(SCOUTING_LAYOUT_REF_H * scaleFactor) + extraYpx;
   const nameSize = Math.round(26 * scaleFactor);
   const subSize = Math.round(16 * scaleFactor);
   const chartSize = Math.round((L.chart?.w ?? DEFAULT_SCOUTING_LAYOUT.chart.w) * scaleFactor);
   const badgeMinSize = Math.round(40 * scaleFactor);
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : les stat badges ajoutés dans "Stat badges"
+  // n'apparaissaient pas — coupés silencieusement) : chaque badge avait une taille MINIMALE
+  // forcée à 90px, alors que la boîte qui les contient ne fait que 90px de haut par défaut —
+  // dès qu'une 2ᵉ ligne de badges était nécessaire (plus de 3-4 badges), elle sortait
+  // mathématiquement du cadre et se retrouvait coupée par overflow:hidden. Calcule maintenant
+  // une taille commune qui garantit que TOUS les badges ajoutés tiennent réellement dans la
+  // boîte disponible (largeur ET hauteur), quel que soit leur nombre.
   const highlightsBox = L.highlights || DEFAULT_SCOUTING_LAYOUT.highlights;
   const highlightsBoxWpx = highlightsBox.w * scaleFactor;
-  const highlightsAvailableHpx = (SCOUTING_LAYOUT_REF_H - highlightsBox.y) * scaleFactor;
+  // Seule la distance réelle jusqu'au bas de la carte compte ici (pas la hauteur déclarée de
+  // la boîte elle-même, puisque le débordement au-delà de sa propre hauteur déclarée est déjà
+  // toléré — seul un débordement au-delà de la carte elle-même doit être évité). Le décalage
+  // dû à un Game Plan plus long (extraYpx) est déjà inclus des deux côtés, donc sans effet net.
+  const highlightsAvailableHpx = cardHeightPx - (Math.round(highlightsBox.y * scaleFactor) + extraYpx);
   const highlightsGap = 14;
   function autoFitBadgeSize(count, preferredSize) {
     if (count === 0) return preferredSize;
@@ -8968,7 +9000,7 @@ function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, t
       backgroundSize: stretch ? "100% 100%" : "cover", backgroundPosition: "center", backgroundRepeat: "no-repeat",
       border: `1px solid ${LINE}`, borderRadius: 14, marginBottom: 14,
       width: printMode ? cardWidthPx : "100%",
-      aspectRatio: `${SCOUTING_LAYOUT_REF_W} / ${SCOUTING_LAYOUT_REF_H}`, overflow: "hidden",
+      aspectRatio: `${SCOUTING_LAYOUT_REF_W} / ${SCOUTING_LAYOUT_REF_H + extraYpx / scaleFactor}`, overflow: "hidden",
     }}>
       {/* Logo de l'équipe scoutée, à l'intérieur du cadre de la fiche (pas en dehors, sur le
           document partagé) — demandé par l'utilisateur. */}
@@ -9000,21 +9032,24 @@ function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, t
       )}
 
       {player.plan && (
-        <div style={{ ...shapeStyle("gamePlan"), fontSize: Math.round(15 * scaleFactor), color: "#D8DCE2", lineHeight: 1.4, whiteSpace: "pre-wrap", overflow: "auto" }}>
+        <div style={{ ...shapeStyle("gamePlan"), fontSize: Math.round(15 * scaleFactor), color: "#D8DCE2", lineHeight: 1.4, whiteSpace: "pre-wrap", overflow: "visible" }}>
           <div style={{ fontSize: Math.round(13 * scaleFactor), textTransform: "uppercase", color: "#5C6470", marginBottom: 4 }}>Game plan</div>
           {player.plan}
         </div>
       )}
 
-      <div style={{ ...shapeStyle("closeOut"), fontSize: Math.round(15 * scaleFactor), overflow: "hidden" }}>Close Out : <CloseOutBadge level={player.closeOut} /></div>
+      <div style={{ ...shapeStyle("closeOut", { afterGamePlan: true }), fontSize: Math.round(15 * scaleFactor), overflow: "hidden" }}>Close Out : <CloseOutBadge level={player.closeOut} /></div>
 
       {player.highlights?.length > 0 && (() => {
+        // Basé sur le PLUS GRAND badge demandé (pas la moyenne) : garantit que même celui-là
+        // tient dans la boîte une fois réduit — sinon, avec des tailles très différentes, le
+        // plus gros badge pouvait rester plus grand que le calcul d'ajustement ne le prévoyait.
         const maxPreferred = Math.max(...player.highlights.map(h => h.size ?? 74));
         const maxPreferredPx = Math.round(maxPreferred * scaleFactor);
         const fitSize = autoFitBadgeSize(player.highlights.length, maxPreferredPx);
         const shrinkRatio = fitSize / maxPreferredPx;
         return (
-          <div style={{ ...shapeStyle("highlights"), display: "flex", gap: highlightsGap, flexWrap: "wrap", alignContent: "flex-start" }}>
+          <div style={{ ...shapeStyle("highlights", { afterGamePlan: true }), display: "flex", gap: highlightsGap, flexWrap: "wrap", alignContent: "flex-start" }}>
             {player.highlights.map((h, i) => (
               <StatShapeBadge key={i} label={h.label} value={h.value} size={Math.max(badgeMinSize, Math.round((h.size ?? 74) * scaleFactor * shrinkRatio))} fontScale={(h.fontScale ?? 1) * 1.15} color={h.color ?? TEAL} />
             ))}
