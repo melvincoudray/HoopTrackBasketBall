@@ -9616,6 +9616,42 @@ function ScoutingComparison({ teams }) {
 // tags reconnus se configurent au même endroit que pour Import Match : Settings.
 // ---------------------------------------------------------------------------
 
+// Demandé par l'utilisateur : export PDF pour Scouting → Observation, couvrant TOUTES les
+// équipes observées en une fois (comme "Scouting individuel" couvre tous les joueurs d'une
+// équipe) — un titre par équipe, sa répartition Attaque/Défense, et son shot chart s'il y a
+// des tirs localisés dans les fichiers importés pour elle.
+function ObservationPrintReport({ observed }) {
+  const cats = currentObservationTagCategories();
+  const names = Object.keys(observed);
+  return (
+    <div style={{ padding: 24, background: "#ffffff", color: "#1A1D24" }}>
+      <h1 style={{ fontSize: 22, marginBottom: 4 }}>Scouting — Observation</h1>
+      <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 20 }}>Report generated on {new Date().toLocaleDateString("en-US")}</div>
+      {names.length === 0 ? <p>No opponent team observed.</p> : names.map((name, i) => {
+        const plays = observed[name].plays || [];
+        const off = plays.filter(isOffense);
+        const def = plays.filter(isDefense);
+        return (
+          <div key={name} data-new-page={i > 0 ? "true" : undefined} style={i > 0 ? { pageBreakBefore: "always" } : undefined}>
+            <h1 style={{ fontSize: 20, marginTop: i > 0 ? 0 : 24, marginBottom: 4 }}>{name}</h1>
+            <div style={{ fontSize: 11.5, color: "#8B93A1", marginBottom: 16 }}>
+              {(observed[name].imports || []).length} file(s) combined · {plays.length} actions total
+            </div>
+            {off.length > 0 && (
+              <>
+                <h2 style={{ fontSize: 16, marginBottom: 8 }}>Shot chart</h2>
+                <HalfCourtShotChart zoneStats={computeShotZoneStats(off, cats)} size={380} />
+              </>
+            )}
+            <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Offense / Defense</h2>
+            <OffenseDefenseBreakdown off={off} def={def} categories={cats} />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function ObservationTab({ isCoach }) {
   const [observed, setObserved] = useState({}); // { teamName: { plays, importedAt } }
   const [loading, setLoading] = useState(true);
@@ -9625,6 +9661,7 @@ function ObservationTab({ isCoach }) {
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [exportReport, setExportReport] = useState(null);
   const fileRef = useRef();
 
   useEffect(() => { load(); }, []);
@@ -9706,6 +9743,21 @@ function ObservationTab({ isCoach }) {
 
   return (
     <div>
+      {names.length > 0 && (
+        <div className="screen-only" style={{ display: "flex", justifyContent: "flex-end", marginBottom: 16 }}>
+          <button onClick={async () => {
+            const filename = `observation_${todayLocal()}.html`;
+            const pdfOk = await tryExportPdf("observation-print-content", filename, "light");
+            if (pdfOk) return;
+            const r = buildReportHtml("observation-print-content", filename, "light");
+            if (!r) { alert("Content not found — try again after the page has fully loaded."); return; }
+            tryDownload(r.full, r.filename);
+            setExportReport(r);
+          }} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+            <Download size={14} /> Export all ({names.length} team{names.length !== 1 ? "s" : ""}) — HTML → PDF
+          </button>
+        </div>
+      )}
       {/* Demandé par l'utilisateur : les joueurs ne doivent pas pouvoir insérer de fichier ici,
           même si l'onglet Observation lui-même leur est visible. */}
       {isCoach && (
@@ -9812,6 +9864,13 @@ function ObservationTab({ isCoach }) {
           ))}
         </div>
       )}
+
+      {names.length > 0 && (
+        <div className="print-only" id="observation-print-content">
+          <ObservationPrintReport observed={observed} />
+        </div>
+      )}
+      <ExportModal report={exportReport} onClose={() => setExportReport(null)} />
     </div>
   );
 }
