@@ -135,7 +135,7 @@ function tryDownload(full, filename) {
 // plus de pages au total, ce qui est très bien) plutôt que de couper un graphique en deux.
 // Les éléments marqués data-new-page="true" démarrent TOUJOURS une nouvelle page (même s'il
 // restait de la place sur la précédente) — utilisé pour garantir une page par joueur.
-async function tryExportPdf(elementId, filename, theme = "light", orientation = "portrait") {
+async function tryExportPdf(elementId, filename, theme = "light", orientation = "portrait", scale = 1.15, jpegQuality = 0.72) {
   const el = document.getElementById(elementId);
   if (!el) return false;
   try {
@@ -162,8 +162,8 @@ async function tryExportPdf(elementId, filename, theme = "light", orientation = 
       return { top: r.top - elTop, bottom: r.bottom - elTop };
     });
 
-    const canvas = await html2canvas(el, { backgroundColor: bg, scale: 1.15, useCORS: true });
-    const imgData = canvas.toDataURL("image/jpeg", 0.72);
+    const canvas = await html2canvas(el, { backgroundColor: bg, scale, useCORS: true });
+    const imgData = canvas.toDataURL("image/jpeg", jpegQuality);
     // A4 en points (72dpi) — inversé en paysage (largeur/hauteur permutées).
     const pageWidth = orientation === "landscape" ? 841.89 : 595.28;
     const pageHeight = orientation === "landscape" ? 595.28 : 841.89;
@@ -9625,16 +9625,18 @@ function ObservationPrintReport({ name, team }) {
   const plays = team?.plays || [];
   const off = plays.filter(isOffense);
   const def = plays.filter(isDefense);
+  const zoneStats = computeShotZoneStats(off, cats);
+  const hasShotData = Object.values(zoneStats).some(z => z.attempted > 0);
   return (
     <div style={{ padding: 24, background: "#ffffff", color: "#1A1D24" }}>
       <h1 style={{ fontSize: 22, marginBottom: 4 }}>{name}</h1>
       <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 20 }}>
         Report generated on {new Date().toLocaleDateString("en-US")} · {(team?.imports || []).length} file(s) combined · {plays.length} actions total
       </div>
-      {off.length > 0 && (
+      {hasShotData && (
         <>
           <h2 style={{ fontSize: 16, marginBottom: 8 }}>Shot chart</h2>
-          <HalfCourtShotChart zoneStats={computeShotZoneStats(off, cats)} size={380} />
+          <HalfCourtShotChart zoneStats={zoneStats} size={380} />
         </>
       )}
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Offense / Defense</h2>
@@ -9800,7 +9802,7 @@ function ObservationTab({ isCoach }) {
             <SectionTitle eyebrow="Breakdown" title={selected} />
             <button onClick={async () => {
               const filename = `observation_${selected}_${todayLocal()}.html`;
-              const pdfOk = await tryExportPdf("observation-print-content", filename, "light");
+              const pdfOk = await tryExportPdf("observation-print-content", filename, "light", "portrait", 0.9, 0.55);
               if (pdfOk) return;
               const r = buildReportHtml("observation-print-content", filename, "light");
               if (!r) { alert("Content not found — try again after the page has fully loaded."); return; }
