@@ -6697,7 +6697,7 @@ function useObjectives(playerName) {
   return { objectives, loading, save, remove };
 }
 
-function ObjectiveForm({ initial, linkableStats, onSave, onCancel, busy }) {
+function ObjectiveForm({ initial, linkableStats, reboundContestKeys = [], onSave, onCancel, busy }) {
   const [description, setDescription] = useState(initial?.description || "");
   const [direction, setDirection] = useState(initial?.direction || "up");
   const [linkedStat, setLinkedStat] = useState(initial?.linkedStat || "");
@@ -6713,7 +6713,8 @@ function ObjectiveForm({ initial, linkableStats, onSave, onCancel, busy }) {
     if (!initial && l && linkableStats[l] !== undefined) setStartValue(Number(linkableStats[l].toFixed(2)));
   }
 
-  const boxKeys = Object.keys(linkableStats).filter(k => !k.startsWith("["));
+  const rcKeySet = new Set(reboundContestKeys);
+  const boxKeys = Object.keys(linkableStats).filter(k => !k.startsWith("[") && !rcKeySet.has(k));
   const codingKeys = Object.keys(linkableStats).filter(k => k.startsWith("["));
 
   return (
@@ -6744,6 +6745,11 @@ function ObjectiveForm({ initial, linkableStats, onSave, onCancel, busy }) {
             {codingKeys.length > 0 && (
               <optgroup label="Coding file (playtypes / plays)">
                 {codingKeys.map(l => <option key={l} value={l}>{l.replace(/^\[[^\]]+\]\s*/, "")} {l.match(/^\[([^\]]+)\]/)?.[0]}</option>)}
+              </optgroup>
+            )}
+            {reboundContestKeys.length > 0 && (
+              <optgroup label="Rebound Contest">
+                {reboundContestKeys.map(l => <option key={l} value={l}>{l}</option>)}
               </optgroup>
             )}
           </select>
@@ -6856,7 +6862,27 @@ function ObjectivesPanel({ playerName, isCoach, box, off, def }) {
   const [busy, setBusy] = useState(false);
 
   const codingStats = useMemo(() => buildCodingStatOptions(off, def), [off, def]);
-  const linkableStats = useMemo(() => ({ ...box.averages, ...codingStats }), [box.averages, codingStats]);
+  // Demandé par l'utilisateur : pouvoir lier un objectif individuel au % Box Out et au % Tagg
+  // (Rebound Contest) — générique plutôt que figé sur ces deux-là seulement, pour couvrir aussi
+  // une éventuelle catégorie ajoutée plus tard par le coach. Toutes les sessions disponibles
+  // sont prises en compte (pas de filtre par match ici, un objectif suit une progression dans
+  // la durée, pas un instantané).
+  const { index: rcIndex, sessions: rcSessions, loading: rcLoading } = useReboundContestSessions();
+  const { categories: rcCategories } = useReboundContestCategories();
+  const reboundContestStats = useMemo(() => {
+    if (rcLoading || !rcIndex.length) return {};
+    const events = rcIndex.flatMap(s => (rcSessions[s.id]?.events) || []);
+    const stats = computeReboundContestStats(events, [playerName], rcCategories)[playerName];
+    if (!stats) return {};
+    const out = {};
+    rcCategories.forEach(cat => {
+      const c = stats[cat.key];
+      if (c && c.possible > 0) out[`% ${cat.label}`] = Math.round(c.pct);
+    });
+    if (stats.total?.possible > 0) out["% Rebound Contest (total)"] = Math.round(stats.total.pct);
+    return out;
+  }, [rcLoading, rcIndex, rcSessions, rcCategories, playerName]);
+  const linkableStats = useMemo(() => ({ ...box.averages, ...codingStats, ...reboundContestStats }), [box.averages, codingStats, reboundContestStats]);
 
   if (loading) return <EmptyState text="Loading…" />;
 
@@ -6876,6 +6902,7 @@ function ObjectivesPanel({ playerName, isCoach, box, off, def }) {
         <ObjectiveForm
           initial={editing === "new" ? null : editing}
           linkableStats={linkableStats}
+          reboundContestKeys={Object.keys(reboundContestStats)}
           busy={busy}
           onCancel={() => setEditing(null)}
           onSave={async (obj) => { setBusy(true); await save(obj); setBusy(false); setEditing(null); }}
