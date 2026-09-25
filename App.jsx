@@ -6250,7 +6250,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
           </>
         )}
 
-        {subtab === "objectifs" && (isCoach || pd.objectives) && <ObjectivesPanel playerName={playerName} isCoach={isCoach} box={box} off={off} def={def} />}
+        {subtab === "objectifs" && (isCoach || pd.objectives) && <ObjectivesPanel playerName={playerName} isCoach={isCoach} box={box} off={off} def={def} matchFilter={matchFilter} />}
         {subtab === "training" && (isCoach || pd.training) && <TrainingLog playerName={playerName} isCoach={isCoach} />}
         {subtab === "mental" && (isCoach || pd.mental) && <MentalLog playerName={playerName} isCoach={isCoach} />}
         {subtab === "wellness" && (isCoach || pd.wellness) && <WellnessTab playerName={playerName} isCoach={isCoach} canSeeCharts={isCoach || v.wellnessCharts} teamId={teamId} teamName={teamName} />}
@@ -6856,7 +6856,7 @@ function ObjectiveCard({ objective, currentValue, isCoach, onEdit, onDelete }) {
   );
 }
 
-function ObjectivesPanel({ playerName, isCoach, box, off, def }) {
+function ObjectivesPanel({ playerName, isCoach, box, off, def, matchFilter }) {
   const { objectives, loading, save, remove } = useObjectives(playerName);
   const [editing, setEditing] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -6864,14 +6864,19 @@ function ObjectivesPanel({ playerName, isCoach, box, off, def }) {
   const codingStats = useMemo(() => buildCodingStatOptions(off, def), [off, def]);
   // Demandé par l'utilisateur : pouvoir lier un objectif individuel au % Box Out et au % Tagg
   // (Rebound Contest) — générique plutôt que figé sur ces deux-là seulement, pour couvrir aussi
-  // une éventuelle catégorie ajoutée plus tard par le coach. Toutes les sessions disponibles
-  // sont prises en compte (pas de filtre par match ici, un objectif suit une progression dans
-  // la durée, pas un instantané).
+  // une éventuelle catégorie ajoutée plus tard par le coach.
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : changer les matchs sélectionnés en haut de la
+  // fiche joueur n'avait aucun effet sur "% Tagg"/"% Box Out" — toujours la moyenne toutes
+  // sessions confondues) : ces deux stats respectent maintenant la même sélection de matchs que
+  // le reste de la page (comme "box", déjà filtré via useBoxScore(playerName, matchFilter)),
+  // exactement le même filtrage déjà utilisé par PlayerReboundContestSection juste au-dessus.
   const { index: rcIndex, sessions: rcSessions, loading: rcLoading } = useReboundContestSessions();
   const { categories: rcCategories } = useReboundContestCategories();
   const reboundContestStats = useMemo(() => {
     if (rcLoading || !rcIndex.length) return {};
-    const events = rcIndex.flatMap(s => (rcSessions[s.id]?.events) || []);
+    const selectedDates = matchFilter ? new Set([...matchFilter].map(k => k.split("||")[0])) : null;
+    const effectiveIds = selectedDates === null ? rcIndex.map(s => s.id) : rcIndex.filter(s => selectedDates.has(s.date)).map(s => s.id);
+    const events = effectiveIds.flatMap(id => (rcSessions[id]?.events) || []);
     const stats = computeReboundContestStats(events, [playerName], rcCategories)[playerName];
     if (!stats) return {};
     const out = {};
@@ -6881,7 +6886,7 @@ function ObjectivesPanel({ playerName, isCoach, box, off, def }) {
     });
     if (stats.total?.possible > 0) out["% Rebound Contest (total)"] = Math.round(stats.total.pct);
     return out;
-  }, [rcLoading, rcIndex, rcSessions, rcCategories, playerName]);
+  }, [rcLoading, rcIndex, rcSessions, rcCategories, playerName, matchFilter]);
   const linkableStats = useMemo(() => ({ ...box.averages, ...codingStats, ...reboundContestStats }), [box.averages, codingStats, reboundContestStats]);
 
   if (loading) return <EmptyState text="Loading…" />;
