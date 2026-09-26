@@ -1916,7 +1916,16 @@ const STAT_PATTERNS = {
   tov: [/^Bp$/i, /^B\.?P\.?$/i, /balles?\s*perdues?/i, /pertes?\s*(de\s*)?balles?/i, /^TOV$/i, /^TO$/i, /turn\s*overs?/i],
   blk: [/^Ct$/i, /^C\.?T\.?$/i, /contres?/i, /^BLK$/i, /^BL$/i, /blocks?/i],
   stl: [/^In$/i, /^I\.?N\.?$/i, /interceptions?/i, /^STL$/i, /^ST$/i, /steals?/i],
-  fouls: [/^Fte$/i, /^F\.?T\.?E\.?$/i, /fautes?(\s*commises?)?/i, /^PF$/i, /fouls?/i],
+  // Fautes provoquées (Fouls Drawn / FD) — TOUJOURS testé avant "fouls" ci-dessous (l'ordre
+  // compte : friendlyStatLabel() s'arrête à la première clé qui matche). En plus de cet ordre,
+  // les motifs "fouls" sont exclus explicitement de tout ce qui contient "provoqu"/"drawn"
+  // (voir juste après), pour que les DEUX détections restent fiables indépendamment de l'ordre
+  // dans lequel elles sont appelées ailleurs (ex. findStatCol(columns.fouls) seul).
+  foulsDrawn: [/^FD$/i, /^F\.?D\.?$/i, /fautes?\s*provoqu[ée]es?/i, /fouls?\s*drawn/i, /drawn\s*fouls?/i],
+  // BUG POTENTIEL ÉVITÉ : les motifs d'origine (/fautes?(\s*commises?)?/i et /fouls?/i) n'étaient
+  // pas ancrés (ni ^ ni $), donc "Fautes provoquées" ou "Fouls Drawn" auraient été reconnus par
+  // erreur comme des fautes PERSONNELLES. On exclut maintenant explicitement ces deux mots.
+  fouls: [/^Fte$/i, /^F\.?T\.?E\.?$/i, /^(?!.*(provoqu|drawn)).*fautes?(\s*commises?)?/i, /^PF$/i, /^(?!.*(provoqu|drawn)).*fouls?/i],
   pts: [/^Pts?$/i, /^Points?$/i],
   ftPct: [/^LF\s*%$/i, /^FT\s*%$/i, /^FT%$/i, /%\s*LF$/i],
   tpmPct: [/^3\s*pts?\s*%$/i, /^3P\s*%$/i, /^3PT\s*%$/i],
@@ -1938,7 +1947,7 @@ const STAT_KEY_FRIENDLY_NAME = {
   minutes: "Minutes / Playing time", made2: "2PT Made", missed2: "2PT Missed", made3: "3PT Made", missed3: "3PT Missed",
   madeFT: "FT Made", missedFT: "FT Missed", fga: "FG Attempted (total)", fta: "FT Attempted (total)",
   tov: "Turnovers", oreb: "Offensive Rebounds", reb: "Rebounds (total)", ast: "Assists", pts: "Points",
-  blk: "Blocks", stl: "Steals", fouls: "Fouls",
+  blk: "Blocks", stl: "Steals", fouls: "Fouls", foulsDrawn: "Fouls Drawn (FD)",
   twoPct: "% 2PT (if already in the file)", tpmPct: "% 3PT (if already in the file)", ftPct: "% FT (if already in the file)",
 };
 
