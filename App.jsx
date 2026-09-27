@@ -62,6 +62,16 @@ function todayLocal(d = new Date()) {
 }
 function matchKey(date, opponent) { return `${date}||${opponent}`; }
 
+// Construit l'ensemble des clés de matchs partageant un type donné (ex. "Season Game"),
+// en combinant les deux index (coding + box score) dédupliqués par date+adversaire — utilisé
+// pour re-sélectionner automatiquement "seulement les matchs de cette catégorie" à chaque
+// nouvel import (demandé par l'utilisateur).
+function keysOfMatchType(indexA, indexB, type) {
+  const map = new Map();
+  [...indexA, ...indexB].forEach(m => { map.set(matchKey(m.date, m.opponent), m.matchType || ""); });
+  return new Set([...map.entries()].filter(([, mt]) => mt === type).map(([k]) => k));
+}
+
 // Saison basket = juillet à juin. Sert de valeur par défaut, modifiable dans Settings.
 function defaultSeasonLabel(d = new Date()) {
   const y = d.getFullYear();
@@ -1912,24 +1922,26 @@ const STAT_PATTERNS = {
   ftm: [/^FTM$/i, /^FT\s*Made$/i, /^Free\s*Throws?\s*Made$/i],
   oreb: [/^Reb\s*Off\.?$/i, /^Ro$/i, /^R\.?O\.?$/i, /rebonds?\s*off/i, /^OREB$/i, /^ORB$/i, /^Off\.?$/i],
   reb: [/^Reb\s*Tot\.?$/i, /^Reb$/i, /^Rebonds?$/i, /^R\.?D\.?$/i], // rebonds TOTAUX (offensifs+défensifs) — informatif
+  // Rebonds défensifs (colonne séparée, ex. "Reb Def" / "Reb\t\tDef") — nouvelle clé, sans
+  // toucher aux motifs "reb"/"oreb" existants (qui restent strictement identiques).
+  rebDef: [/^Reb\s*D[ée]f\.?$/i, /rebonds?\s*d[ée]fensifs?/i, /^DREB$/i, /^DRB$/i],
   ast: [/^Pad$/i, /^P\.?D\.?$/i, /passes?\s*d[ée]cisives?/i, /^AST$/i, /assists?/i],
   tov: [/^Bp$/i, /^B\.?P\.?$/i, /balles?\s*perdues?/i, /pertes?\s*(de\s*)?balles?/i, /^TOV$/i, /^TO$/i, /turn\s*overs?/i],
   blk: [/^Ct$/i, /^C\.?T\.?$/i, /contres?/i, /^BLK$/i, /^BL$/i, /blocks?/i],
   stl: [/^In$/i, /^I\.?N\.?$/i, /interceptions?/i, /^STL$/i, /^ST$/i, /steals?/i],
-  // Fautes provoquées (Fouls Drawn / FD) — TOUJOURS testé avant "fouls" ci-dessous (l'ordre
-  // compte : friendlyStatLabel() s'arrête à la première clé qui matche). En plus de cet ordre,
-  // les motifs "fouls" sont exclus explicitement de tout ce qui contient "provoqu"/"drawn"
-  // (voir juste après), pour que les DEUX détections restent fiables indépendamment de l'ordre
-  // dans lequel elles sont appelées ailleurs (ex. findStatCol(columns.fouls) seul).
+  // Fautes provoquées (Fouls Drawn / FD) — testée avant "fouls" ci-dessous (friendlyStatLabel
+  // s'arrête à la première clé qui matche), mais SANS toucher aux motifs "fouls" eux-mêmes,
+  // qui restent strictement identiques à ce qu'ils étaient avant cet ajout.
   foulsDrawn: [/^FD$/i, /^F\.?D\.?$/i, /fautes?\s*provoqu[ée]es?/i, /fouls?\s*drawn/i, /drawn\s*fouls?/i],
-  // BUG POTENTIEL ÉVITÉ : les motifs d'origine (/fautes?(\s*commises?)?/i et /fouls?/i) n'étaient
-  // pas ancrés (ni ^ ni $), donc "Fautes provoquées" ou "Fouls Drawn" auraient été reconnus par
-  // erreur comme des fautes PERSONNELLES. On exclut maintenant explicitement ces deux mots.
-  fouls: [/^Fte$/i, /^F\.?T\.?E\.?$/i, /^(?!.*(provoqu|drawn)).*fautes?(\s*commises?)?/i, /^PF$/i, /^(?!.*(provoqu|drawn)).*fouls?/i],
+  fouls: [/^Fte$/i, /^F\.?T\.?E\.?$/i, /fautes?(\s*commises?)?/i, /^PF$/i, /fouls?/i],
   pts: [/^Pts?$/i, /^Points?$/i],
   ftPct: [/^LF\s*%$/i, /^FT\s*%$/i, /^FT%$/i, /%\s*LF$/i],
   tpmPct: [/^3\s*pts?\s*%$/i, /^3P\s*%$/i, /^3PT\s*%$/i],
   twoPct: [/^2\s*pts?\s*%$/i, /^2P\s*%$/i, /^2PT\s*%$/i],
+  // Évaluation (colonne souvent nommée "Ev"/"Eval" en français) — nouvelle clé, traduite en
+  // "Eff" (Efficiency) dans STAT_KEY_FRIENDLY_NAME, demandé par l'utilisateur.
+  eff: [/^Ev$/i, /^Eval\.?$/i, /^[EÉ]valuation$/i, /^Efficiency$/i, /^Eff\.?$/i],
+  plusMinus: [/^\+\/-$/i, /^\+-$/i, /^plus\s*\/?\s*minus$/i],
 };
 
 // Statistiques mises en avant selon le poste — utilisées pour les totaux officiels d'un
@@ -1948,6 +1960,7 @@ const STAT_KEY_FRIENDLY_NAME = {
   madeFT: "FT Made", missedFT: "FT Missed", fga: "FG Attempted (total)", fta: "FT Attempted (total)",
   tov: "Turnovers", oreb: "Offensive Rebounds", reb: "Rebounds (total)", ast: "Assists", pts: "Points",
   blk: "Blocks", stl: "Steals", fouls: "Fouls", foulsDrawn: "Fouls Drawn (FD)",
+  rebDef: "Reb. Def", eff: "Eff", plusMinus: "+/-",
   twoPct: "% 2PT (if already in the file)", tpmPct: "% 3PT (if already in the file)", ftPct: "% FT (if already in the file)",
 };
 
@@ -1980,6 +1993,85 @@ function featuredStatsForPosition(position, statLabels) {
     }
     return { key, fallbackLabel: STAT_KEY_LABEL_FR[key] || key, label: findStatCol(statLabels, STAT_PATTERNS[key] || [], key) };
   });
+}
+
+// Liste FIXE d'encadrés ("tiles") à toujours afficher pour un joueur dans Box Score, dans cet
+// ordre précis — demandé par l'utilisateur ("quoiqu'il arrive je veux : Time, Pts, Reb Def...").
+// Remplace l'ancien système "stats en avant selon le poste + le reste plafonné à 8 au total",
+// qui masquait des stats selon le poste choisi (ou l'absence de poste). Utilisée à la fois par
+// l'écran (PlayerDetail) et l'export PDF (PlayerPrintReport), pour que les deux restent identiques.
+function buildFixedBoxScorePlayerTiles(box, allBox, playerName) {
+  const labels = box.statLabels;
+  const find = (key) => findStatCol(labels, STAT_PATTERNS[key] || [], key);
+  const avg = (label) => (label !== undefined ? box.averages[label] : undefined);
+  const rankOf = (label) => (label !== undefined ? teamRank(allBox.byPlayer, label, playerName) : null);
+  const subFor = (label) => { const r = rankOf(label); return r ? `#${r.rank} of ${r.total} team` : "average / game"; };
+  const fmt = (label) => formatStatValue(label || "", avg(label));
+
+  const minutesLabel = find("minutes");
+  const ptsLabel = find("pts");
+  const rebDefLabel = find("rebDef");
+  const orebLabel = find("oreb");
+  const rebLabel = find("reb");
+  const astLabel = find("ast");
+  const stlLabel = find("stl");
+  const blkLabel = find("blk");
+  const made2Label = find("made2"), missed2Label = find("missed2");
+  const made3Label = find("made3"), missed3Label = find("missed3");
+  const madeFTLabel = find("madeFT"), missedFTLabel = find("missedFT");
+  const effLabel = find("eff");
+  const plusMinusLabel = find("plusMinus") ?? labels.find(l => l.trim() === "+/-");
+  const foulsDrawnLabel = find("foulsDrawn");
+  const foulsLabel = find("fouls");
+  // Priorité aux libellés normalisés (déjà pondérés correctement sur plusieurs matchs par
+  // useBoxScore/WEIGHTED_LABELS), comme partout ailleurs dans le fichier.
+  const pct2Label = labels.find(l => l === "% 2pts") || labels.find(l => l === "% 2pts (calculated)");
+  const pct3Label = labels.find(l => l === "% 3pts") || labels.find(l => l === "% 3pts (calculated)");
+  const pctFTLabel = labels.find(l => l === "% LF") || labels.find(l => l === "% LF (calculated)");
+
+  // "X Attempted" (2pts/3pts/LF) : pas de colonne combinée directe dans STAT_PATTERNS pour ces
+  // trois-là (contrairement à fga/fta pour le TOTAL des tirs) — mais Made+Missed sont des
+  // comptages bruts, donc la moyenne de leur SOMME par match équivaut exactement à la somme de
+  // leurs moyennes (pas de biais d'agrégation comme pour un pourcentage).
+  function attemptedAvg(madeLabel, missedLabel) {
+    const m = avg(madeLabel), ms = avg(missedLabel);
+    if (m === undefined && ms === undefined) return undefined;
+    return (m || 0) + (ms || 0);
+  }
+  const att2 = attemptedAvg(made2Label, missed2Label);
+  const att3 = attemptedAvg(made3Label, missed3Label);
+  const attFT = attemptedAvg(madeFTLabel, missedFTLabel);
+
+  const theoreticalPoss = box.averages["Theoretical possessions"];
+  const usagePct = box.averages["Usage%"];
+  const plusMinusVal = avg(plusMinusLabel);
+
+  return [
+    { key: "time", label: "Time", value: minutesLabel !== undefined ? `${avg(minutesLabel).toFixed(1)} min` : "–", sub: subFor(minutesLabel), tone: "teal" },
+    { key: "pts", label: "Pts", value: fmt(ptsLabel), sub: subFor(ptsLabel), tone: "amber" },
+    { key: "rebDef", label: "Reb Def", value: fmt(rebDefLabel), sub: subFor(rebDefLabel), tone: "teal" },
+    { key: "rebOff", label: "Reb Off", value: fmt(orebLabel), sub: subFor(orebLabel), tone: "teal" },
+    { key: "rebTot", label: "Reb Tot", value: fmt(rebLabel), sub: subFor(rebLabel), tone: "teal" },
+    { key: "ast", label: "Assists", value: fmt(astLabel), sub: subFor(astLabel), tone: "teal" },
+    { key: "stl", label: "Steals", value: fmt(stlLabel), sub: subFor(stlLabel), tone: "teal" },
+    { key: "blk", label: "Blocks", value: fmt(blkLabel), sub: subFor(blkLabel), tone: "teal" },
+    { key: "made2", label: "2Pts Made", value: fmt(made2Label), sub: subFor(made2Label), tone: "teal" },
+    { key: "att2", label: "2Pts Attempted", value: att2 !== undefined ? att2.toFixed(1) : "–", sub: "average / game", tone: "teal" },
+    { key: "pct2", label: "% 2Pts", value: fmt(pct2Label), sub: subFor(pct2Label), tone: "teal" },
+    { key: "made3", label: "3Pts Made", value: fmt(made3Label), sub: subFor(made3Label), tone: "teal" },
+    { key: "att3", label: "3Pts Attempted", value: att3 !== undefined ? att3.toFixed(1) : "–", sub: "average / game", tone: "teal" },
+    { key: "pct3", label: "% 3Pts", value: fmt(pct3Label), sub: subFor(pct3Label), tone: "teal" },
+    { key: "madeFT", label: "FT Made", value: fmt(madeFTLabel), sub: subFor(madeFTLabel), tone: "teal" },
+    { key: "attFT", label: "FT Attempted", value: attFT !== undefined ? attFT.toFixed(1) : "–", sub: "average / game", tone: "teal" },
+    { key: "pctFT", label: "% FT", value: fmt(pctFTLabel), sub: subFor(pctFTLabel), tone: "teal" },
+    { key: "eff", label: "Eff", value: fmt(effLabel), sub: subFor(effLabel), tone: "amber" },
+    { key: "plusMinus", label: "+/-", value: plusMinusVal !== undefined && plusMinusVal !== null ? (plusMinusVal > 0 ? "+" : "") + plusMinusVal.toFixed(1) : "–", sub: subFor(plusMinusLabel), tone: "teal" },
+    { key: "fd", label: "FD", value: fmt(foulsDrawnLabel), sub: subFor(foulsDrawnLabel), tone: "teal" },
+    { key: "pf", label: "PF", value: fmt(foulsLabel), sub: subFor(foulsLabel), tone: "red" },
+    { key: "theoPoss", label: "Theoretical Possessions", value: theoreticalPoss !== undefined && theoreticalPoss !== null ? theoreticalPoss.toFixed(1) : "–", sub: minutesLabel !== undefined ? "based on team possessions & playing time" : "requires playing time", tone: "teal" },
+    { key: "usage", label: "% Usage", value: usagePct !== undefined && usagePct !== null ? usagePct.toFixed(1) + "%" : "–", sub: minutesLabel !== undefined ? "possessions ended / possessions played" : "requires playing time", tone: "red" },
+    { key: "gp", label: "Games played", value: String(box.entries.length), sub: "games he actually played in (box score)", tone: "amber" },
+  ];
 }
 
 // Cherche une valeur numérique dans la ligne d'un joueur pour une catégorie donnée, en
@@ -2228,6 +2320,12 @@ function useTeamAdvancedStats(filterKeys) {
       const blk = s(columns.blk);
       const stl = s(columns.stl);
       const fouls = s(columns.fouls);
+      // Demandé par l'utilisateur (vue "Team") : Reb Def, Fautes provoquées (FD), Eff, +/-,
+      // jusqu'ici extraits pour les joueurs (Box Score) mais jamais pour l'équipe elle-même.
+      const rebDef = s(columns.rebDef);
+      const foulsDrawn = s(columns.foulsDrawn);
+      const eff = s(columns.eff);
+      const plusMinus = s(columns.plusMinus);
       const pts = s(columns.pts) ?? ((made2 !== null || made3 !== null || madeFT !== null)
         ? 2 * (made2 || 0) + 3 * (made3 || 0) + (madeFT || 0) : null);
       const dreb = (reb !== null && oreb !== null) ? reb - oreb : null; // rebonds défensifs déduits si on a le total ET l'offensif
@@ -2269,6 +2367,7 @@ function useTeamAdvancedStats(filterKeys) {
       return {
         date: m.date, opponent: m.opponent, opponentScore: m.opponentScore, pts, poss, approxPoss, efg, tovPct, oreb, dreb, reb, ftRate, ortg, drtg,
         fga, fta, tov, made2, missed2, made3, missed3, madeFT, missedFT, ast, pct2, pct3, pctFT, orebPct, astPct, fgm, tpm, blk, stl, fouls,
+        rebDef, foulsDrawn, eff, plusMinus,
       };
     });
 
@@ -2748,6 +2847,10 @@ export default function App() {
   const [homeNav, setHomeNav] = useState(null); // { playerSubtab } ou { scoutingSubtab, scoutingTeam } — consommé une fois puis remis à null
   const [selectedPlayer, setSelectedPlayer] = useState(null);
   const [selectedMatchKeys, setSelectedMatchKeys] = useState(null); // null = tous les matchs
+  // Catégorie (matchType) du DERNIER match importé (coding ou box score) — persistée, pour
+  // re-sélectionner automatiquement "seulement les matchs de cette catégorie" à chaque
+  // ouverture de l'app, jusqu'au prochain import (demandé par l'utilisateur).
+  const [activeMatchType, setActiveMatchType] = useState("");
   const [currentSeason, setCurrentSeason] = useState(defaultSeasonLabel());
   const { config: visibility } = useVisibilityConfig(team?.id);
   const [seasonFilter, setSeasonFilter] = useState("all"); // "all" ou une saison précise
@@ -2832,6 +2935,8 @@ export default function App() {
     await loadTrainingThemeColors();
     const savedSeason = await storeGet("current_season");
     if (savedSeason) setCurrentSeason(savedSeason); else await storeSet("current_season", currentSeason);
+    const savedMatchType = await storeGet("active_match_type_filter");
+    if (savedMatchType) setActiveMatchType(savedMatchType);
     const r = await storeGet("roster");
     let effectiveRoster = [];
     if (r) {
@@ -2974,20 +3079,28 @@ export default function App() {
     return Array.from(map.values()).sort((a, b) => a.date.localeCompare(b.date));
   }, [matchesIndex, boxScoreIndex]);
 
-  // Par défaut, les matchs amicaux ("Friendly Game") ne sont PAS inclus dans la sélection —
-  // sauf s'il n'y a QUE des matchs amicaux, auquel cas il n'y a rien d'autre à afficher.
-  // Ne s'applique qu'une fois, tant que le coach n'a jamais lui-même modifié la sélection
-  // (sinon son choix manuel serait écrasé à chaque nouvel import).
+  // Sélection par défaut au chargement de l'app : seulement les matchs de la catégorie
+  // (matchType) du DERNIER match importé, mémorisée dans activeMatchType (persistée — voir
+  // "active_match_type_filter"). Repli sur l'ancien comportement (exclure les matchs amicaux)
+  // si aucune catégorie n'a encore été mémorisée. Ne s'applique qu'une fois au chargement, tant
+  // que le coach n'a jamais lui-même modifié la sélection (sinon son choix manuel serait
+  // écrasé) — un NOUVEL import, lui, réapplique toujours le filtre (voir les onImported).
   const userTouchedSelectionRef = useRef(false);
   useEffect(() => {
     if (userTouchedSelectionRef.current || !allMatchOptions.length) return;
+    if (activeMatchType) {
+      const keysOfType = allMatchOptions.filter(o => o.matchType === activeMatchType).map(o => matchKey(o.date, o.opponent));
+      if (keysOfType.length) { setSelectedMatchKeys(new Set(keysOfType)); return; }
+    }
+    // Repli : comportement historique si aucune catégorie mémorisée (ou plus aucun match de
+    // cette catégorie) — exclut les matchs amicaux, sauf s'il n'y a QUE des matchs amicaux.
     const nonFriendly = allMatchOptions.filter(o => o.matchType !== "Friendly Game");
     if (nonFriendly.length > 0 && nonFriendly.length < allMatchOptions.length) {
       setSelectedMatchKeys(new Set(nonFriendly.map(o => matchKey(o.date, o.opponent))));
     }
     // Si nonFriendly.length === allMatchOptions.length (aucun match amical) ou === 0 (que des
     // matchs amicaux), on laisse selectedMatchKeys à null (tous sélectionnés) — rien à exclure.
-  }, [allMatchOptions]);
+  }, [allMatchOptions, activeMatchType]);
 
   if (initializing) {
     return (
@@ -3085,6 +3198,17 @@ export default function App() {
               await storeSet("match_index", newIdx);
               setMatchesIndex(newIdx);
               setMatches(m => ({ ...m, [id]: record }));
+              // Demandé par l'utilisateur : à chaque nouvel import, la sélection de matchs
+              // (Players/Team/Scouting) se recentre automatiquement sur SEULEMENT la catégorie
+              // (matchType) de ce match — persistée, pour rester active même après avoir
+              // relancé l'app, jusqu'au prochain import. On réautorise aussi l'effet
+              // automatique à reprendre la main (même si le coach avait sélectionné des
+              // matchs à la main entre-temps) : un nouvel import doit toujours l'emporter.
+              if (meta.matchType) {
+                await storeSet("active_match_type_filter", meta.matchType);
+                setActiveMatchType(meta.matchType);
+                userTouchedSelectionRef.current = false;
+              }
               // Le roster se synchronise avec les joueurs détectés dans le fichier importé —
               // aucune liste de noms codée en dur n'est nécessaire.
               const known = new Set(roster.map(p => p.first.toLowerCase()));
@@ -3138,6 +3262,14 @@ export default function App() {
                 .sort((a, b) => a.date.localeCompare(b.date));
               await storeSet("boxscore_index", newIdx);
               setBoxScoreIndex(newIdx);
+              // Même comportement que pour l'import du fichier de coding (voir ImportTab
+              // ci-dessus) : la sélection de matchs se recentre automatiquement sur la
+              // catégorie de ce match importé.
+              if (meta.matchType) {
+                await storeSet("active_match_type_filter", meta.matchType);
+                setActiveMatchType(meta.matchType);
+                userTouchedSelectionRef.current = false;
+              }
             }}
             onDelete={async (id, label) => {
               await requestDeletion(team.id, team.name, "boxscore", label, { id });
@@ -5869,44 +6001,12 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
       {box.entries.length === 0 ? <p>No box score imported.</p> : (
         <>
           <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
-            <StatPill label="Games played" value={box.entries.length} sub="games he actually played in (box score)" />
-            {(() => {
-              // Même logique EXACTEMENT que l'écran (même plafond de 8) — l'export doit refléter
-              // ce que montre le site, pas afficher en plus des statistiques brutes qui n'y
-              // apparaissent jamais (constaté : 31 encadrés à l'export contre 9 à l'écran).
-              const featured = position ? featuredStatsForPosition(position, box.statLabels).filter(f => f.label) : [];
-              const featuredLabels = new Set(featured.map(f => f.label));
-              const rest = box.statLabels.filter(l => !featuredLabels.has(l)).slice(0, 8 - featured.length);
-              return (
-                <>
-                  {featured.map(f => {
-                    const rank = teamRank(allBox.byPlayer, f.label, playerName);
-                    return <StatPill key={f.key} label={f.label} value={formatStatValue(f.label, box.averages[f.label])} sub={rank ? `${position} · #${rank.rank} of ${rank.total} team` : position} tone="amber" />;
-                  })}
-                  {rest.map(l => {
-                    const rank = teamRank(allBox.byPlayer, l, playerName);
-                    return <StatPill key={l} label={l} value={formatStatValue(l, box.averages[l])} sub={rank ? `average / game · #${rank.rank} of ${rank.total} team` : "average / game"} tone="teal" />;
-                  })}
-                </>
-              );
-            })()}
+            {/* Liste FIXE demandée par l'utilisateur (mêmes encadrés qu'à l'écran, dans le
+                même ordre, sans plafond ni dépendance au poste — voir buildFixedBoxScorePlayerTiles). */}
+            {buildFixedBoxScorePlayerTiles(box, allBox, playerName).map(t => (
+              <StatPill key={t.key} label={t.label} value={t.value} sub={t.sub} tone={t.tone} />
+            ))}
           </div>
-
-          {(() => {
-            // Manquait à l'export alors qu'affiché à l'écran — mêmes données, même source
-            // (box.averages, déjà calculé correctement via derivedMatchStats/useBoxScore).
-            const minutesLabel = findStatCol(box.statLabels, STAT_PATTERNS.minutes, "minutes");
-            const playerMinutes = minutesLabel ? box.averages[minutesLabel] : undefined;
-            const theoreticalPoss = box.averages["Theoretical possessions"];
-            const usagePct = box.averages["Usage%"];
-            return (
-              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 16 }}>
-                <StatPill label="Playing time" value={playerMinutes !== undefined ? playerMinutes.toFixed(1) + " min" : "–"} sub={minutesLabel ? "average / game" : "data missing from box score"} />
-                <StatPill label="Possessions played (theoretical)" value={theoreticalPoss !== undefined ? theoreticalPoss.toFixed(1) : "–"} sub={playerMinutes !== undefined ? "based on team possessions & playing time" : "requires playing time"} />
-                <StatPill label="% Usage" value={usagePct !== undefined && usagePct !== null ? usagePct.toFixed(1) + "%" : "–"} sub={playerMinutes !== undefined ? "possessions ended / possessions played" : "requires playing time"} tone="red" />
-              </div>
-            );
-          })()}
 
           {/* Manquait à l'export : les stats personnalisées créées par le coach n'apparaissaient
               jamais dans le PDF, alors qu'affichées à l'écran juste après ces mêmes totaux. */}
@@ -6142,53 +6242,13 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
             ) : (
               <>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
-                  <StatPill label="Games played" value={box.entries.length} sub="games he actually played in (box score)" />
-                  {(() => {
-                    const featured = position ? featuredStatsForPosition(position, box.statLabels).filter(f => f.label) : [];
-                    const featuredLabels = new Set(featured.map(f => f.label));
-                    const rest = box.statLabels.filter(l => !featuredLabels.has(l)).slice(0, 8 - featured.length);
-                    return (
-                      <>
-                        {featured.map(f => {
-                          const rank = teamRank(allBox.byPlayer, f.label, playerName);
-                          return (
-                            <StatPill key={f.key} label={f.label} value={formatStatValue(f.label, box.averages[f.label])}
-                              sub={rank ? `${position} · #${rank.rank} of ${rank.total} team` : position} tone="amber" />
-                          );
-                        })}
-                        {rest.map(l => {
-                          const rank = teamRank(allBox.byPlayer, l, playerName);
-                          return (
-                            <StatPill key={l} label={l} value={formatStatValue(l, box.averages[l])}
-                              sub={rank ? `average / game · #${rank.rank} of ${rank.total} team` : "average / game"} tone="teal" />
-                          );
-                        })}
-                      </>
-                    );
-                  })()}
+                  {/* Liste FIXE demandée par l'utilisateur : ces encadrés apparaissent toujours,
+                      dans cet ordre précis, quel que soit le poste du joueur — plus de plafond
+                      à 8 ni de dépendance au poste (voir buildFixedBoxScorePlayerTiles). */}
+                  {buildFixedBoxScorePlayerTiles(box, allBox, playerName).map(t => (
+                    <StatPill key={t.key} label={t.label} value={t.value} sub={t.sub} tone={t.tone} />
+                  ))}
                 </div>
-
-                {(() => {
-                  // Ces indicateurs dépendent du temps de jeu, absent de la plupart des box
-                  // scores importés jusqu'ici — on affiche "–" plutôt qu'un faux calcul quand la
-                  // donnée manque. Les valeurs viennent de derivedMatchStats (via useBoxScore),
-                  // seule source de vérité pour ce calcul — BUG RÉEL CORRIGÉ : ce bloc avait sa
-                  // propre formule dupliquée et fausse (facteur ×5 en trop), jamais mise à jour
-                  // en même temps que le reste, ce qui donnait ~49.8% au lieu de ~10.8% pour le
-                  // même joueur et le même match.
-                  const minutesLabel = findStatCol(box.statLabels, STAT_PATTERNS.minutes, "minutes");
-                  const playerMinutes = minutesLabel ? box.averages[minutesLabel] : undefined;
-                  const theoreticalPoss = box.averages["Theoretical possessions"];
-                  const usagePct = box.averages["Usage%"];
-
-                  return (
-                    <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
-                      <StatPill label="Playing time" value={playerMinutes !== undefined ? playerMinutes.toFixed(1) + " min" : "–"} sub={minutesLabel ? "average / game" : "data missing from box score"} />
-                      <StatPill label="Possessions played (theoretical)" value={theoreticalPoss !== undefined ? theoreticalPoss.toFixed(1) : "–"} sub={playerMinutes !== undefined ? "based on team possessions & playing time" : "requires playing time"} />
-                      <StatPill label="% Usage" value={usagePct !== undefined && usagePct !== null ? usagePct.toFixed(1) + "%" : "–"} sub={playerMinutes !== undefined ? "possessions ended / possessions played" : "requires playing time"} tone="red" />
-                    </div>
-                  );
-                })()}
                 <BoxScoreHistoryTable box={box} />
 
                 {box.entries.length >= 2 && (
@@ -8041,6 +8101,18 @@ function TeamAdvancedStats({ advanced, isCoach }) {
     ? advanced.perMatch.map(m => m.opponentScore).filter(v => v !== null && v !== undefined).reduce((s, v, _, arr) => s + v / arr.length, 0) : null;
   const net = ortg !== null && drtg !== null ? ortg - drtg : null;
   const approxPoss = advanced.perMatch.some(m => m.approxPoss);
+  // Demandé par l'utilisateur (vue "Team") : mêmes stats que dans Box Score joueur, ajoutées ici
+  // uniquement si absentes — Reb Def utilise la vraie colonne détectée si possible, sinon le
+  // calcul dérivé (reb - oreb) déjà existant (dreb) reste le repli.
+  const rebDefDirect = avg("rebDef");
+  const rebDef = rebDefDirect !== null ? rebDefDirect : dreb;
+  const stl = avg("stl"), blk = avg("blk"), fouls = avg("fouls"), foulsDrawn = avg("foulsDrawn");
+  const eff = avg("eff"), plusMinus = avg("plusMinus");
+  const made2 = avg("made2"), missed2 = avg("missed2"), made3 = avg("made3"), missed3 = avg("missed3");
+  const madeFT = avg("madeFT"), missedFT = avg("missedFT");
+  const att2 = (made2 !== null || missed2 !== null) ? (made2 || 0) + (missed2 || 0) : null;
+  const att3 = (made3 !== null || missed3 !== null) ? (made3 || 0) + (missed3 || 0) : null;
+  const attFT = (madeFT !== null || missedFT !== null) ? (madeFT || 0) + (missedFT || 0) : null;
   const customStatsObj = Object.fromEntries(Object.entries({
     ORTG: ortg, DRTG: drtg, "Net rating": net, Possessions: poss, "FT Rate": ftRate,
     "Off. rebounds": oreb, "Def. rebounds": dreb, Rebounds: reb, Assists: ast, Points: pts,
@@ -8110,9 +8182,25 @@ function TeamAdvancedStats({ advanced, isCoach }) {
         <StatPill label="% 3pts" value={pct3 !== null ? pct3.toFixed(1) + "%" : "–"} />
         <StatPill label="% FT" value={pctFT !== null ? pctFT.toFixed(1) + "%" : "–"} />
         <StatPill label="Off. rebounds / game" value={oreb !== null ? oreb.toFixed(1) : "–"} />
-        <StatPill label="Def. rebounds / game" value={dreb !== null ? dreb.toFixed(1) : "–"} sub={dreb === null ? "requires off. rebounds + total" : undefined} />
+        <StatPill label="Def. rebounds / game" value={rebDef !== null ? rebDef.toFixed(1) : "–"} sub={rebDefDirect === null ? (dreb === null ? "requires off. rebounds + total" : "derived (total - off.)") : undefined} />
         <StatPill label="Tot. rebounds / game" value={reb !== null ? reb.toFixed(1) : "–"} />
         <StatPill label="Assists / game" value={ast !== null ? ast.toFixed(1) : "–"} sub={ast === null ? "column not detected" : undefined} />
+      </div>
+
+      <SectionTitle eyebrow="Detail" title="Defense, shooting detail, discipline" />
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 26 }}>
+        <StatPill label="Steals / game" value={stl !== null ? stl.toFixed(1) : "–"} sub={stl === null ? "column not detected" : undefined} tone="teal" />
+        <StatPill label="Blocks / game" value={blk !== null ? blk.toFixed(1) : "–"} sub={blk === null ? "column not detected" : undefined} tone="teal" />
+        <StatPill label="2Pts Made / game" value={made2 !== null ? made2.toFixed(1) : "–"} />
+        <StatPill label="2Pts Attempted / game" value={att2 !== null ? att2.toFixed(1) : "–"} />
+        <StatPill label="3Pts Made / game" value={made3 !== null ? made3.toFixed(1) : "–"} />
+        <StatPill label="3Pts Attempted / game" value={att3 !== null ? att3.toFixed(1) : "–"} />
+        <StatPill label="FT Made / game" value={madeFT !== null ? madeFT.toFixed(1) : "–"} />
+        <StatPill label="FT Attempted / game" value={attFT !== null ? attFT.toFixed(1) : "–"} />
+        <StatPill label="Eff" value={eff !== null ? eff.toFixed(1) : "–"} sub={eff === null ? "column not detected" : undefined} tone="amber" />
+        <StatPill label="+/-" value={plusMinus !== null ? (plusMinus > 0 ? "+" : "") + plusMinus.toFixed(1) : "–"} sub={plusMinus === null ? "column not detected" : undefined} />
+        <StatPill label="FD" value={foulsDrawn !== null ? foulsDrawn.toFixed(1) : "–"} sub={foulsDrawn === null ? "column not detected" : undefined} tone="teal" />
+        <StatPill label="PF" value={fouls !== null ? fouls.toFixed(1) : "–"} sub={fouls === null ? "column not detected" : undefined} tone="red" />
       </div>
 
       <SectionTitle eyebrow="Detail" title="Per game" />
@@ -8147,6 +8235,14 @@ function TeamAdvancedStats({ advanced, isCoach }) {
 // Onglet Scouting
 // ---------------------------------------------------------------------------
 
+// Demandé par l'utilisateur : les équipes de Scouting doivent toujours apparaître triées par
+// ordre alphabétique (insensible à la casse), quel que soit l'ordre d'import/ajout — jamais par
+// date d'arrivée. On trie ici, à la source, pour que TOUS les affichages qui utilisent
+// scouting.teams (Manage Team, le sélecteur du rapport, etc.) en profitent automatiquement.
+function sortedTeamsObj(obj) {
+  return Object.fromEntries(Object.entries(obj).sort(([a], [b]) => a.localeCompare(b, undefined, { sensitivity: "base" })));
+}
+
 function useScoutingTeams() {
   const [teams, setTeams] = useState({}); // name -> {stats, source, updatedAt}
   const [loading, setLoading] = useState(true);
@@ -8161,7 +8257,7 @@ function useScoutingTeams() {
       const t = await storeGet("scouting:" + n);
       if (t) out[n] = t;
     }
-    setTeams(out);
+    setTeams(sortedTeamsObj(out));
     setLoading(false);
   }
 
@@ -8173,14 +8269,14 @@ function useScoutingTeams() {
     const existing = await storeGet("scouting:" + trimmed);
     const record = { stats, source, updatedAt: todayLocal(), logo: existing?.logo };
     await storeSet("scouting:" + trimmed, record);
-    setTeams(t => ({ ...t, [trimmed]: record }));
+    setTeams(t => sortedTeamsObj({ ...t, [trimmed]: record }));
   }
 
   async function saveLogo(name, logo) {
     const existing = (await storeGet("scouting:" + name)) || {};
     const record = { ...existing, logo };
     await storeSet("scouting:" + name, record);
-    setTeams(t => ({ ...t, [name]: record }));
+    setTeams(t => sortedTeamsObj({ ...t, [name]: record }));
   }
 
   async function deleteTeam(name) {
