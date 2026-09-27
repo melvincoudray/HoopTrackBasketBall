@@ -1626,12 +1626,19 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories }) 
   // ces répartitions (Plays, Playtypes, Shooting Selection, Screen defense, Spacing), pas
   // seulement les erreurs défensives — juste plus visible pour cette catégorie précise.
   const offPlaysDonut = useMemo(() => categoryBreakdown(off, PLAYS_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open })), [off, cats]);
-  const offPlaysList = useMemo(() => topCategoryBucket(off, PLAYS_LIST(cats), 9), [off, cats]);
-  const offPlaytypesList = useMemo(() => topBucket(off, PLAYTYPES_LIST(cats), 8, false), [off, cats]);
+  // Demandé par l'utilisateur : Plays et Playtypes affichaient tous les deux un "top N" tronqué
+  // (9 pour les Plays, 8 pour les Playtypes) — il veut voir l'efficacité sur TOUS les
+  // plays/playtypes, sans troncature, aussi bien pour son équipe que pour le Scouting (cette
+  // fonction est partagée par les deux). En omettant la limite "n", topBucket/topCategoryBucket
+  // renvoient la liste complète (slice(0, undefined) ne coupe rien) — aucun autre changement de
+  // comportement ni d'autre catégorie (Screen defense, Spacing, catégories personnalisées…)
+  // n'est touché, elles n'ont pas été mentionnées.
+  const offPlaysList = useMemo(() => topCategoryBucket(off, PLAYS_LIST(cats)), [off, cats]);
+  const offPlaytypesList = useMemo(() => topBucket(off, PLAYTYPES_LIST(cats), undefined, false), [off, cats]);
   const offShooting = useMemo(() => shootingSelection(off, cats), [off, cats]);
 
-  const defPlaysList = useMemo(() => topCategoryBucket(def, PLAYS_LIST(cats), 9), [def, cats]);
-  const defPlaytypesList = useMemo(() => topBucket(def, PLAYTYPES_LIST(cats), 8, false), [def, cats]);
+  const defPlaysList = useMemo(() => topCategoryBucket(def, PLAYS_LIST(cats)), [def, cats]);
+  const defPlaytypesList = useMemo(() => topBucket(def, PLAYTYPES_LIST(cats), undefined, false), [def, cats]);
   const defShooting = useMemo(() => shootingSelection(def, cats), [def, cats]);
   const defMistakes = useMemo(() => {
     const b = topBucket(def, DEFENSIVE_MISTAKES_LIST(cats), 9, false);
@@ -1906,7 +1913,14 @@ const MADE = "(r[ée]ussis?|made)$";
 const MISSED = "(manqu[ée]s?|missed)$";
 const STAT_PATTERNS = {
   minutes: [/^Temps\s*de\s*jeu$/i, /^Min(ute)?s?$/i, /^MIN$/i, /^Time$/i],
-  made2: [new RegExp(`^2\\s*(pts?|points?)?\\s*${MADE}`, "i"), /^2PM$/i, /^2P\+$/i, /^FGM$/i, /^FG\s*Made$/i],
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur, sur un vrai fichier — % 2Pts affichait 61,5%
+  // /24 sur 39 au lieu de 54,5% /18 sur 33) : "FGM"/"FG Made" désigne le total des tirs réussis
+  // (2pts + 3pts confondus), jamais seulement les 2pts — ces deux motifs faisaient donc lire la
+  // mauvaise colonne dès qu'un autre match déjà importé (format sans détail 2pts/3pts) faisait
+  // apparaître "FG Made" avant "2pts Made" dans la liste combinée des colonnes détectées. Le
+  // total combiné a déjà sa propre clé dédiée ("fgm", avec son propre repli made2+made3), donc
+  // ce repli ici était en plus redondant.
+  made2: [new RegExp(`^2\\s*(pts?|points?)?\\s*${MADE}`, "i"), /^2PM$/i, /^2P\+$/i],
   missed2: [new RegExp(`^2\\s*(pts?|points?)?\\s*${MISSED}`, "i"), /^2P-$/i],
   made3: [new RegExp(`^3\\s*(pts?|points?)?\\s*${MADE}`, "i"), /^3PM$/i, /^3P\+$/i, /^Threes?\s*Made$/i],
   missed3: [new RegExp(`^3\\s*(pts?|points?)?\\s*${MISSED}`, "i"), /^3P-$/i],
@@ -8210,6 +8224,7 @@ function TeamAdvancedStats({ advanced, isCoach }) {
             <tr>
               <th style={thStyle}>Date</th><th style={thStyle}>Opponent</th><th style={thStyle}>Opp. score</th>
               <th style={thStyle}>Poss.</th><th style={thStyle}>ORTG</th><th style={thStyle}>DRTG</th><th style={thStyle}>eFG%</th><th style={thStyle}>TOV%</th>
+              <th style={thStyle}>% Reb Off</th><th style={thStyle}>FTA/FGA</th>
             </tr>
           </thead>
           <tbody>
@@ -8222,6 +8237,8 @@ function TeamAdvancedStats({ advanced, isCoach }) {
                 <td style={{ ...tdStyle, fontFamily: "ui-monospace, monospace" }}>{m.drtg !== null ? m.drtg.toFixed(1) : "–"}</td>
                 <td style={{ ...tdStyle, fontFamily: "ui-monospace, monospace" }}>{m.efg !== null ? (m.efg * 100).toFixed(1) + "%" : "–"}</td>
                 <td style={{ ...tdStyle, fontFamily: "ui-monospace, monospace" }}>{m.tovPct !== null ? (m.tovPct * 100).toFixed(1) + "%" : "–"}</td>
+                <td style={{ ...tdStyle, fontFamily: "ui-monospace, monospace" }}>{m.orebPct !== null && m.orebPct !== undefined ? m.orebPct.toFixed(1) + "%" : "–"}</td>
+                <td style={{ ...tdStyle, fontFamily: "ui-monospace, monospace" }}>{m.ftRate !== null && m.ftRate !== undefined ? m.ftRate.toFixed(2) : "–"}</td>
               </tr>
             ))}
           </tbody>
