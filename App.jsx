@@ -1191,60 +1191,101 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
   // exacte à l'image, mais plus lent — x264 en WebAssembly n'a pas d'accélération matérielle),
   // "fast" copie le flux sans ré-encoder (quasi instantané, mais la coupe se cale sur l'image
   // clé la plus proche, donc chaque clip peut déborder de quelques images/secondes avant/après
-  // le tag). Dans les deux cas, l'assemblage final reste cohérent : en mode "fast", les clips
-  // copiés peuvent provenir de vidéos différentes avec des réglages différents (résolution,
-  // codec), donc l'étape finale de concaténation ré-encode une seule fois (ultrafast) au lieu
-  // d'un copy qui échouerait sinon — un seul ré-encodage de la durée totale, pas un par clip.
-  const [cutMode, setCutMode] = useState("precise"); // "precise" | "fast"
+  // le tag) puis ré-encode une seule fois à l'assemblage pour harmoniser des clips venant de
+  // vidéos différentes. "clips" (3ᵉ option, demandée par l'utilisateur) : ni ré-encodage ni
+  // assemblage — chaque clip est juste copié (comme "fast"), affiché dès qu'il est prêt (pas
+  // besoin d'attendre tous les autres) et téléchargeable individuellement. Comme il n'y a plus
+  // de montage final à harmoniser, ce mode reste rapide même avec des vidéos de formats différents
+  // entre les lots (pas de ré-encodage du tout, nulle part).
+  const [cutMode, setCutMode] = useState("precise"); // "precise" | "fast" | "clips"
+  // Résultats progressifs du mode "clips" — rempli clip par clip pendant la génération (pas
+  // d'un coup à la fin), pour que le coach puisse regarder le premier pendant que les suivants
+  // se préparent, comme demandé.
+  const [clipResults, setClipResults] = useState([]); // [{ url, label }]
+  const clipUrlsRef = useRef([]);
 
-  useEffect(() => () => { if (resultUrlRef.current) URL.revokeObjectURL(resultUrlRef.current); }, []);
+  useEffect(() => () => {
+    if (resultUrlRef.current) URL.revokeObjectURL(resultUrlRef.current);
+    clipUrlsRef.current.forEach(u => URL.revokeObjectURL(u));
+  }, []);
 
   const allReadyHaveFiles = readyGroups.length > 0 && readyGroups.every(g => files[g.key]);
 
   async function generate() {
     setBusy(true); setError(""); setResultUrl(null);
+    clipUrlsRef.current.forEach(u => URL.revokeObjectURL(u));
+    clipUrlsRef.current = [];
+    setClipResults([]);
     try {
       const ffmpeg = await getFfmpeg();
-      const concatLines = [];
-      let clipIdx = 0;
-      for (let gi = 0; gi < readyGroups.length; gi++) {
-        const g = readyGroups[gi];
-        const file = files[g.key];
-        setProgress(`Reading video ${gi + 1}/${readyGroups.length} (${noun} ${gi + 1})…`);
-        await ffmpeg.writeFile("input.mp4", await fetchFile(file));
-        for (let ci = 0; ci < g.clips.length; ci++) {
-          const { start, end } = g.clips[ci];
-          const dur = Math.max(0.1, end - start);
-          const outName = `clip_${clipIdx}.mp4`;
-          setProgress(`Cutting clip ${clipIdx + 1}/${totalClips} (${noun} ${gi + 1})…`);
-          const cutArgs = cutMode === "fast"
-            ? ["-ss", String(start), "-i", "input.mp4", "-t", String(dur), "-c", "copy", "-avoid_negative_ts", "make_zero", outName]
-            : ["-ss", String(start), "-i", "input.mp4", "-t", String(dur), "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", "-avoid_negative_ts", "make_zero", outName];
-          await ffmpeg.exec(cutArgs);
-          concatLines.push(`file '${outName}'`);
-          clipIdx++;
+
+      if (cutMode === "clips") {
+        let clipIdx = 0;
+        for (let gi = 0; gi < readyGroups.length; gi++) {
+          const g = readyGroups[gi];
+          const file = files[g.key];
+          setProgress(`Reading video ${gi + 1}/${readyGroups.length} (${noun} ${gi + 1})…`);
+          await ffmpeg.writeFile("input.mp4", await fetchFile(file));
+          for (let ci = 0; ci < g.clips.length; ci++) {
+            const { start, end } = g.clips[ci];
+            const dur = Math.max(0.1, end - start);
+            const outName = `clip_${clipIdx}.mp4`;
+            setProgress(`Cutting clip ${clipIdx + 1}/${totalClips} (${noun} ${gi + 1})…`);
+            await ffmpeg.exec(["-ss", String(start), "-i", "input.mp4", "-t", String(dur), "-c", "copy", "-avoid_negative_ts", "make_zero", outName]);
+            const data = await ffmpeg.readFile(outName);
+            const blob = new Blob([data.buffer], { type: "video/mp4" });
+            const url = URL.createObjectURL(blob);
+            clipUrlsRef.current.push(url);
+            const label = `${noun} ${gi + 1} — ${g.label} · clip ${ci + 1}/${g.clips.length}`;
+            setClipResults(prev => [...prev, { url, label }]);
+            try { await ffmpeg.deleteFile(outName); } catch (e) {}
+            clipIdx++;
+          }
+          await ffmpeg.deleteFile("input.mp4");
         }
-        await ffmpeg.deleteFile("input.mp4");
+        setProgress("");
+      } else {
+        const concatLines = [];
+        let clipIdx = 0;
+        for (let gi = 0; gi < readyGroups.length; gi++) {
+          const g = readyGroups[gi];
+          const file = files[g.key];
+          setProgress(`Reading video ${gi + 1}/${readyGroups.length} (${noun} ${gi + 1})…`);
+          await ffmpeg.writeFile("input.mp4", await fetchFile(file));
+          for (let ci = 0; ci < g.clips.length; ci++) {
+            const { start, end } = g.clips[ci];
+            const dur = Math.max(0.1, end - start);
+            const outName = `clip_${clipIdx}.mp4`;
+            setProgress(`Cutting clip ${clipIdx + 1}/${totalClips} (${noun} ${gi + 1})…`);
+            const cutArgs = cutMode === "fast"
+              ? ["-ss", String(start), "-i", "input.mp4", "-t", String(dur), "-c", "copy", "-avoid_negative_ts", "make_zero", outName]
+              : ["-ss", String(start), "-i", "input.mp4", "-t", String(dur), "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", "-avoid_negative_ts", "make_zero", outName];
+            await ffmpeg.exec(cutArgs);
+            concatLines.push(`file '${outName}'`);
+            clipIdx++;
+          }
+          await ffmpeg.deleteFile("input.mp4");
+        }
+        setProgress("Assembling the montage…");
+        await ffmpeg.writeFile("concat.txt", concatLines.join("\n"));
+        const concatArgs = cutMode === "fast"
+          ? ["-f", "concat", "-safe", "0", "-i", "concat.txt", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", "output.mp4"]
+          : ["-f", "concat", "-safe", "0", "-i", "concat.txt", "-c", "copy", "output.mp4"];
+        await ffmpeg.exec(concatArgs);
+        const data = await ffmpeg.readFile("output.mp4");
+        const blob = new Blob([data.buffer], { type: "video/mp4" });
+        const url = URL.createObjectURL(blob);
+        resultUrlRef.current = url;
+        setResultUrl(url);
+        setProgress("");
+        // Nettoyage mémoire wasm entre deux exports — pas critique mais évite d'accumuler les
+        // fichiers intermédiaires si le coach génère plusieurs montages dans la même session.
+        for (let i = 0; i < clipIdx; i++) { try { await ffmpeg.deleteFile(`clip_${i}.mp4`); } catch (e) {} }
+        try { await ffmpeg.deleteFile("concat.txt"); } catch (e) {}
+        try { await ffmpeg.deleteFile("output.mp4"); } catch (e) {}
       }
-      setProgress("Assembling the montage…");
-      await ffmpeg.writeFile("concat.txt", concatLines.join("\n"));
-      const concatArgs = cutMode === "fast"
-        ? ["-f", "concat", "-safe", "0", "-i", "concat.txt", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", "output.mp4"]
-        : ["-f", "concat", "-safe", "0", "-i", "concat.txt", "-c", "copy", "output.mp4"];
-      await ffmpeg.exec(concatArgs);
-      const data = await ffmpeg.readFile("output.mp4");
-      const blob = new Blob([data.buffer], { type: "video/mp4" });
-      const url = URL.createObjectURL(blob);
-      resultUrlRef.current = url;
-      setResultUrl(url);
-      setProgress("");
-      // Nettoyage mémoire wasm entre deux exports — pas critique mais évite d'accumuler les
-      // fichiers intermédiaires si le coach génère plusieurs montages dans la même session.
-      for (let i = 0; i < clipIdx; i++) { try { await ffmpeg.deleteFile(`clip_${i}.mp4`); } catch (e) {} }
-      try { await ffmpeg.deleteFile("concat.txt"); } catch (e) {}
-      try { await ffmpeg.deleteFile("output.mp4"); } catch (e) {}
     } catch (err) {
-      setError(err.message || "Error while generating the montage.");
+      setError(err.message || "Error while generating the clips.");
       setProgress("");
     }
     setBusy(false);
@@ -1285,6 +1326,13 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
             </span>
             <span style={{ fontSize: 11, color: "#8B93A1", lineHeight: 1.4 }}>Much quicker, but each clip may start/end a second or two off.</span>
           </label>
+          <label style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4, padding: 10, background: PANEL2, border: `1px solid ${cutMode === "clips" ? AMBER : LINE}`, borderRadius: 8, cursor: busy ? "default" : "pointer" }}>
+            <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: PAPER, fontWeight: 600 }}>
+              <input type="radio" name="cutMode" disabled={busy} checked={cutMode === "clips"} onChange={() => setCutMode("clips")} />
+              Clip by clip
+            </span>
+            <span style={{ fontSize: 11, color: "#8B93A1", lineHeight: 1.4 }}>No montage — watch and save each clip as soon as it's ready.</span>
+          </label>
         </div>
 
         {missingTimestampGroups.length > 0 && (
@@ -1318,7 +1366,27 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
         {error && <div style={{ color: RED, fontSize: 12.5, marginBottom: 12 }}>{error}</div>}
         {progress && <div style={{ color: TEAL, fontSize: 12.5, marginBottom: 12 }}>{progress}</div>}
 
-        {resultUrl ? (
+        {cutMode === "clips" ? (
+          (busy || clipResults.length > 0) ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ fontSize: 11.5, color: "#5C6470", lineHeight: 1.5 }}>
+                Viewing mode only — each clip lives in your browser and is never uploaded or stored on the site. Use "Save" on a clip only if you want to keep a copy on your device.
+              </div>
+              {clipResults.map((c, i) => (
+                <div key={i} style={{ display: "flex", flexDirection: "column", gap: 6, padding: 12, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10 }}>
+                  <div style={{ fontSize: 12, color: "#8B93A1" }}>{c.label}</div>
+                  <video controls autoPlay={i === clipResults.length - 1 && !busy} src={c.url} style={{ width: "100%", borderRadius: 8, background: "#000" }} />
+                  <a href={c.url} download={`${playName.replace(/\s+/g, "_")}_${sideLabel}_clip${i + 1}.mp4`} style={{ ...btnPrimary, textAlign: "center", textDecoration: "none", display: "block", boxSizing: "border-box" }}>Save this clip to my device</a>
+                </div>
+              ))}
+              {busy && <div style={{ color: TEAL, fontSize: 12.5 }}>{progress || "Preparing the next clip…"}</div>}
+            </div>
+          ) : (
+            <button disabled={!allReadyHaveFiles || busy} onClick={generate} style={{ ...btnPrimary, width: "100%", opacity: (!allReadyHaveFiles || busy) ? 0.5 : 1, cursor: (!allReadyHaveFiles || busy) ? "default" : "pointer" }}>
+              {`View the clips (${totalClips} clip${totalClips !== 1 ? "s" : ""})`}
+            </button>
+          )
+        ) : resultUrl ? (
           <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
             <video controls autoPlay src={resultUrl} style={{ width: "100%", borderRadius: 10, background: "#000" }} />
             <div style={{ fontSize: 11.5, color: "#5C6470", lineHeight: 1.5 }}>
