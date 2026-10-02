@@ -14,13 +14,15 @@
     "recharts": "^2.12.7",
     "lucide-react": "^0.383.0",
     "xlsx": "^0.18.5",
+    "sql.js": "^1.14.2",
+    "@ffmpeg/ffmpeg": "^0.12.15",
+    "@ffmpeg/util": "^0.12.2",
     "@supabase/supabase-js": "^2.49.4",
     "jspdf": "^2.5.2",
     "html2canvas": "^1.4.1",
     "pdfjs-dist": "^4.0.379",
     "pdf-lib": "^1.17.1",
-    "@pdf-lib/fontkit": "^1.1.1",
-    "web-push": "^3.6.7"
+    "@pdf-lib/fontkit": "^1.1.1"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.1",
