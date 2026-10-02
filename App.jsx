@@ -1095,6 +1095,60 @@ function pluralizeNoun(noun, count) {
   return /[sxz]$|[cs]h$/i.test(noun) ? noun + "es" : noun + "s";
 }
 
+// Fenêtre modale ouverte en cliquant sur la colonne PPPP ou Open d'une ligne (voir
+// MetricBarList) — demandé par l'utilisateur : "paniers marqués" ou "Open/Contested" ne sont
+// pas des tags uniques mais plusieurs valeurs d'une même catégorie (2PT+/3PT+/FT+… pour
+// "Results & misc.", Open/Contested pour "Shot selection"), donc on demande d'abord lesquelles
+// combiner avec le tag de la ligne avant de chercher les clips. "category" détermine la liste
+// de cases à cocher proposée (toutes les valeurs ACTUELLES de cette catégorie, y compris
+// celles ajoutées par le coach dans Settings — rien n'est codé en dur).
+function SecondaryTagPickerModal({ name, side, category, cats, onConfirm, onClose }) {
+  const tags = categoryTags(category, cats);
+  const [selected, setSelected] = useState(new Set());
+  function toggle(tag) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(tag)) next.delete(tag); else next.add(tag);
+      return next;
+    });
+  }
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }}>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 14, padding: 24, maxWidth: 420, width: "100%", maxHeight: "86vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+          <div>
+            <div style={{ fontSize: 15, fontWeight: 700, color: PAPER }}>{name}</div>
+            <div style={{ fontSize: 12, color: "#8B93A1" }}>{side === "off" ? "Offense" : "Defense"} · choose which "{category}" tags to include</div>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontSize: 20, lineHeight: 1 }}>×</button>
+        </div>
+        <p style={{ fontSize: 12.5, color: "#8B93A1", lineHeight: 1.6, margin: "8px 0 16px" }}>
+          Clips will combine "{name}" with any of the tags you select below.
+        </p>
+        {tags.length === 0 ? (
+          <EmptyState text={`No tags in "${category}" yet (Settings).`} />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 18 }}>
+            {tags.map(tag => (
+              <label key={tag} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: PAPER, cursor: "pointer" }}>
+                <input type="checkbox" checked={selected.has(tag)} onChange={() => toggle(tag)} />
+                {tag}
+              </label>
+            ))}
+          </div>
+        )}
+        <button
+          disabled={selected.size === 0}
+          onClick={() => onConfirm(Array.from(selected))}
+          style={{ ...btnPrimary, width: "100%", opacity: selected.size === 0 ? 0.5 : 1, cursor: selected.size === 0 ? "default" : "pointer" }}
+        >
+          Find clips ({selected.size} tag{selected.size !== 1 ? "s" : ""} selected)
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // "grouping" (optionnel) : comment regrouper "plays" en lots nécessitant chacun une vidéo
 // locale — par défaut, un match (matchId / date vs adversaire), comme pour Team Play et la
 // fiche joueur. Demandé par l'utilisateur pour le Scouting : les fichiers importés dans
@@ -1133,6 +1187,15 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
   const [error, setError] = useState("");
   const [resultUrl, setResultUrl] = useState(null);
   const resultUrlRef = useRef(null);
+  // Demandé par l'utilisateur (vitesse de génération) : "precise" ré-encode chaque clip (coupe
+  // exacte à l'image, mais plus lent — x264 en WebAssembly n'a pas d'accélération matérielle),
+  // "fast" copie le flux sans ré-encoder (quasi instantané, mais la coupe se cale sur l'image
+  // clé la plus proche, donc chaque clip peut déborder de quelques images/secondes avant/après
+  // le tag). Dans les deux cas, l'assemblage final reste cohérent : en mode "fast", les clips
+  // copiés peuvent provenir de vidéos différentes avec des réglages différents (résolution,
+  // codec), donc l'étape finale de concaténation ré-encode une seule fois (ultrafast) au lieu
+  // d'un copy qui échouerait sinon — un seul ré-encodage de la durée totale, pas un par clip.
+  const [cutMode, setCutMode] = useState("precise"); // "precise" | "fast"
 
   useEffect(() => () => { if (resultUrlRef.current) URL.revokeObjectURL(resultUrlRef.current); }, []);
 
@@ -1154,7 +1217,10 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
           const dur = Math.max(0.1, end - start);
           const outName = `clip_${clipIdx}.mp4`;
           setProgress(`Cutting clip ${clipIdx + 1}/${totalClips} (${noun} ${gi + 1})…`);
-          await ffmpeg.exec(["-ss", String(start), "-i", "input.mp4", "-t", String(dur), "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-c:a", "aac", "-avoid_negative_ts", "make_zero", outName]);
+          const cutArgs = cutMode === "fast"
+            ? ["-ss", String(start), "-i", "input.mp4", "-t", String(dur), "-c", "copy", "-avoid_negative_ts", "make_zero", outName]
+            : ["-ss", String(start), "-i", "input.mp4", "-t", String(dur), "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", "-avoid_negative_ts", "make_zero", outName];
+          await ffmpeg.exec(cutArgs);
           concatLines.push(`file '${outName}'`);
           clipIdx++;
         }
@@ -1162,7 +1228,10 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
       }
       setProgress("Assembling the montage…");
       await ffmpeg.writeFile("concat.txt", concatLines.join("\n"));
-      await ffmpeg.exec(["-f", "concat", "-safe", "0", "-i", "concat.txt", "-c", "copy", "output.mp4"]);
+      const concatArgs = cutMode === "fast"
+        ? ["-f", "concat", "-safe", "0", "-i", "concat.txt", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", "output.mp4"]
+        : ["-f", "concat", "-safe", "0", "-i", "concat.txt", "-c", "copy", "output.mp4"];
+      await ffmpeg.exec(concatArgs);
       const data = await ffmpeg.readFile("output.mp4");
       const blob = new Blob([data.buffer], { type: "video/mp4" });
       const url = URL.createObjectURL(blob);
@@ -1200,6 +1269,23 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
           {totalClips} clip{totalClips !== 1 ? "s" : ""} found across {readyGroups.length} {pluralizeNoun(noun, readyGroups.length).toLowerCase()} ({scopeNote})
           Insert each video below — nothing is uploaded, everything is cut directly in your browser, purely for viewing.
         </p>
+
+        <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+          <label style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4, padding: 10, background: PANEL2, border: `1px solid ${cutMode === "precise" ? AMBER : LINE}`, borderRadius: 8, cursor: busy ? "default" : "pointer" }}>
+            <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: PAPER, fontWeight: 600 }}>
+              <input type="radio" name="cutMode" disabled={busy} checked={cutMode === "precise"} onChange={() => setCutMode("precise")} />
+              Precise cut
+            </span>
+            <span style={{ fontSize: 11, color: "#8B93A1", lineHeight: 1.4 }}>Exact timing, slower to generate.</span>
+          </label>
+          <label style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4, padding: 10, background: PANEL2, border: `1px solid ${cutMode === "fast" ? AMBER : LINE}`, borderRadius: 8, cursor: busy ? "default" : "pointer" }}>
+            <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: PAPER, fontWeight: 600 }}>
+              <input type="radio" name="cutMode" disabled={busy} checked={cutMode === "fast"} onChange={() => setCutMode("fast")} />
+              Fast cut
+            </span>
+            <span style={{ fontSize: 11, color: "#8B93A1", lineHeight: 1.4 }}>Much quicker, but each clip may start/end a second or two off.</span>
+          </label>
+        </div>
 
         {missingTimestampGroups.length > 0 && (
           <div style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: 10, background: PANEL2, border: `1px solid ${AMBER}`, borderRadius: 8, marginBottom: 14 }}>
@@ -1785,7 +1871,14 @@ function BreakdownChart({ title, data }) {
 // pour ouvrir l'export de clips vidéo de ce Play. N'a aucun effet ailleurs (Playtypes, Screen
 // defense, Spacing, catégories personnalisées, Scouting, fiche joueur…) tant que l'appelant ne
 // le fournit pas : comportement et apparence inchangés partout ailleurs.
-function MetricBarList({ title, items, color = AMBER, onItemClick }) {
+// onPpppClick / onOpenClick (optionnels, demandés par l'utilisateur) : rendent cliquables
+// séparément les colonnes PPPP et Open de chaque ligne — indépendamment du nom/de la fréquence
+// (onItemClick, qui ouvre directement l'export de clips pour CE tag seul). Cliquer sur PPPP ou
+// Open ouvre d'abord un sélecteur (voir SecondaryTagPickerModal) pour choisir, parmi "Results &
+// misc." (PPPP, ex. paniers marqués) ou "Shot selection" (Open, ex. Open/Contested), quel(s)
+// tag(s) combiner avec celui de la ligne — car "paniers marqués" n'est pas un tag unique mais
+// plusieurs (2PT+, 3PT+, FT+…), et le coach doit pouvoir choisir lesquels inclure.
+function MetricBarList({ title, items, color = AMBER, onItemClick, onPpppClick, onOpenClick }) {
   if (!items.length) return null;
   return (
     <div data-no-split="true" style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, flex: "1 1 320px" }}>
@@ -1794,17 +1887,17 @@ function MetricBarList({ title, items, color = AMBER, onItemClick }) {
         <div>Name</div><div>Frequency</div><div>PPPP</div><div>Open</div>
       </div>
       {items.map((it, i) => (
-        <div key={i} onClick={onItemClick ? () => onItemClick(it.name) : undefined} title={onItemClick ? "View video clips for this play" : undefined} style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 0.55fr 0.55fr", padding: "9px 0", alignItems: "center", borderBottom: i < items.length - 1 ? `1px solid ${LINE}` : "none", fontSize: 13, cursor: onItemClick ? "pointer" : "default" }}>
-          <div style={{ color: it.name === "Autres" ? "#8B93A1" : PAPER, display: "flex", alignItems: "center", gap: 6 }}>
+        <div key={i} style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 0.55fr 0.55fr", padding: "9px 0", alignItems: "center", borderBottom: i < items.length - 1 ? `1px solid ${LINE}` : "none", fontSize: 13 }}>
+          <div onClick={onItemClick ? () => onItemClick(it.name) : undefined} title={onItemClick ? "View video clips for this play" : undefined} style={{ color: it.name === "Autres" ? "#8B93A1" : PAPER, display: "flex", alignItems: "center", gap: 6, cursor: onItemClick ? "pointer" : "default" }}>
             {it.name}
             {onItemClick && <Video size={12} color="#5C6470" />}
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+          <div onClick={onItemClick ? () => onItemClick(it.name) : undefined} style={{ display: "flex", alignItems: "center", gap: 8, cursor: onItemClick ? "pointer" : "default" }}>
             <div style={{ width: 60 }}><Bar pct={it.freq} /></div>
             <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, color: "#8B93A1" }}>{it.freq.toFixed(0)}%</span>
           </div>
-          <div style={{ fontFamily: "ui-monospace, monospace", color, fontWeight: 700 }}>{it.pppp !== null && it.pppp !== undefined ? it.pppp.toFixed(2) : "–"}</div>
-          <div style={{ fontFamily: "ui-monospace, monospace", color: it.open !== null && it.open !== undefined ? TEAL : "#5C6470" }}>{it.open !== null && it.open !== undefined ? it.open.toFixed(0) + "%" : "–"}</div>
+          <div onClick={onPpppClick ? () => onPpppClick(it.name) : undefined} title={onPpppClick ? "Choose which made-basket tags to include, then view clips" : undefined} style={{ fontFamily: "ui-monospace, monospace", color, fontWeight: 700, cursor: onPpppClick ? "pointer" : "default" }}>{it.pppp !== null && it.pppp !== undefined ? it.pppp.toFixed(2) : "–"}</div>
+          <div onClick={onOpenClick ? () => onOpenClick(it.name) : undefined} title={onOpenClick ? "Choose Open/Contested tags to include, then view clips" : undefined} style={{ fontFamily: "ui-monospace, monospace", color: it.open !== null && it.open !== undefined ? TEAL : "#5C6470", cursor: onOpenClick ? "pointer" : "default" }}>{it.open !== null && it.open !== undefined ? it.open.toFixed(0) + "%" : "–"}</div>
         </div>
       ))}
     </div>
@@ -1873,7 +1966,18 @@ function tagBreakdown(source) {
 // PlayerDetail / ObservationTab / ScoutingStaffPanel).
 function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, enableClipExport = false, clipGrouping }) {
   const cats = categories || currentTagCategories();
-  const [clipModal, setClipModal] = useState(null); // { name, side: "off"|"def" } | null
+  const [clipModal, setClipModal] = useState(null); // { name, side: "off"|"def", extraTags? } | null
+  // Demandé par l'utilisateur : cliquer sur PPPP ou Open doit d'abord demander QUELS tags de
+  // "Results & misc." (paniers marqués, fautes…) ou "Shot selection" (Open/Contested) combiner
+  // avec le tag de la ligne, avant de chercher les clips — pas une liste figée (2PT+/3PT+/FT+
+  // uniquement) mais TOUTES les valeurs de la catégorie, pour rester valable même si le coach
+  // en ajoute dans Settings. secondaryPicker ouvre ce choix ; une fois confirmé, il devient un
+  // clipModal classique avec extraTags rempli.
+  const [secondaryPicker, setSecondaryPicker] = useState(null); // { name, side, category } | null
+  const ppppClickOff = enableClipExport ? (name) => setSecondaryPicker({ name, side: "off", category: "Results & misc." }) : undefined;
+  const openClickOff = enableClipExport ? (name) => setSecondaryPicker({ name, side: "off", category: "Shot selection" }) : undefined;
+  const ppppClickDef = enableClipExport ? (name) => setSecondaryPicker({ name, side: "def", category: "Results & misc." }) : undefined;
+  const openClickDef = enableClipExport ? (name) => setSecondaryPicker({ name, side: "def", category: "Shot selection" }) : undefined;
   // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "Defensive mistakes" affichait 0 après une
   // modification dans Settings) : aucun de ces useMemo n'avait "cats" dans son tableau de
   // dépendances — React gardait donc en cache le résultat calculé au tout premier rendu, même
@@ -1935,19 +2039,19 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 26 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
           <DonutCard title="Plays (game entries)" data={offPlaysDonut.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} />
-          <MetricBarList title="Efficiency by play" items={offPlaysList} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} />
+          <MetricBarList title="Efficiency by play" items={offPlaysList} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
           <DonutCard title="Shooting Selection" data={offShooting} note="Open/Contested tags not present yet." />
-          <MetricBarList title="Efficiency by playtype" items={offPlaytypesList} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} />
+          <MetricBarList title="Efficiency by playtype" items={offPlaytypesList} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
           <DonutCard title="Screen defense faced (opponent coverage)" data={offScreenDef.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag detected." />
-          <MetricBarList title="Efficiency by coverage faced" items={offScreenDef} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} />
+          <MetricBarList title="Efficiency by coverage faced" items={offScreenDef} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
           <DonutCard title="Spacing played on screens" data={offSpacing.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No spacing tag detected." />
-          <MetricBarList title="Efficiency by spacing" items={offSpacing} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} />
+          <MetricBarList title="Efficiency by spacing" items={offSpacing} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} />
         </div>
         {/* Catégories personnalisées (créées dans Settings, au-delà des 4 intégrées ci-dessus)
             — intégrées directement ici, dans la même grille, sans section "Custom"/"Other"
@@ -1957,7 +2061,7 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
           return (
             <div key={"off-" + c.name} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
               {(style === "simple" || style === "both") && <DonutCard title={c.name} data={c.items.map((it, i) => ({ ...it, color: CHART_COLORS[i % CHART_COLORS.length] }))} />}
-              {(style === "detailed" || style === "both") && <MetricBarList title={c.name} items={c.items} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} />}
+              {(style === "detailed" || style === "both") && <MetricBarList title={c.name} items={c.items} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} />}
             </div>
           );
         })}
@@ -1967,26 +2071,26 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 26 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
           <DonutCard title="Shooting Selection (defense)" data={defShooting} note="Open/Contested tags not present yet." />
-          <MetricBarList title="Playtypes defended — efficiency" items={defPlaytypesList} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} />
+          <MetricBarList title="Playtypes defended — efficiency" items={defPlaytypesList} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
           <DonutCard title="Defensive mistakes" data={defMistakes} note="No defensive mistake tag detected." />
-          <MetricBarList title="Plays defended — efficiency" items={defPlaysList} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} />
+          <MetricBarList title="Plays defended — efficiency" items={defPlaysList} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
           <DonutCard title="Screen defense played" data={defScreenDef.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag detected." />
-          <MetricBarList title="Efficiency by coverage used" items={defScreenDef} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} />
+          <MetricBarList title="Efficiency by coverage used" items={defScreenDef} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
           <DonutCard title="Spacing faced on screens" data={defSpacing.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No spacing tag detected." />
-          <MetricBarList title="Efficiency by spacing faced" items={defSpacing} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} />
+          <MetricBarList title="Efficiency by spacing faced" items={defSpacing} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} />
         </div>
         {customDef.filter(c => c.items.length).map(c => {
           const style = chartStyleFor(c.name);
           return (
             <div key={"def-" + c.name} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
               {(style === "simple" || style === "both") && <DonutCard title={c.name} data={c.items.map((it, i) => ({ ...it, color: CHART_COLORS[i % CHART_COLORS.length] }))} />}
-              {(style === "detailed" || style === "both") && <MetricBarList title={c.name} items={c.items} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} />}
+              {(style === "detailed" || style === "both") && <MetricBarList title={c.name} items={c.items} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} />}
             </div>
           );
         })}
@@ -2011,7 +2115,7 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
                 {offSpacingScreenDef.map(s => (
                   <div key={"off-spacing-" + s.spacing} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
                     <DonutCard title={s.spacing} data={s.breakdown.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag on these plays." />
-                    <MetricBarList title={`${s.spacing} — efficiency by coverage`} items={s.breakdown} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} />
+                    <MetricBarList title={`${s.spacing} — efficiency by coverage`} items={s.breakdown} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} />
                   </div>
                 ))}
               </div>
@@ -2024,7 +2128,7 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
                 {defSpacingScreenDef.map(s => (
                   <div key={"def-spacing-" + s.spacing} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
                     <DonutCard title={s.spacing} data={s.breakdown.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag on these plays." />
-                    <MetricBarList title={`${s.spacing} — efficiency by coverage`} items={s.breakdown} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} />
+                    <MetricBarList title={`${s.spacing} — efficiency by coverage`} items={s.breakdown} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} />
                   </div>
                 ))}
               </div>
@@ -2043,11 +2147,25 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
         </>
       )}
 
+      {enableClipExport && secondaryPicker && (
+        <SecondaryTagPickerModal
+          name={secondaryPicker.name}
+          side={secondaryPicker.side}
+          category={secondaryPicker.category}
+          cats={cats}
+          onClose={() => setSecondaryPicker(null)}
+          onConfirm={(extraTags) => {
+            setClipModal({ name: secondaryPicker.name, side: secondaryPicker.side, extraTags });
+            setSecondaryPicker(null);
+          }}
+        />
+      )}
+
       {enableClipExport && clipModal && (
         <ClipExportModal
-          playName={clipModal.name}
+          playName={clipModal.extraTags && clipModal.extraTags.length ? `${clipModal.name} + (${clipModal.extraTags.join(" / ")})` : clipModal.name}
           sideLabel={clipModal.side === "off" ? "Offense" : "Defense"}
-          plays={(clipModal.side === "off" ? off : def).filter(p => tagIsSet(p.tags, clipModal.name))}
+          plays={(clipModal.side === "off" ? off : def).filter(p => tagIsSet(p.tags, clipModal.name) && (!clipModal.extraTags || clipModal.extraTags.length === 0 || clipModal.extraTags.some(t => tagIsSet(p.tags, t))))}
           onClose={() => setClipModal(null)}
           grouping={clipGrouping}
         />
