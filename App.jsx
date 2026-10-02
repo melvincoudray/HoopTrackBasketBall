@@ -1,5 +1,8 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
+import initSqlJs from "sql.js";
+import { FFmpeg } from "@ffmpeg/ffmpeg";
+import { fetchFile, toBlobURL } from "@ffmpeg/util";
 import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon, Calendar, Star, Bell, BellOff } from "lucide-react";
 import {
   PieChart, Pie, Cell, ComposedChart, Bar as RBar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
@@ -940,7 +943,20 @@ async function saveCategoryChartStyles(styles) {
   await storeSet("category_chart_styles", styles);
 }
 
-// unknownColumnDefault : que faire d'une colonne qui n'est reconnue ni comme tag connu, ni
+// Chargement paresseux de sql.js (une seule fois, partagé par tous les imports) — le binaire
+// wasm est chargé depuis jsdelivr (CDN public, pas de dépendance à un bundler particulier),
+// avec la version figée exactement sur celle du package npm "sql.js" pour éviter tout
+// décalage entre le wrapper JS et le binaire wasm.
+const SQLJS_CDN_VERSION = "1.14.2";
+let SQLJS_PROMISE = null;
+function getSqlJs() {
+  if (!SQLJS_PROMISE) {
+    SQLJS_PROMISE = initSqlJs({ locateFile: (f) => `https://cdn.jsdelivr.net/npm/sql.js@${SQLJS_CDN_VERSION}/dist/${f}` });
+  }
+  return SQLJS_PROMISE;
+}
+
+// unknownColumnDefault : que faire d'un tag qui n'est reconnu ni comme tag connu, ni
 // comme joueur déjà confirmé dans les paramètres.
 // - "player" (par défaut, utilisé par Import Match) : la traite comme un joueur potentiel à
 //   confirmer — utile quand le fichier vient de NOTRE équipe et qu'un joueur a pu être ajouté
@@ -950,69 +966,288 @@ async function saveCategoryChartStyles(styles) {
 //   de joueur individuel (juste des tags d'équipe comme systèmes de jeu ou types de défense) ;
 //   avec l'ancien comportement, chaque tag non reconnu (ex. "UCLA", "Corner Flare", "Follow")
 //   devenait un faux "joueur", donnant des actions du type player:"UCLA" — n'ayant aucun sens.
-function parseMatchFile(arrayBuffer, cats, unknownColumnDefault = "player") {
-  const wb = XLSX.read(arrayBuffer, { type: "array" });
-  const sheetName = wb.SheetNames.find(n => n.toLowerCase().includes("base") || n.toLowerCase().includes("data")) || wb.SheetNames[0];
-  const ws = wb.Sheets[sheetName];
-  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: 0 });
-  if (!rows.length) throw new Error("Feuille vide ou introuvable.");
-
-  // La ligne d'en-tête n'est pas forcément la 1ère ligne : certains exports du logiciel de
-  // coding mettent le nom du match en ligne 1 et les en-têtes (category, button, …) en ligne 2.
-  // On cherche donc la première ligne dont la colonne A vaut "category".
-  let headerRowIdx = rows.findIndex(r => r && String(r[0] ?? "").trim().toLowerCase() === "category");
-  if (headerRowIdx === -1) headerRowIdx = 0;
-  const headerRow = (rows[headerRowIdx] || []).map(h => (h === undefined || h === null ? "" : String(h).trim()));
-
-  // La frontière = première colonne vide après la colonne B (button), qui correspond
-  // à la première colonne rouge du fichier d'origine : au-delà, ce sont des formules
-  // ajoutées manuellement, pas les données brutes du logiciel de coding.
-  let boundary = headerRow.length;
-  for (let i = 2; i < headerRow.length; i++) {
-    if (!headerRow[i]) { boundary = i; break; }
+//
+// Remplace l'ancien import Excel (parseMatchFile) : le fichier de coding est maintenant le
+// projet ".dnk" lui-même (base SQLite du logiciel de tagging vidéo), lu directement dans le
+// navigateur via sql.js — plus besoin d'exporter un Excel intermédiaire, et ça donne accès en
+// plus au timestamp précis de chaque action (timestampStart/timestampEnd), ce qu'un export
+// Excel ne contenait jamais. Contrat de sortie IDENTIQUE à parseMatchFile pour ne rien casser
+// en aval (mêmes champs), avec seulement des ajouts additifs (timestampStart/timestampEnd par
+// action, videoPathHint pour l'affichage).
+async function parseDnkCodingFile(arrayBuffer, cats, unknownColumnDefault = "player") {
+  const SQL = await getSqlJs();
+  let db;
+  try {
+    db = new SQL.Database(new Uint8Array(arrayBuffer));
+  } catch (e) {
+    throw new Error("Unreadable .dnk file (not a valid project database).");
   }
-  const cols = headerRow.slice(0, boundary);
-  if (cols.length < 3) throw new Error("Unable to detect data columns ('category' / 'button' headers not found).");
-
-  const playerColIdx = [];
-  const tagColIdx = [];
-  const unconfirmedTagColIdx = []; // colonnes tombées dans "tag" par défaut, sans correspondre à une catégorie connue
-  const knownPlayers = knownPlayersSet(cats);
-  cols.forEach((c, i) => {
-    if (i <= 1 || !c) return;
-    const trimmed = String(c).trim();
-    if (knownPlayers.has(normTag(c))) { playerColIdx.push(i); return; } // in the "Player" list → confirmed
-    if (allKnownTagsSet(cats).has(normTag(c))) { tagColIdx.push(i); return; }
-    if (/^\d+$/.test(trimmed)) return; // en-tête purement numérique (ex. "0") = ligne d'équipe, pas un joueur
-    if (unknownColumnDefault === "tag") { tagColIdx.push(i); unconfirmedTagColIdx.push(i); return; }
-    playerColIdx.push(i); // neither a known tag nor in the "Player" list → treated as a player by default, to confirm
-  });
-  const detectedPlayers = playerColIdx.map(i => cols[i]);
-  const unconfirmedPlayers = detectedPlayers.filter(p => !knownPlayers.has(normTag(p)));
-  const unconfirmedTags = unconfirmedTagColIdx.map(i => cols[i]);
-
-  // Les données commencent juste après la ligne d'en-tête. On filtre les lignes vides.
-  const dataRows = rows.slice(headerRowIdx + 1).filter(r => Array.isArray(r) && r.some(v => v !== 0 && v !== "" && v !== undefined));
-
-  const plays = dataRows.flatMap(r => {
-    const category = r[0] ?? "";
-    const button = r[1] ?? "";
-    const tags = {};
-    for (const i of tagColIdx) {
-      const v = r[i];
-      if (v !== 0 && v !== "" && v !== undefined && v !== null) tags[cols[i]] = v;
+  try {
+    const tableNames = new Set(db.exec("SELECT name FROM sqlite_master WHERE type='table'")[0]?.values.map(r => r[0]) || []);
+    for (const required of ["category", "tag", "button", "timeline_entry", "timeline_entry_tag"]) {
+      if (!tableNames.has(required)) throw new Error(`Unrecognized .dnk file (missing "${required}" table).`);
     }
-    // Une ligne peut concerner plusieurs joueurs à la fois (ex. porteur de balle + écran
-    // sur la même possession) : on crée une action par joueur marqué "1", pour ne perdre
-    // aucune donnée — c'était la cause des actions manquantes constatées.
-    // Si AUCUN joueur n'est marqué (ex. scouting d'équipe adverse sans suivi individuel), on
-    // garde quand même l'action au niveau de l'équipe plutôt que de la perdre silencieusement.
-    const flaggedPlayers = playerColIdx.filter(i => Number(r[i]) === 1).map(i => cols[i]);
-    if (flaggedPlayers.length === 0) return [{ category: String(category), button: String(button), player: null, tags }];
-    return flaggedPlayers.map(player => ({ category: String(category), button: String(button), player, tags }));
-  });
 
-  return { sheetName, columnsDetected: cols.length, boundaryColumn: boundary, totalRows: dataRows.length, playsWithPlayer: plays.length, detectedPlayers, unconfirmedPlayers, unconfirmedTags, plays };
+    let videoPathHint = null;
+    try {
+      const cfgRes = db.exec("SELECT value FROM configuration WHERE name = 'video_path'");
+      if (cfgRes.length && cfgRes[0].values.length) videoPathHint = cfgRes[0].values[0][0];
+    } catch (e) { /* non bloquant */ }
+
+    const catRows = db.exec("SELECT id, name FROM category");
+    const playerCategoryIds = new Set((catRows[0]?.values || []).filter(([, name]) => /^players?$/i.test(String(name).trim())).map(([id]) => id));
+
+    const tagRows = db.exec("SELECT id, name, category_id FROM tag");
+    const tagInfoById = new Map((tagRows[0]?.values || []).map(([id, name, categoryId]) => [id, { name, categoryId }]));
+
+    const buttonRows = db.exec("SELECT id, name FROM button");
+    const buttonNameById = new Map((buttonRows[0]?.values || []).map(([id, name]) => [id, name]));
+
+    const tetRows = db.exec("SELECT timeline_entry_id, tag_id FROM timeline_entry_tag");
+    const tagIdsByEntry = new Map();
+    for (const [entryId, tagId] of (tetRows[0]?.values || [])) {
+      if (!tagIdsByEntry.has(entryId)) tagIdsByEntry.set(entryId, []);
+      tagIdsByEntry.get(entryId).push(tagId);
+    }
+
+    const teRows = db.exec("SELECT id, button_id, timestamp_start, timestamp_end FROM timeline_entry ORDER BY timestamp_start");
+    const entries = teRows[0]?.values || [];
+    if (!entries.length) throw new Error("This .dnk project contains no coded action yet.");
+
+    const knownPlayers = knownPlayersSet(cats);
+    const knownTags = allKnownTagsSet(cats);
+    const unconfirmedTagsSet = new Set();
+
+    const plays = entries.flatMap(([entryId, buttonId, tStart, tEnd]) => {
+      const button = buttonNameById.get(buttonId) || "";
+      const tagIds = tagIdsByEntry.get(entryId) || [];
+      const tags = {};
+      const flaggedPlayers = [];
+      for (const tagId of tagIds) {
+        const info = tagInfoById.get(tagId);
+        if (!info) continue;
+        const norm = normTag(info.name);
+        if (playerCategoryIds.has(info.categoryId) || knownPlayers.has(norm)) { flaggedPlayers.push(info.name); continue; }
+        tags[info.name] = 1;
+        if (!knownTags.has(norm) && unknownColumnDefault === "tag") unconfirmedTagsSet.add(info.name);
+      }
+      const base = { category: "Possession", button: String(button), tags, timestampStart: tStart, timestampEnd: tEnd };
+      if (flaggedPlayers.length === 0) return [{ ...base, player: null }];
+      return flaggedPlayers.map(player => ({ ...base, player }));
+    });
+
+    const detectedPlayers = [...new Set(plays.map(p => p.player).filter(Boolean))];
+    const unconfirmedPlayers = detectedPlayers.filter(p => !knownPlayers.has(normTag(p)));
+
+    return {
+      sheetName: videoPathHint ? videoPathHint.split(/[\\/]/).pop() : "DNK project",
+      columnsDetected: tagInfoById.size,
+      boundaryColumn: null,
+      totalRows: entries.length,
+      playsWithPlayer: plays.length,
+      detectedPlayers,
+      unconfirmedPlayers,
+      unconfirmedTags: [...unconfirmedTagsSet],
+      plays,
+      videoPathHint,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Découpage vidéo côté client (ffmpeg.wasm) — demandé par l'utilisateur : depuis Team > Team
+// Play, cliquer sur un Play (ex. "One Up") doit permettre d'insérer la vidéo de chaque match
+// sélectionné (une par une, jamais envoyées sur un serveur) et de récupérer un montage de tous
+// les clips tagués avec ce Play, concaténés dans l'ordre des matchs. Le découpage se fait
+// entièrement dans le navigateur : les vidéos ne quittent jamais la machine de l'utilisateur et
+// ne sont jamais stockées (pas de Supabase, pas d'upload) — seuls les timestamps (issus de
+// l'import .dnk) et le fichier vidéo local choisi sur le moment sont utilisés.
+let FFMPEG_INSTANCE = null;
+let FFMPEG_LOAD_PROMISE = null;
+function getFfmpeg() {
+  if (!FFMPEG_INSTANCE) FFMPEG_INSTANCE = new FFmpeg();
+  if (!FFMPEG_LOAD_PROMISE) {
+    // Core figé sur la version attendue par défaut par le package "@ffmpeg/ffmpeg" installé
+    // (voir sa constante CORE_VERSION), chargée depuis jsdelivr pour éviter toute dépendance
+    // à un bundler particulier — même logique que sql.js plus haut.
+    const CORE_VERSION = "0.12.9";
+    const base = `https://cdn.jsdelivr.net/npm/@ffmpeg/core@${CORE_VERSION}/dist/esm`;
+    FFMPEG_LOAD_PROMISE = (async () => {
+      const coreURL = await toBlobURL(`${base}/ffmpeg-core.js`, "text/javascript");
+      const wasmURL = await toBlobURL(`${base}/ffmpeg-core.wasm`, "application/wasm");
+      await FFMPEG_INSTANCE.load({ coreURL, wasmURL });
+    })();
+  }
+  return FFMPEG_LOAD_PROMISE.then(() => FFMPEG_INSTANCE);
+}
+
+// Fenêtre modale ouverte en cliquant sur un Play dans "Efficiency by play" (Team > Team Play) :
+// regroupe les actions correspondant à ce Play par match (parmi les matchs actuellement
+// sélectionnés en haut de page), demande une vidéo locale par match, puis découpe et concatène
+// tous les clips dans l'ordre. "plays" est déjà filtré par l'appelant (bon Play, bon côté
+// attaque/défense, matchs sélectionnés) — rien d'autre à filtrer ici.
+// Pluriel anglais basique pour le "noun" de regroupement ("Match" → "Matches", "File" →
+// "Files") — les deux seuls cas utilisés aujourd'hui, pas une tentative de couvrir tout l'anglais.
+function pluralizeNoun(noun, count) {
+  if (count === 1) return noun;
+  return /[sxz]$|[cs]h$/i.test(noun) ? noun + "es" : noun + "s";
+}
+
+// "grouping" (optionnel) : comment regrouper "plays" en lots nécessitant chacun une vidéo
+// locale — par défaut, un match (matchId / date vs adversaire), comme pour Team Play et la
+// fiche joueur. Demandé par l'utilisateur pour le Scouting : les fichiers importés dans
+// Observation n'ont pas de matchId/date/adversaire (une équipe observée peut combiner plusieurs
+// fichiers sans qu'on connaisse la date de chacun) — on regroupe alors par "importId" (un
+// fichier = un lot), avec le nom de fichier comme libellé.
+function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
+  const keyOf = grouping?.keyOf || (p => p.matchId);
+  const labelOf = grouping?.labelOf || (p => `${p.date} vs ${p.opponent}`);
+  const sortKeyOf = grouping?.sortKeyOf || (p => p.date || "");
+  const noun = grouping?.noun || "Match";
+  const missingTimestampHint = grouping?.missingTimestampHint || "re-import {article} .dnk file (Import Match → Edit → Replace coding file) to include {pronoun}.";
+  const scopeNote = grouping?.scopeNote || "currently selected matches only.";
+
+  const groups = useMemo(() => {
+    const byKey = new Map();
+    for (const p of plays) {
+      const key = keyOf(p);
+      if (!byKey.has(key)) byKey.set(key, { key, label: labelOf(p), sortKey: sortKeyOf(p), clips: [] });
+      if (p.timestampStart !== undefined && p.timestampStart !== null && p.timestampEnd !== undefined && p.timestampEnd !== null) {
+        byKey.get(key).clips.push({ start: p.timestampStart, end: p.timestampEnd });
+      }
+    }
+    return Array.from(byKey.values()).sort((a, b) => String(a.sortKey).localeCompare(String(b.sortKey)));
+  }, [plays]);
+
+  const readyGroups = groups.filter(g => g.clips.length > 0);
+  // Lots qui ont bien ce tag codé mais sans timestamp (fichier importé en Excel, ou pas
+  // encore remplacé par un .dnk — voir le libellé "missingTimestampHint" ci-dessus).
+  const missingTimestampGroups = groups.filter(g => g.clips.length === 0);
+  const totalClips = readyGroups.reduce((s, g) => s + g.clips.length, 0);
+
+  const [files, setFiles] = useState({}); // key -> File
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [error, setError] = useState("");
+  const [resultUrl, setResultUrl] = useState(null);
+  const resultUrlRef = useRef(null);
+
+  useEffect(() => () => { if (resultUrlRef.current) URL.revokeObjectURL(resultUrlRef.current); }, []);
+
+  const allReadyHaveFiles = readyGroups.length > 0 && readyGroups.every(g => files[g.key]);
+
+  async function generate() {
+    setBusy(true); setError(""); setResultUrl(null);
+    try {
+      const ffmpeg = await getFfmpeg();
+      const concatLines = [];
+      let clipIdx = 0;
+      for (let gi = 0; gi < readyGroups.length; gi++) {
+        const g = readyGroups[gi];
+        const file = files[g.key];
+        setProgress(`Reading video ${gi + 1}/${readyGroups.length} (${noun} ${gi + 1})…`);
+        await ffmpeg.writeFile("input.mp4", await fetchFile(file));
+        for (let ci = 0; ci < g.clips.length; ci++) {
+          const { start, end } = g.clips[ci];
+          const dur = Math.max(0.1, end - start);
+          const outName = `clip_${clipIdx}.mp4`;
+          setProgress(`Cutting clip ${clipIdx + 1}/${totalClips} (${noun} ${gi + 1})…`);
+          await ffmpeg.exec(["-ss", String(start), "-i", "input.mp4", "-t", String(dur), "-c:v", "libx264", "-preset", "fast", "-crf", "20", "-c:a", "aac", "-avoid_negative_ts", "make_zero", outName]);
+          concatLines.push(`file '${outName}'`);
+          clipIdx++;
+        }
+        await ffmpeg.deleteFile("input.mp4");
+      }
+      setProgress("Assembling the montage…");
+      await ffmpeg.writeFile("concat.txt", concatLines.join("\n"));
+      await ffmpeg.exec(["-f", "concat", "-safe", "0", "-i", "concat.txt", "-c", "copy", "output.mp4"]);
+      const data = await ffmpeg.readFile("output.mp4");
+      const blob = new Blob([data.buffer], { type: "video/mp4" });
+      const url = URL.createObjectURL(blob);
+      resultUrlRef.current = url;
+      setResultUrl(url);
+      setProgress("");
+      // Nettoyage mémoire wasm entre deux exports — pas critique mais évite d'accumuler les
+      // fichiers intermédiaires si le coach génère plusieurs montages dans la même session.
+      for (let i = 0; i < clipIdx; i++) { try { await ffmpeg.deleteFile(`clip_${i}.mp4`); } catch (e) {} }
+      try { await ffmpeg.deleteFile("concat.txt"); } catch (e) {}
+      try { await ffmpeg.deleteFile("output.mp4"); } catch (e) {}
+    } catch (err) {
+      setError(err.message || "Error while generating the montage.");
+      setProgress("");
+    }
+    setBusy(false);
+  }
+
+  const missingPlural = missingTimestampGroups.length !== 1;
+  const missingMessage = missingTimestampHint
+    .replace("{article}", missingPlural ? "their" : "its")
+    .replace("{pronoun}", missingPlural ? "them" : "it");
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }}>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 14, padding: 24, maxWidth: 560, width: "100%", maxHeight: "86vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+          <div>
+            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: AMBER, marginBottom: 4 }}>Video clips</div>
+            <h3 style={{ margin: 0, fontSize: 18, color: PAPER }}>{playName} — {sideLabel}</h3>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer" }}><X size={18} /></button>
+        </div>
+        <p style={{ fontSize: 12.5, color: "#8B93A1", lineHeight: 1.6, margin: "8px 0 16px" }}>
+          {totalClips} clip{totalClips !== 1 ? "s" : ""} found across {readyGroups.length} {pluralizeNoun(noun, readyGroups.length).toLowerCase()} ({scopeNote})
+          Insert each video below — nothing is uploaded, everything is cut directly in your browser, purely for viewing.
+        </p>
+
+        {missingTimestampGroups.length > 0 && (
+          <div style={{ display: "flex", gap: 8, alignItems: "flex-start", padding: 10, background: PANEL2, border: `1px solid ${AMBER}`, borderRadius: 8, marginBottom: 14 }}>
+            <AlertTriangle size={14} color={AMBER} style={{ marginTop: 2, flexShrink: 0 }} />
+            <div style={{ fontSize: 12, color: "#D8DCE2", lineHeight: 1.5 }}>
+              {missingTimestampGroups.length} {pluralizeNoun(noun, missingTimestampGroups.length).toLowerCase()} ({missingTimestampGroups.map(g => g.label).join(", ")}) {missingPlural ? "have" : "has"} no timestamps yet — {missingMessage}
+            </div>
+          </div>
+        )}
+
+        {readyGroups.length === 0 ? (
+          <EmptyState text={`No ${noun.toLowerCase()} with timestamps for this tag — import or replace a coding file with a .dnk project first.`} />
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 18 }}>
+            {readyGroups.map((g, i) => (
+              <div key={g.key} style={{ display: "flex", flexDirection: "column", gap: 6, padding: 12, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10 }}>
+                <div style={{ fontSize: 13, color: PAPER, fontWeight: 600 }}>
+                  {noun} {i + 1} — {g.label} <span style={{ color: "#5C6470", fontWeight: 400 }}>· {g.clips.length} clip{g.clips.length !== 1 ? "s" : ""}</span>
+                </div>
+                <input type="file" accept="video/*" disabled={busy} onChange={e => {
+                  const f = e.target.files[0];
+                  setFiles(prev => ({ ...prev, [g.key]: f }));
+                }} style={{ color: "#8B93A1", fontSize: 12.5 }} />
+                {files[g.key] && <span style={{ fontSize: 11.5, color: TEAL }}>✓ {files[g.key].name}</span>}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {error && <div style={{ color: RED, fontSize: 12.5, marginBottom: 12 }}>{error}</div>}
+        {progress && <div style={{ color: TEAL, fontSize: 12.5, marginBottom: 12 }}>{progress}</div>}
+
+        {resultUrl ? (
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <video controls autoPlay src={resultUrl} style={{ width: "100%", borderRadius: 10, background: "#000" }} />
+            <div style={{ fontSize: 11.5, color: "#5C6470", lineHeight: 1.5 }}>
+              Viewing mode only — this clip lives in your browser and is never uploaded or stored on the site. Use "Save" below only if you want to keep a copy on your device.
+            </div>
+            <a href={resultUrl} download={`${playName.replace(/\s+/g, "_")}_${sideLabel}.mp4`} style={{ ...btnPrimary, textAlign: "center", textDecoration: "none", display: "block", boxSizing: "border-box" }}>Save the clip to my device</a>
+          </div>
+        ) : (
+          <button disabled={!allReadyHaveFiles || busy} onClick={generate} style={{ ...btnPrimary, width: "100%", opacity: (!allReadyHaveFiles || busy) ? 0.5 : 1, cursor: (!allReadyHaveFiles || busy) ? "default" : "pointer" }}>
+            {busy ? (progress || "Processing…") : `View the clips (${totalClips} clip${totalClips !== 1 ? "s" : ""})`}
+          </button>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function playPoints(tags) {
@@ -1545,7 +1780,12 @@ function BreakdownChart({ title, data }) {
   );
 }
 
-function MetricBarList({ title, items, color = AMBER }) {
+// onItemClick (optionnel) : demandé par l'utilisateur pour "Efficiency by play" dans Team >
+// Team Play uniquement (voir OffenseDefenseBreakdown/TeamTab) — rend chaque ligne cliquable
+// pour ouvrir l'export de clips vidéo de ce Play. N'a aucun effet ailleurs (Playtypes, Screen
+// defense, Spacing, catégories personnalisées, Scouting, fiche joueur…) tant que l'appelant ne
+// le fournit pas : comportement et apparence inchangés partout ailleurs.
+function MetricBarList({ title, items, color = AMBER, onItemClick }) {
   if (!items.length) return null;
   return (
     <div data-no-split="true" style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, flex: "1 1 320px" }}>
@@ -1554,8 +1794,11 @@ function MetricBarList({ title, items, color = AMBER }) {
         <div>Name</div><div>Frequency</div><div>PPPP</div><div>Open</div>
       </div>
       {items.map((it, i) => (
-        <div key={i} style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 0.55fr 0.55fr", padding: "9px 0", alignItems: "center", borderBottom: i < items.length - 1 ? `1px solid ${LINE}` : "none", fontSize: 13 }}>
-          <div style={{ color: it.name === "Autres" ? "#8B93A1" : PAPER }}>{it.name}</div>
+        <div key={i} onClick={onItemClick ? () => onItemClick(it.name) : undefined} title={onItemClick ? "View video clips for this play" : undefined} style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 0.55fr 0.55fr", padding: "9px 0", alignItems: "center", borderBottom: i < items.length - 1 ? `1px solid ${LINE}` : "none", fontSize: 13, cursor: onItemClick ? "pointer" : "default" }}>
+          <div style={{ color: it.name === "Autres" ? "#8B93A1" : PAPER, display: "flex", alignItems: "center", gap: 6 }}>
+            {it.name}
+            {onItemClick && <Video size={12} color="#5C6470" />}
+          </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
             <div style={{ width: 60 }}><Bar pct={it.freq} /></div>
             <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, color: "#8B93A1" }}>{it.freq.toFixed(0)}%</span>
@@ -1617,8 +1860,20 @@ function tagBreakdown(source) {
 
 // Bloc complet Attaque / Defense (Plays, Playtypes, Shooting Selection, Erreurs
 // défensives) — utilisé pour un joueur comme pour l'équipe entière.
-function OffenseDefenseBreakdown({ off, def, detailTables = true, categories }) {
+// enableClipExport (optionnel, demandé par l'utilisateur) : rend cliquable chaque ligne de
+// chacune des listes "Efficiency by…" de cet écran (Plays, Playtypes, Screen defense, Spacing,
+// catégories personnalisées) pour ouvrir l'export de clips vidéo de ce tag précis — et, sur la
+// fiche joueur comme sur une équipe observée en Scouting, des actions DÉJÀ filtrées sur ce
+// joueur/cette équipe (off/def ne contiennent que ses propres actions), donc le clip trouvé
+// correspond bien à "ce tag ET ce joueur/cette équipe". clipGrouping (optionnel) personnalise la
+// façon de regrouper les actions par lot nécessitant une vidéo (par défaut : par match — voir
+// ClipExportModal) ; Scouting l'utilise pour regrouper par fichier importé à la place, faute de
+// date/adversaire sur ces imports. N'a d'effet que là où l'appelant le passe explicitement —
+// aujourd'hui Team > Team Play, la fiche joueur et Scouting > Observation (voir TeamTab /
+// PlayerDetail / ObservationTab / ScoutingStaffPanel).
+function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, enableClipExport = false, clipGrouping }) {
   const cats = categories || currentTagCategories();
+  const [clipModal, setClipModal] = useState(null); // { name, side: "off"|"def" } | null
   // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "Defensive mistakes" affichait 0 après une
   // modification dans Settings) : aucun de ces useMemo n'avait "cats" dans son tableau de
   // dépendances — React gardait donc en cache le résultat calculé au tout premier rendu, même
@@ -1680,19 +1935,19 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories }) 
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 26 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
           <DonutCard title="Plays (game entries)" data={offPlaysDonut.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} />
-          <MetricBarList title="Efficiency by play" items={offPlaysList} color={AMBER} />
+          <MetricBarList title="Efficiency by play" items={offPlaysList} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
           <DonutCard title="Shooting Selection" data={offShooting} note="Open/Contested tags not present yet." />
-          <MetricBarList title="Efficiency by playtype" items={offPlaytypesList} color={AMBER} />
+          <MetricBarList title="Efficiency by playtype" items={offPlaytypesList} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
           <DonutCard title="Screen defense faced (opponent coverage)" data={offScreenDef.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag detected." />
-          <MetricBarList title="Efficiency by coverage faced" items={offScreenDef} color={AMBER} />
+          <MetricBarList title="Efficiency by coverage faced" items={offScreenDef} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
           <DonutCard title="Spacing played on screens" data={offSpacing.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No spacing tag detected." />
-          <MetricBarList title="Efficiency by spacing" items={offSpacing} color={AMBER} />
+          <MetricBarList title="Efficiency by spacing" items={offSpacing} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} />
         </div>
         {/* Catégories personnalisées (créées dans Settings, au-delà des 4 intégrées ci-dessus)
             — intégrées directement ici, dans la même grille, sans section "Custom"/"Other"
@@ -1702,7 +1957,7 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories }) 
           return (
             <div key={"off-" + c.name} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
               {(style === "simple" || style === "both") && <DonutCard title={c.name} data={c.items.map((it, i) => ({ ...it, color: CHART_COLORS[i % CHART_COLORS.length] }))} />}
-              {(style === "detailed" || style === "both") && <MetricBarList title={c.name} items={c.items} color={AMBER} />}
+              {(style === "detailed" || style === "both") && <MetricBarList title={c.name} items={c.items} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} />}
             </div>
           );
         })}
@@ -1712,26 +1967,26 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories }) 
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 26 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
           <DonutCard title="Shooting Selection (defense)" data={defShooting} note="Open/Contested tags not present yet." />
-          <MetricBarList title="Playtypes defended — efficiency" items={defPlaytypesList} color={TEAL} />
+          <MetricBarList title="Playtypes defended — efficiency" items={defPlaytypesList} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
           <DonutCard title="Defensive mistakes" data={defMistakes} note="No defensive mistake tag detected." />
-          <MetricBarList title="Plays defended — efficiency" items={defPlaysList} color={TEAL} />
+          <MetricBarList title="Plays defended — efficiency" items={defPlaysList} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
           <DonutCard title="Screen defense played" data={defScreenDef.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag detected." />
-          <MetricBarList title="Efficiency by coverage used" items={defScreenDef} color={TEAL} />
+          <MetricBarList title="Efficiency by coverage used" items={defScreenDef} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
           <DonutCard title="Spacing faced on screens" data={defSpacing.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No spacing tag detected." />
-          <MetricBarList title="Efficiency by spacing faced" items={defSpacing} color={TEAL} />
+          <MetricBarList title="Efficiency by spacing faced" items={defSpacing} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} />
         </div>
         {customDef.filter(c => c.items.length).map(c => {
           const style = chartStyleFor(c.name);
           return (
             <div key={"def-" + c.name} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
               {(style === "simple" || style === "both") && <DonutCard title={c.name} data={c.items.map((it, i) => ({ ...it, color: CHART_COLORS[i % CHART_COLORS.length] }))} />}
-              {(style === "detailed" || style === "both") && <MetricBarList title={c.name} items={c.items} color={TEAL} />}
+              {(style === "detailed" || style === "both") && <MetricBarList title={c.name} items={c.items} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} />}
             </div>
           );
         })}
@@ -1756,7 +2011,7 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories }) 
                 {offSpacingScreenDef.map(s => (
                   <div key={"off-spacing-" + s.spacing} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
                     <DonutCard title={s.spacing} data={s.breakdown.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag on these plays." />
-                    <MetricBarList title={`${s.spacing} — efficiency by coverage`} items={s.breakdown} color={AMBER} />
+                    <MetricBarList title={`${s.spacing} — efficiency by coverage`} items={s.breakdown} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} />
                   </div>
                 ))}
               </div>
@@ -1769,7 +2024,7 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories }) 
                 {defSpacingScreenDef.map(s => (
                   <div key={"def-spacing-" + s.spacing} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
                     <DonutCard title={s.spacing} data={s.breakdown.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag on these plays." />
-                    <MetricBarList title={`${s.spacing} — efficiency by coverage`} items={s.breakdown} color={TEAL} />
+                    <MetricBarList title={`${s.spacing} — efficiency by coverage`} items={s.breakdown} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} />
                   </div>
                 ))}
               </div>
@@ -1786,6 +2041,16 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories }) 
           <SectionTitle eyebrow="Full detail" title="All tags — defense" />
           <TagTable stats={defTagStats} />
         </>
+      )}
+
+      {enableClipExport && clipModal && (
+        <ClipExportModal
+          playName={clipModal.name}
+          sideLabel={clipModal.side === "off" ? "Offense" : "Defense"}
+          plays={(clipModal.side === "off" ? off : def).filter(p => tagIsSet(p.tags, clipModal.name))}
+          onClose={() => setClipModal(null)}
+          grouping={clipGrouping}
+        />
       )}
     </>
   );
@@ -3260,6 +3525,35 @@ export default function App() {
               const newIdx = matchesIndex.map(m => m.id === id ? { ...m, ...changes } : m).sort((a, b) => a.date.localeCompare(b.date));
               await storeSet("match_index", newIdx);
               setMatchesIndex(newIdx);
+            }}
+            onReplaceFile={async (id, parsed) => {
+              // Remplace les actions codées (plays) et le fichier original d'un match déjà
+              // importé — demandé par l'utilisateur pour pouvoir réimporter un .dnk (avec
+              // timestamps) sur des matchs importés auparavant en Excel, sans perdre la date,
+              // l'adversaire ou le type de match déjà renseignés.
+              const record = matches[id] || (await storeGet("match:" + id));
+              if (!record) return;
+              const updatedRecord = { ...record, plays: parsed.plays };
+              await storeSet("match:" + id, updatedRecord);
+              setMatches(m => ({ ...m, [id]: updatedRecord }));
+              if (parsed.fileDataUrl) await storeSet("match_file:" + id, { name: parsed.fileName || "match.dnk", dataUrl: parsed.fileDataUrl });
+              const newIdx = matchesIndex.map(m => m.id === id ? { ...m, playsCount: parsed.plays.length } : m);
+              await storeSet("match_index", newIdx);
+              setMatchesIndex(newIdx);
+              // Même synchronisation du roster qu'à l'import initial (voir onImported
+              // ci-dessus), au cas où le nouveau fichier détecte un joueur absent du roster.
+              const known = new Set(roster.map(p => p.first.toLowerCase()));
+              const newPlayers = (parsed.detectedPlayers || []).filter(n => !known.has(String(n).trim().toLowerCase()));
+              if (newPlayers.length) {
+                const additions = newPlayers.map(n => ({ id: uid(), name: n.trim(), first: n.trim(), position: positionOf(n.trim()) }));
+                const newRoster = [...roster, ...additions];
+                await storeSet("roster", newRoster);
+                setRoster(newRoster);
+                const cats = currentTagCategories();
+                const playerList = new Set((cats["Player"] || []).map(t => t.toLowerCase()));
+                const toAdd = newPlayers.filter(n => !playerList.has(String(n).trim().toLowerCase()));
+                if (toAdd.length) await saveTagCategories({ ...cats, "Player": [...(cats["Player"] || []), ...toAdd.map(n => n.trim())] });
+              }
             }}
           />
         )}
@@ -5410,7 +5704,7 @@ function ReboundContestImportPanel({ roster }) {
   );
 }
 
-function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatch }) {
+function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatch, onReplaceFile }) {
   const [preview, setPreview] = useState(null);
   const [fileErr, setFileErr] = useState("");
   const [date, setDate] = useState(todayLocal());
@@ -5423,14 +5717,45 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatc
   const [editDate, setEditDate] = useState("");
   const [editOpponent, setEditOpponent] = useState("");
   const [editMatchType, setEditMatchType] = useState("");
+  const [replaceBusy, setReplaceBusy] = useState(false);
+  const [replaceErr, setReplaceErr] = useState("");
   const fileRef = useRef();
 
   function startEdit(m) {
     setEditingId(m.id); setEditDate(m.date); setEditOpponent(m.opponent); setEditMatchType(m.matchType || "");
+    setReplaceErr("");
   }
   async function confirmEdit() {
     await onEditMatch(editingId, { date: editDate, opponent: editOpponent.trim(), matchType: editMatchType });
     setEditingId(null);
+  }
+
+  // Demandé par l'utilisateur : permettre de remplacer le fichier de coding d'un match déjà
+  // importé (ex. passer d'un ancien Excel à un .dnk, pour récupérer les timestamps) sans avoir
+  // à supprimer et réimporter tout le match — ce qui perdrait l'historique et les éventuelles
+  // corrections de date/adversaire déjà faites. Ne touche qu'aux actions codées (plays) et au
+  // fichier original conservé ; date/adversaire/type de match restent gérés par "Save" ci-dessus.
+  async function handleReplaceFile(e, matchId) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setReplaceErr(""); setReplaceBusy(true);
+    try {
+      await syncPlayerCategoryFromRoster(roster);
+      const buf = await file.arrayBuffer();
+      const parsed = await parseDnkCodingFile(buf);
+      if (!parsed.plays.length) throw new Error("No action attributed to a roster player was found.");
+      const fileDataUrl = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(reader.result);
+        reader.onerror = reject;
+        reader.readAsDataURL(file);
+      });
+      await onReplaceFile(matchId, { ...parsed, fileName: file.name, fileDataUrl });
+    } catch (err) {
+      setReplaceErr(err.message || "Error reading the file.");
+    }
+    setReplaceBusy(false);
+    e.target.value = "";
   }
 
   async function handleDelete(m) {
@@ -5446,10 +5771,10 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatc
     try {
       await syncPlayerCategoryFromRoster(roster);
       const buf = await file.arrayBuffer();
-      const parsed = parseMatchFile(buf);
+      const parsed = await parseDnkCodingFile(buf);
       if (!parsed.plays.length) throw new Error("No action attributed to a roster player was found.");
       // Garde une copie du fichier original en base64, pour pouvoir le rouvrir plus tard —
-      // taille raisonnable pour un fichier de coding (quelques dizaines de Ko en général).
+      // taille raisonnable pour un projet .dnk (quelques centaines de Ko en général).
       const fileDataUrl = await new Promise((resolve, reject) => {
         const reader = new FileReader();
         reader.onload = () => resolve(reader.result);
@@ -5488,9 +5813,8 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatc
       <SectionTitle eyebrow="01 — Raw data" title="Import a match" />
       <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 22, marginBottom: 24 }}>
         <p style={{ color: "#8B93A1", fontSize: 13.5, lineHeight: 1.6, margin: "0 0 16px" }}>
-          Drop the Excel file exported by the coding software (<b>Database</b> sheet).
-          The useful part is detected automatically: everything before the first empty column
-          after the "button" column.
+          Drop the coding project file (<b>.dnk</b>) exported by the tagging software.
+          Players, tags and timestamps are read directly from the project.
         </p>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
           <div>
@@ -5506,13 +5830,13 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatc
             <MatchTypeSelect value={matchType} onChange={setMatchType} />
           </div>
         </div>
-        <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
+        <input ref={fileRef} type="file" accept=".dnk" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
         {fileErr && <div style={{ color: RED, fontSize: 13, marginTop: 10 }}>{fileErr}</div>}
 
         {preview && (
           <div style={{ marginTop: 18, padding: 16, background: PANEL2, borderRadius: 10, border: `1px solid ${LINE}` }}>
             <div style={{ fontSize: 13, color: PAPER, marginBottom: 10 }}>
-              Sheet read: <b>{preview.sheetName}</b> · {preview.columnsDetected} columns detected before separator ·
+              Project read: <b>{preview.sheetName}</b> · {preview.columnsDetected} tags detected ·
               {" "}<b>{preview.playsWithPlayer}</b> actions attributed to a player / {preview.totalRows} total rows
             </div>
             <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 12 }}>
@@ -5553,6 +5877,17 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatc
                   <div style={{ display: "flex", gap: 8 }}>
                     <button onClick={confirmEdit} style={{ padding: "6px 14px", background: AMBER, border: "none", borderRadius: 6, color: "#1a1200", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>Save</button>
                     <button onClick={() => setEditingId(null)} style={{ padding: "6px 14px", background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>Cancel</button>
+                  </div>
+                  <div style={{ borderTop: `1px solid ${LINE}`, paddingTop: 10, marginTop: 2 }}>
+                    <label style={labelStyle}>Replace coding file (.dnk)</label>
+                    <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                      <input type="file" accept=".dnk" onChange={e => handleReplaceFile(e, m.id)} style={{ color: "#8B93A1", fontSize: 13 }} />
+                      {replaceBusy && <span style={{ fontSize: 11.5, color: TEAL }}>Importing…</span>}
+                    </div>
+                    <div style={{ fontSize: 11.5, color: "#5C6470", marginTop: 6 }}>
+                      Replaces this match's coded actions with the ones from the new file — the date, opponent and match type above are unaffected.
+                    </div>
+                    {replaceErr && <div style={{ color: RED, fontSize: 12, marginTop: 6 }}>{replaceErr}</div>}
                   </div>
                 </div>
               ) : (
@@ -6329,7 +6664,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
               </>
             )}
 
-            <OffenseDefenseBreakdown off={off} def={def} />
+            <OffenseDefenseBreakdown off={off} def={def} enableClipExport={isCoach} />
           </>
         )}
 
@@ -9293,6 +9628,9 @@ function ScoutingStaffPanel({ teamName, isCoach }) {
 
   const off = (observation?.plays || []).filter(isOffense);
   const def = (observation?.plays || []).filter(isDefense);
+  // Même regroupement par fichier importé que dans ObservationTab (voir son commentaire) —
+  // ces actions n'ont pas de matchId/date/adversaire.
+  const observationImportInfoById = new Map((observation?.imports || []).map(imp => [imp.id, imp]));
 
   return (
     <div>
@@ -9334,7 +9672,18 @@ function ScoutingStaffPanel({ teamName, isCoach }) {
       {!observation || (off.length === 0 && def.length === 0) ? (
         <EmptyState text="This team hasn't been observed yet (Observation tab) — its stats and charts will appear here automatically once it has." />
       ) : (
-        <OffenseDefenseBreakdown off={off} def={def} categories={currentObservationTagCategories()} />
+        <OffenseDefenseBreakdown
+          off={off} def={def} categories={currentObservationTagCategories()}
+          enableClipExport={isCoach}
+          clipGrouping={{
+            keyOf: p => p.importId,
+            labelOf: p => observationImportInfoById.get(p.importId)?.fileName || "Imported file",
+            sortKeyOf: p => observationImportInfoById.get(p.importId)?.importedAt || "",
+            noun: "File",
+            missingTimestampHint: "replace {article} import with a .dnk project (Scouting → Observation, remove the old file then re-import the .dnk) to include {pronoun}.",
+            scopeNote: "this observed team's imported files.",
+          }}
+        />
       )}
     </div>
   );
@@ -9824,7 +10173,7 @@ function ObservationTab({ isCoach }) {
     setFileErr(""); setPreview(null);
     try {
       const buf = await file.arrayBuffer();
-      const parsed = parseMatchFile(buf, currentObservationTagCategories(), "tag");
+      const parsed = await parseDnkCodingFile(buf, currentObservationTagCategories(), "tag");
       if (!parsed.plays.length) throw new Error("No action attributed to a player was found.");
       setPreview({ ...parsed, fileName: file.name });
     } catch (err) { setFileErr(err.message || "Error reading the file."); }
@@ -9845,7 +10194,7 @@ function ObservationTab({ isCoach }) {
       ...observed,
       [name]: {
         plays: [...(existing.plays || []), ...taggedPlays],
-        imports: [...(existing.imports || []), { id: importId, fileName: preview.fileName || "file.xlsx", importedAt: new Date().toISOString(), playsCount: taggedPlays.length }],
+        imports: [...(existing.imports || []), { id: importId, fileName: preview.fileName || "file.dnk", importedAt: new Date().toISOString(), playsCount: taggedPlays.length }],
         importedAt: new Date().toISOString(), // dernier import, pour l'affichage rétrocompatible
       },
     };
@@ -9887,6 +10236,10 @@ function ObservationTab({ isCoach }) {
   const current = selected ? observed[selected] : null;
   const off = current ? current.plays.filter(isOffense) : [];
   const def = current ? current.plays.filter(isDefense) : [];
+  // Les actions observées n'ont pas de matchId/date/adversaire (une équipe peut combiner
+  // plusieurs fichiers sans qu'on connaisse la date de chacun) — le regroupement pour l'export
+  // de clips (voir ClipExportModal) se fait donc par fichier importé (importId), avec son nom.
+  const observationImportInfoById = new Map((current?.imports || []).map(imp => [imp.id, imp]));
 
   return (
     <div>
@@ -9895,7 +10248,7 @@ function ObservationTab({ isCoach }) {
       {isCoach && (
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 22, marginBottom: 24 }}>
           <p style={{ color: "#8B93A1", fontSize: 13.5, lineHeight: 1.6, margin: "0 0 16px" }}>
-            Import a coding file (same format as Import Match) for an opponent team you've scouted. The app breaks
+            Import a coding project (<b>.dnk</b>, same format as Import Match) for an opponent team you've scouted. The app breaks
             down their tendencies by frequency and efficiency — plays, playtypes, screen defense, defense type, and
             any other category configured in <b>Settings</b>.
           </p>
@@ -9911,13 +10264,13 @@ function ObservationTab({ isCoach }) {
               </div>
             )}
           </div>
-          <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
+          <input ref={fileRef} type="file" accept=".dnk" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
           {fileErr && <div style={{ color: RED, fontSize: 13, marginTop: 10 }}>{fileErr}</div>}
 
           {preview && (
             <div style={{ marginTop: 18, padding: 16, background: PANEL2, borderRadius: 10, border: `1px solid ${LINE}` }}>
               <div style={{ fontSize: 13, color: PAPER, marginBottom: 10 }}>
-                Sheet read: <b>{preview.sheetName}</b> · {preview.columnsDetected} columns detected ·
+                Project read: <b>{preview.sheetName}</b> · {preview.columnsDetected} tags detected ·
                 {" "}<b>{preview.playsWithPlayer}</b> actions recognized / {preview.totalRows} total rows
               </div>
               {preview.unconfirmedTags && preview.unconfirmedTags.length > 0 && (
@@ -9981,7 +10334,18 @@ function ObservationTab({ isCoach }) {
               ))}
             </div>
           )}
-          <OffenseDefenseBreakdown off={off} def={def} categories={currentObservationTagCategories()} />
+          <OffenseDefenseBreakdown
+            off={off} def={def} categories={currentObservationTagCategories()}
+            enableClipExport={isCoach}
+            clipGrouping={{
+              keyOf: p => p.importId,
+              labelOf: p => observationImportInfoById.get(p.importId)?.fileName || "Imported file",
+              sortKeyOf: p => observationImportInfoById.get(p.importId)?.importedAt || "",
+              noun: "File",
+              missingTimestampHint: "replace {article} import with a .dnk project (remove it above, then re-import the .dnk) to include {pronoun}.",
+              scopeNote: "this observed team's imported files.",
+            }}
+          />
         </div>
       )}
 
@@ -12290,7 +12654,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
         )
       )}
 
-      {subtab === "collectif" && (isCoach || v.teamPlay) && <OffenseDefenseBreakdown off={teamOff} def={teamDef} detailTables={false} />}
+      {subtab === "collectif" && (isCoach || v.teamPlay) && <OffenseDefenseBreakdown off={teamOff} def={teamDef} detailTables={false} enableClipExport={isCoach} />}
 
       {subtab === "avance" && (isCoach || v.advanced) && (
         <>
