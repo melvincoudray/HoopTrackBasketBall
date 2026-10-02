@@ -5837,11 +5837,18 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatc
   const [editMatchType, setEditMatchType] = useState("");
   const [replaceBusy, setReplaceBusy] = useState(false);
   const [replaceErr, setReplaceErr] = useState("");
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "ça finit par disparaître mais rien ne semble
+  // changé") : "Importing…" disparaissait bien une fois le remplacement terminé avec succès,
+  // mais rien ne le confirmait ensuite — le nombre d'actions mis à jour n'est visible que dans
+  // la ligne repliée (hors mode édition), donc tant que le coach reste en train d'éditer ce
+  // match, l'écran semblait inchangé bien que le remplacement ait réellement eu lieu. On ajoute
+  // une confirmation explicite, avec le nouveau nombre d'actions.
+  const [replaceSuccessCount, setReplaceSuccessCount] = useState(null);
   const fileRef = useRef();
 
   function startEdit(m) {
     setEditingId(m.id); setEditDate(m.date); setEditOpponent(m.opponent); setEditMatchType(m.matchType || "");
-    setReplaceErr("");
+    setReplaceErr(""); setReplaceSuccessCount(null);
   }
   async function confirmEdit() {
     await onEditMatch(editingId, { date: editDate, opponent: editOpponent.trim(), matchType: editMatchType });
@@ -5856,7 +5863,7 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatc
   async function handleReplaceFile(e, matchId) {
     const file = e.target.files[0];
     if (!file) return;
-    setReplaceErr(""); setReplaceBusy(true);
+    setReplaceErr(""); setReplaceSuccessCount(null); setReplaceBusy(true);
     try {
       await syncPlayerCategoryFromRoster(roster);
       const buf = await file.arrayBuffer();
@@ -5869,6 +5876,7 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatc
         reader.readAsDataURL(file);
       });
       await onReplaceFile(matchId, { ...parsed, fileName: file.name, fileDataUrl });
+      setReplaceSuccessCount(parsed.plays.length);
     } catch (err) {
       setReplaceErr(err.message || "Error reading the file.");
     }
@@ -6001,6 +6009,7 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatc
                     <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
                       <input type="file" accept=".dnk" onChange={e => handleReplaceFile(e, m.id)} style={{ color: "#8B93A1", fontSize: 13 }} />
                       {replaceBusy && <span style={{ fontSize: 11.5, color: TEAL }}>Importing…</span>}
+                      {replaceSuccessCount !== null && <span style={{ fontSize: 11.5, color: TEAL }}>✓ Replaced — {replaceSuccessCount} actions now coded.</span>}
                     </div>
                     <div style={{ fontSize: 11.5, color: "#5C6470", marginTop: 6 }}>
                       Replaces this match's coded actions with the ones from the new file — the date, opponent and match type above are unaffected.
