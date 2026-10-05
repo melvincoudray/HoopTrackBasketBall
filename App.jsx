@@ -2,7 +2,7 @@ import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as XLSX from "xlsx";
 import initSqlJs from "sql.js";
 import { FFmpeg } from "@ffmpeg/ffmpeg";
-import { fetchFile, toBlobURL } from "@ffmpeg/util";
+import { toBlobURL } from "@ffmpeg/util";
 import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon, Calendar, Star, Bell, BellOff } from "lucide-react";
 import {
   PieChart, Pie, Cell, ComposedChart, Bar as RBar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
@@ -1066,8 +1066,22 @@ async function parseDnkCodingFile(arrayBuffer, cats, unknownColumnDefault = "pla
 // l'import .dnk) et le fichier vidéo local choisi sur le moment sont utilisés.
 let FFMPEG_INSTANCE = null;
 let FFMPEG_LOAD_PROMISE = null;
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur : une génération de clips qui reste bloquée pendant
+// plusieurs minutes, et la relancer ne change rien) : il n'existe qu'UN seul moteur ffmpeg pour
+// tout le site, et il ne traite qu'une commande à la fois. Si une génération se bloque (fichier
+// énorme, lecture disque lente…), fermer la fenêtre puis relancer ne servait à rien : la nouvelle
+// demande se mettait en file derrière l'ancienne, toujours en cours (reproduit en navigateur de
+// test : la relance reste en attente tant que la première commande n'est pas terminée, alors
+// qu'un moteur neuf repart en moins de 2 secondes). resetFfmpeg() arrête net le moteur courant ;
+// le prochain getFfmpeg() en recharge un neuf (le coeur wasm est déjà en cache du navigateur).
+function resetFfmpeg() {
+  try { if (FFMPEG_INSTANCE) FFMPEG_INSTANCE.terminate(); } catch (e) { /* déjà arrêté */ }
+  FFMPEG_INSTANCE = null;
+  FFMPEG_LOAD_PROMISE = null;
+}
 function getFfmpeg() {
   if (!FFMPEG_INSTANCE) FFMPEG_INSTANCE = new FFmpeg();
+  const instance = FFMPEG_INSTANCE;
   if (!FFMPEG_LOAD_PROMISE) {
     // Core figé sur la version attendue par défaut par le package "@ffmpeg/ffmpeg" installé
     // (voir sa constante CORE_VERSION), chargée depuis jsdelivr pour éviter toute dépendance
@@ -1077,10 +1091,37 @@ function getFfmpeg() {
     FFMPEG_LOAD_PROMISE = (async () => {
       const coreURL = await toBlobURL(`${base}/ffmpeg-core.js`, "text/javascript");
       const wasmURL = await toBlobURL(`${base}/ffmpeg-core.wasm`, "application/wasm");
-      await FFMPEG_INSTANCE.load({ coreURL, wasmURL });
-    })();
+      await instance.load({ coreURL, wasmURL });
+    })().catch(err => {
+      // Un échec de chargement (réseau coupé…) restait mémorisé pour toujours : toute tentative
+      // suivante échouait immédiatement jusqu'au rechargement de la page.
+      if (FFMPEG_INSTANCE === instance) resetFfmpeg();
+      throw err;
+    });
   }
-  return FFMPEG_LOAD_PROMISE.then(() => FFMPEG_INSTANCE);
+  const loading = FFMPEG_LOAD_PROMISE;
+  return loading.then(() => instance);
+}
+
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur : le site plante avec deux vidéos de match) : la
+// vidéo entière était lue en mémoire (fetchFile) puis copiée dans le système de fichiers de
+// ffmpeg — impossible au-delà d'environ 2 Go ("File could not be read"), et très lourd en
+// mémoire en dessous (reproduit en navigateur de test avec des vidéos de 2,8 Go). On "monte" à
+// la place le fichier choisi par le coach (WORKERFS) : ffmpeg le lit directement sur le disque,
+// par morceaux et à la demande, sans jamais le charger en entier — quelle que soit sa taille, et
+// sans l'attente de lecture initiale. Les arguments ffmpeg (coupe, ré-encodage, assemblage) sont
+// strictement les mêmes qu'avant, seul le chemin d'entrée change. Un démontage est tenté avant
+// chaque montage, pour repartir proprement si une génération précédente s'est arrêtée en erreur.
+async function mountVideoForFfmpeg(ffmpeg, file, slot) {
+  const dir = "/vid" + slot;
+  try { await ffmpeg.unmount(dir); } catch (e) { /* rien de monté ici */ }
+  try { await ffmpeg.createDir(dir); } catch (e) { /* existe déjà */ }
+  await ffmpeg.mount("WORKERFS", { files: [new File([file], "input.mp4", { type: file.type })] }, dir);
+  return { dir, path: dir + "/input.mp4" };
+}
+async function unmountVideoForFfmpeg(ffmpeg, dir) {
+  try { await ffmpeg.unmount(dir); } catch (e) {}
+  try { await ffmpeg.deleteDir(dir); } catch (e) {}
 }
 
 // Fenêtre modale ouverte en cliquant sur un Play dans "Efficiency by play" (Team > Team Play) :
@@ -1203,15 +1244,37 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
   // se préparent, comme demandé.
   const [clipResults, setClipResults] = useState([]); // [{ url, label }]
   const clipUrlsRef = useRef([]);
+  // Identifiant de la génération en cours : une annulation (ou la fermeture de la fenêtre) le
+  // change, ce qui permet à la génération interrompue de s'arrêter sans rien afficher.
+  const runIdRef = useRef(0);
+  const busyRef = useRef(false);
+  busyRef.current = busy;
 
   useEffect(() => () => {
     if (resultUrlRef.current) URL.revokeObjectURL(resultUrlRef.current);
     clipUrlsRef.current.forEach(u => URL.revokeObjectURL(u));
+    // Fenêtre fermée en pleine génération : on arrête le moteur, sinon il continuerait en
+    // arrière-plan et bloquerait la prochaine tentative.
+    if (busyRef.current) { runIdRef.current++; resetFfmpeg(); }
   }, []);
+
+  // Demandé par l'utilisateur (génération bloquée pendant plusieurs minutes, relance sans effet) :
+  // bouton pour annuler une génération en cours et repartir sur un moteur neuf.
+  function cancel() {
+    runIdRef.current++;
+    resetFfmpeg();
+    clipUrlsRef.current.forEach(u => URL.revokeObjectURL(u));
+    clipUrlsRef.current = [];
+    setClipResults([]);
+    setBusy(false);
+    setError("");
+    setProgress("Cancelled — you can start again.");
+  }
 
   const allReadyHaveFiles = readyGroups.length > 0 && readyGroups.every(g => files[g.key]);
 
   async function generate() {
+    const runId = ++runIdRef.current;
     setBusy(true); setError(""); setResultUrl(null);
     clipUrlsRef.current.forEach(u => URL.revokeObjectURL(u));
     clipUrlsRef.current = [];
@@ -1225,13 +1288,13 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
           const g = readyGroups[gi];
           const file = files[g.key];
           setProgress(`Reading video ${gi + 1}/${readyGroups.length} (${noun} ${gi + 1})…`);
-          await ffmpeg.writeFile("input.mp4", await fetchFile(file));
+          const videoMount = await mountVideoForFfmpeg(ffmpeg, file, gi);
           for (let ci = 0; ci < g.clips.length; ci++) {
             const { start, end } = g.clips[ci];
             const dur = Math.max(0.1, end - start);
             const outName = `clip_${clipIdx}.mp4`;
             setProgress(`Cutting clip ${clipIdx + 1}/${totalClips} (${noun} ${gi + 1})…`);
-            await ffmpeg.exec(["-ss", String(start), "-i", "input.mp4", "-t", String(dur), "-c", "copy", "-avoid_negative_ts", "make_zero", outName]);
+            await ffmpeg.exec(["-ss", String(start), "-i", videoMount.path, "-t", String(dur), "-c", "copy", "-avoid_negative_ts", "make_zero", outName]);
             const data = await ffmpeg.readFile(outName);
             const blob = new Blob([data.buffer], { type: "video/mp4" });
             const url = URL.createObjectURL(blob);
@@ -1241,7 +1304,7 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
             try { await ffmpeg.deleteFile(outName); } catch (e) {}
             clipIdx++;
           }
-          await ffmpeg.deleteFile("input.mp4");
+          await unmountVideoForFfmpeg(ffmpeg, videoMount.dir);
         }
         setProgress("");
       } else {
@@ -1251,20 +1314,20 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
           const g = readyGroups[gi];
           const file = files[g.key];
           setProgress(`Reading video ${gi + 1}/${readyGroups.length} (${noun} ${gi + 1})…`);
-          await ffmpeg.writeFile("input.mp4", await fetchFile(file));
+          const videoMount = await mountVideoForFfmpeg(ffmpeg, file, gi);
           for (let ci = 0; ci < g.clips.length; ci++) {
             const { start, end } = g.clips[ci];
             const dur = Math.max(0.1, end - start);
             const outName = `clip_${clipIdx}.mp4`;
             setProgress(`Cutting clip ${clipIdx + 1}/${totalClips} (${noun} ${gi + 1})…`);
             const cutArgs = cutMode === "fast"
-              ? ["-ss", String(start), "-i", "input.mp4", "-t", String(dur), "-c", "copy", "-avoid_negative_ts", "make_zero", outName]
-              : ["-ss", String(start), "-i", "input.mp4", "-t", String(dur), "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", "-avoid_negative_ts", "make_zero", outName];
+              ? ["-ss", String(start), "-i", videoMount.path, "-t", String(dur), "-c", "copy", "-avoid_negative_ts", "make_zero", outName]
+              : ["-ss", String(start), "-i", videoMount.path, "-t", String(dur), "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", "-avoid_negative_ts", "make_zero", outName];
             await ffmpeg.exec(cutArgs);
             concatLines.push(`file '${outName}'`);
             clipIdx++;
           }
-          await ffmpeg.deleteFile("input.mp4");
+          await unmountVideoForFfmpeg(ffmpeg, videoMount.dir);
         }
         setProgress("Assembling the montage…");
         await ffmpeg.writeFile("concat.txt", concatLines.join("\n"));
@@ -1285,6 +1348,7 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
         try { await ffmpeg.deleteFile("output.mp4"); } catch (e) {}
       }
     } catch (err) {
+      if (runId !== runIdRef.current) return; // annulée : cancel() a déjà tout remis à zéro
       setError(err.message || "Error while generating the clips.");
       setProgress("");
     }
@@ -1365,6 +1429,11 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
 
         {error && <div style={{ color: RED, fontSize: 12.5, marginBottom: 12 }}>{error}</div>}
         {progress && <div style={{ color: TEAL, fontSize: 12.5, marginBottom: 12 }}>{progress}</div>}
+        {busy && (
+          <button onClick={cancel} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 8, color: "#8B93A1", cursor: "pointer", fontSize: 12, padding: "6px 12px", fontFamily: "inherit", marginBottom: 12 }}>
+            Cancel and start over
+          </button>
+        )}
 
         {cutMode === "clips" ? (
           (busy || clipResults.length > 0) ? (
