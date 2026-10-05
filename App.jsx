@@ -6935,7 +6935,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
               </>
             )}
 
-            <OffenseDefenseBreakdown off={off} def={def} enableClipExport={isCoach} />
+            <OffenseDefenseBreakdown off={off} def={def} enableClipExport />
           </>
         )}
 
@@ -9852,6 +9852,7 @@ function ScoutingStaffPanel({ teamName, isCoach }) {
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(true);
   const [observation, setObservation] = useState(null); // { plays, imports } | null
+  const [obsKey, setObsKey] = useState(null); // nom exact sous lequel l'équipe est enregistrée dans Observation
   const [confirmRemoveFileId, setConfirmRemoveFileId] = useState(null);
   const fileRef = useRef();
 
@@ -9860,8 +9861,20 @@ function ScoutingStaffPanel({ teamName, isCoach }) {
     setLoading(true);
     setFiles((await storeGet("scouting_staff_files:" + teamName)) || []);
     const allObserved = (await storeGet("scouting_observations")) || {};
-    setObservation(allObserved[teamName] || null);
+    // Même correspondance insensible à la casse/aux espaces que partout ailleurs entre
+    // Observation et Scouting Report.
+    const key = Object.keys(allObserved).find(k => normTag(k) === normTag(teamName)) || null;
+    setObsKey(key);
+    setObservation(key ? allObserved[key] : null);
     setLoading(false);
+  }
+
+  // Enregistre une modification faite depuis ce panneau (case cochée, fichier remplacé…) dans le
+  // même stockage qu'Observation — les deux écrans restent donc toujours identiques.
+  async function saveObservationTeam(nextTeam) {
+    const all = (await storeGet("scouting_observations")) || {};
+    await storeSet("scouting_observations", { ...all, [obsKey]: nextTeam });
+    setObservation(nextTeam);
   }
 
   async function handleUpload(e) {
@@ -9897,11 +9910,6 @@ function ScoutingStaffPanel({ teamName, isCoach }) {
 
   if (loading) return <EmptyState text="Loading…" />;
 
-  const off = (observation?.plays || []).filter(isOffense);
-  const def = (observation?.plays || []).filter(isDefense);
-  // Même regroupement par fichier importé que dans ObservationTab (voir son commentaire) —
-  // ces actions n'ont pas de matchId/date/adversaire.
-  const observationImportInfoById = new Map((observation?.imports || []).map(imp => [imp.id, imp]));
 
   return (
     <div>
@@ -9940,21 +9948,10 @@ function ScoutingStaffPanel({ teamName, isCoach }) {
       )}
 
       <SectionTitle eyebrow="Observation" title="Stats & charts for this team" />
-      {!observation || (off.length === 0 && def.length === 0) ? (
+      {!observation || (observation.plays || []).length === 0 ? (
         <EmptyState text="This team hasn't been observed yet (Observation tab) — its stats and charts will appear here automatically once it has." />
       ) : (
-        <OffenseDefenseBreakdown
-          off={off} def={def} categories={currentObservationTagCategories()}
-          enableClipExport={isCoach}
-          clipGrouping={{
-            keyOf: p => p.importId,
-            labelOf: p => observationImportInfoById.get(p.importId)?.fileName || "Imported file",
-            sortKeyOf: p => observationImportInfoById.get(p.importId)?.importedAt || "",
-            noun: "File",
-            missingTimestampHint: "replace {article} import with a .dnk project (Scouting → Observation, remove the old file then re-import the .dnk) to include {pronoun}.",
-            scopeNote: "this observed team's imported files.",
-          }}
-        />
+        <ObservationTeamPanel key={obsKey} teamName={obsKey} team={observation} isCoach={isCoach} onChangeTeam={saveObservationTeam} />
       )}
     </div>
   );
@@ -10577,12 +10574,157 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
                 <div style={{ fontSize: 17, fontWeight: 800, color: PAPER }}>{[openPlayer.firstName, openPlayer.lastName].filter(Boolean).join(" ")}{openPlayer.jersey ? ` #${openPlayer.jersey}` : ""}</div>
                 <button onClick={() => setOpenPlayer(null)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer" }}><X size={20} /></button>
               </div>
-              <OffenseDefenseBreakdown off={playerOff} def={playerDef} categories={categories} enableClipExport={isCoach} clipGrouping={clipGrouping} />
+              <OffenseDefenseBreakdown off={playerOff} def={playerDef} categories={categories} enableClipExport clipGrouping={clipGrouping} />
             </div>
           </div>
         );
       })()}
     </div>
+  );
+}
+
+// Demandé par l'utilisateur : tout ce qui concerne UNE équipe observée (liste des fichiers avec
+// cases à cocher, remplacement/suppression d'un fichier, encadrés joueurs, stats Offense/Defense,
+// clips) est regroupé ici, pour que Scouting → Observation ET Scouting Report → Staff affichent
+// exactement la même chose — y compris toute évolution future — sans dupliquer le code.
+// Les modifications sont enregistrées via onChangeTeam (qui écrit dans "scouting_observations").
+function observationIncludedPlays(team) {
+  const excluded = new Set((team?.imports || []).filter(imp => imp.excluded).map(imp => imp.id));
+  return (team?.plays || []).filter(p => !excluded.has(p.importId));
+}
+
+function ObservationTeamPanel({ teamName, team, isCoach, onChangeTeam }) {
+  const scoutingPlayers = useObservationScoutingPlayers(teamName);
+  const [replacingImportId, setReplacingImportId] = useState(null);
+  const [replaceBusy, setReplaceBusy] = useState(false);
+  const [replaceErr, setReplaceErr] = useState("");
+  const [replaceSuccessCount, setReplaceSuccessCount] = useState(null);
+  const [confirmRemoveImportId, setConfirmRemoveImportId] = useState(null);
+
+  const imports = team.imports || [];
+  // Un fichier décoché est simplement ignoré (ses actions restent stockées, rien n'est supprimé) ;
+  // le choix est enregistré avec l'import, donc conservé d'une visite à l'autre.
+  const includedPlays = observationIncludedPlays(team);
+  const includedImportCount = imports.filter(imp => !imp.excluded).length;
+  const off = includedPlays.filter(isOffense);
+  const def = includedPlays.filter(isDefense);
+  const categories = currentObservationTagCategories();
+  // Les actions observées n'ont pas de matchId/date/adversaire (une équipe peut combiner
+  // plusieurs fichiers sans qu'on connaisse la date de chacun) — le regroupement pour l'export
+  // de clips (voir ClipExportModal) se fait donc par fichier importé (importId), avec son nom.
+  const importInfoById = new Map(imports.map(imp => [imp.id, imp]));
+  const clipGrouping = {
+    keyOf: p => p.importId,
+    labelOf: p => importInfoById.get(p.importId)?.fileName || "Imported file",
+    sortKeyOf: p => importInfoById.get(p.importId)?.importedAt || "",
+    noun: "File",
+    missingTimestampHint: 'use "Replace" in the files list above to swap {article} import for a .dnk project and include {pronoun}.',
+    scopeNote: "this observed team's imported files.",
+  };
+
+  async function toggleImportIncluded(importId) {
+    await onChangeTeam({ ...team, imports: imports.map(imp => imp.id === importId ? { ...imp, excluded: !imp.excluded } : imp) });
+  }
+
+  // Retire un seul import (un seul fichier) d'une équipe observée, sans toucher aux autres —
+  // toujours après confirmation (demandé par l'utilisateur).
+  async function removeImport(importId) {
+    await onChangeTeam({
+      ...team,
+      plays: (team.plays || []).filter(p => p.importId !== importId),
+      imports: imports.filter(imp => imp.id !== importId),
+    });
+    setConfirmRemoveImportId(null);
+  }
+
+  // Remplacer un fichier .dnk déjà importé (ex. fichier mal codé) sans devoir le supprimer puis
+  // tout réimporter — limité aux actions de CE fichier (importId) ; les autres fichiers combinés
+  // pour la même équipe ne sont jamais touchés.
+  async function handleReplaceImportFile(e, importId) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setReplaceErr(""); setReplaceSuccessCount(null); setReplaceBusy(true);
+    try {
+      const buf = await file.arrayBuffer();
+      const parsed = await parseDnkCodingFile(buf, currentObservationTagCategories(), "tag");
+      if (!parsed.plays.length) throw new Error("No action attributed to a player was found.");
+      const taggedPlays = parsed.plays.map(p => ({ ...p, importId }));
+      await onChangeTeam({
+        ...team,
+        plays: [...(team.plays || []).filter(p => p.importId !== importId), ...taggedPlays],
+        imports: imports.map(imp => imp.id === importId
+          ? { ...imp, fileName: file.name, importedAt: new Date().toISOString(), playsCount: taggedPlays.length }
+          : imp),
+      });
+      setReplaceSuccessCount(taggedPlays.length);
+    } catch (err) {
+      setReplaceErr(err.message || "Error reading the file.");
+    }
+    setReplaceBusy(false);
+    e.target.value = "";
+  }
+
+  return (
+    <>
+      {imports.length > 0 && (
+        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 14, marginBottom: 20 }}>
+          <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 8 }}>
+            Files combined for this team ({imports.length}{includedImportCount < imports.length ? `, ${includedImportCount} counted` : ""})
+          </div>
+          {isCoach && <div style={{ fontSize: 11.5, color: "#5C6470", marginBottom: 6 }}>Untick a file to leave it out of the stats, player cards and clips below.</div>}
+          {imports.map(imp => (
+            <div key={imp.id} style={{ padding: "6px 0", borderTop: `1px solid ${LINE}` }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#D8DCE2", opacity: imp.excluded ? 0.5 : 1, cursor: isCoach ? "pointer" : "default" }}>
+                  {isCoach && <input type="checkbox" checked={!imp.excluded} onChange={() => toggleImportIncluded(imp.id)} />}
+                  <span>{imp.fileName} <span style={{ color: "#5C6470" }}>· {new Date(imp.importedAt).toLocaleDateString()} · {imp.playsCount} actions{imp.excluded ? " · not counted" : ""}</span></span>
+                </label>
+                {isCoach && (
+                  confirmRemoveImportId === imp.id ? (
+                    <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                      <span style={{ fontSize: 11.5, color: RED }}>Remove this file and its actions?</span>
+                      <button onClick={() => removeImport(imp.id)} style={{ background: RED, border: "none", borderRadius: 6, color: "#fff", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Yes</button>
+                      <button onClick={() => setConfirmRemoveImportId(null)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Cancel</button>
+                    </div>
+                  ) : (
+                    <div style={{ display: "flex", gap: 10, alignItems: "center", flexShrink: 0 }}>
+                      <button onClick={() => { setReplacingImportId(replacingImportId === imp.id ? null : imp.id); setReplaceErr(""); setReplaceSuccessCount(null); }} style={{ background: "none", border: "none", color: AMBER, cursor: "pointer", fontSize: 11.5, fontFamily: "inherit" }}>
+                        {replacingImportId === imp.id ? "Cancel" : "Replace"}
+                      </button>
+                      <button onClick={() => setConfirmRemoveImportId(imp.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }} title="Remove this file only"><X size={14} /></button>
+                    </div>
+                  )
+                )}
+              </div>
+              {isCoach && replacingImportId === imp.id && (
+                <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px dashed ${LINE}` }}>
+                  <label style={labelStyle}>Replace with a new .dnk file</label>
+                  <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                    <input type="file" accept=".dnk" onChange={e => handleReplaceImportFile(e, imp.id)} style={{ color: "#8B93A1", fontSize: 13 }} />
+                    {replaceBusy && <span style={{ fontSize: 11.5, color: TEAL }}>Importing…</span>}
+                    {replaceSuccessCount !== null && <span style={{ fontSize: 11.5, color: TEAL }}>✓ Replaced — {replaceSuccessCount} actions now coded.</span>}
+                  </div>
+                  <div style={{ fontSize: 11.5, color: "#5C6470", marginTop: 6 }}>
+                    Replaces this file's coded actions only — the other files combined for this team are unaffected.
+                  </div>
+                  {replaceErr && <div style={{ color: RED, fontSize: 12, marginTop: 6 }}>{replaceErr}</div>}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+      {imports.length > 0 && includedImportCount === 0 ? (
+        <EmptyState text="All files are unticked — tick at least one above to see the stats." />
+      ) : (
+        <OffenseDefenseBreakdown
+          off={off} def={def} categories={categories}
+          enableClipExport
+          clipGrouping={clipGrouping}
+          topContent={<ObservationPlayerStrip players={scoutingPlayers} off={off} def={def} isCoach={isCoach} categories={categories} clipGrouping={clipGrouping} teamName={teamName} />}
+        />
+      )}
+    </>
   );
 }
 
@@ -10597,46 +10739,6 @@ function ObservationTab({ isCoach }) {
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [exportReport, setExportReport] = useState(null);
   const fileRef = useRef();
-  const scoutingPlayers = useObservationScoutingPlayers(selected);
-  // Demandé par l'utilisateur : pouvoir remplacer un fichier .dnk déjà importé pour une équipe
-  // observée (ex. fichier mal codé) sans devoir le supprimer puis tout réimporter — même logique
-  // que le remplacement de fichier dans Import Match, mais ici limité aux actions de CE fichier
-  // (importId) ; les autres fichiers combinés pour la même équipe ne sont jamais touchés.
-  const [replacingImportId, setReplacingImportId] = useState(null);
-  const [replaceBusy, setReplaceBusy] = useState(false);
-  const [replaceErr, setReplaceErr] = useState("");
-  const [replaceSuccessCount, setReplaceSuccessCount] = useState(null);
-
-  async function handleReplaceImportFile(e, name, importId) {
-    const file = e.target.files[0];
-    if (!file) return;
-    setReplaceErr(""); setReplaceSuccessCount(null); setReplaceBusy(true);
-    try {
-      const buf = await file.arrayBuffer();
-      const parsed = await parseDnkCodingFile(buf, currentObservationTagCategories(), "tag");
-      if (!parsed.plays.length) throw new Error("No action attributed to a player was found.");
-      const existing = observed[name];
-      if (!existing) throw new Error("Team not found.");
-      const taggedPlays = parsed.plays.map(p => ({ ...p, importId }));
-      const next = {
-        ...observed,
-        [name]: {
-          ...existing,
-          plays: [...existing.plays.filter(p => p.importId !== importId), ...taggedPlays],
-          imports: existing.imports.map(imp => imp.id === importId
-            ? { ...imp, fileName: file.name, importedAt: new Date().toISOString(), playsCount: taggedPlays.length }
-            : imp),
-        },
-      };
-      await storeSet("scouting_observations", next);
-      setObserved(next);
-      setReplaceSuccessCount(taggedPlays.length);
-    } catch (err) {
-      setReplaceErr(err.message || "Error reading the file.");
-    }
-    setReplaceBusy(false);
-    e.target.value = "";
-  }
 
   useEffect(() => { load(); }, []);
   async function load() {
@@ -10684,20 +10786,12 @@ function ObservationTab({ isCoach }) {
     setBusy(false);
   }
 
-  // Retire un seul import (un seul fichier) d'une équipe observée, sans toucher aux autres.
-  async function removeImport(name, importId) {
-    const existing = observed[name];
-    if (!existing) return;
-    const next = {
-      ...observed,
-      [name]: {
-        ...existing,
-        plays: (existing.plays || []).filter(p => p.importId !== importId),
-        imports: (existing.imports || []).filter(imp => imp.id !== importId),
-      },
-    };
-    await storeSet("scouting_observations", next);
+  // Enregistre la version modifiée de l'équipe affichée (cases cochées, fichier remplacé ou
+  // retiré…) — utilisée par ObservationTeamPanel.
+  async function saveSelectedTeam(nextTeam) {
+    const next = { ...observed, [selected]: nextTeam };
     setObserved(next);
+    await storeSet("scouting_observations", next);
   }
 
   async function removeObserved(name) {
@@ -10708,42 +10802,10 @@ function ObservationTab({ isCoach }) {
     if (selected === name) setSelected(null);
   }
 
-  async function toggleImportIncluded(name, importId) {
-    const existing = observed[name];
-    if (!existing) return;
-    const next = {
-      ...observed,
-      [name]: { ...existing, imports: (existing.imports || []).map(imp => imp.id === importId ? { ...imp, excluded: !imp.excluded } : imp) },
-    };
-    setObserved(next);
-    await storeSet("scouting_observations", next);
-  }
-
   if (loading) return <EmptyState text="Loading…" />;
 
   const names = Object.keys(observed);
   const current = selected ? observed[selected] : null;
-  // Demandé par l'utilisateur : pouvoir cocher/décocher les matchs (fichiers importés) d'une équipe
-  // observée, pour choisir lesquels comptent dans les stats, les encadrés joueurs et les clips.
-  // Un fichier décoché est simplement ignoré ici (ses actions restent stockées, rien n'est
-  // supprimé) — le choix est enregistré avec l'import, donc conservé d'une visite à l'autre.
-  const excludedImportIds = new Set((current?.imports || []).filter(imp => imp.excluded).map(imp => imp.id));
-  const includedPlays = current ? current.plays.filter(p => !excludedImportIds.has(p.importId)) : [];
-  const includedImportCount = (current?.imports || []).filter(imp => !imp.excluded).length;
-  const off = includedPlays.filter(isOffense);
-  const def = includedPlays.filter(isDefense);
-  // Les actions observées n'ont pas de matchId/date/adversaire (une équipe peut combiner
-  // plusieurs fichiers sans qu'on connaisse la date de chacun) — le regroupement pour l'export
-  // de clips (voir ClipExportModal) se fait donc par fichier importé (importId), avec son nom.
-  const observationImportInfoById = new Map((current?.imports || []).map(imp => [imp.id, imp]));
-  const observationClipGrouping = {
-    keyOf: p => p.importId,
-    labelOf: p => observationImportInfoById.get(p.importId)?.fileName || "Imported file",
-    sortKeyOf: p => observationImportInfoById.get(p.importId)?.importedAt || "",
-    noun: "File",
-    missingTimestampHint: "replace {article} import with a .dnk project (remove it above, then re-import the .dnk) to include {pronoun}.",
-    scopeNote: "this observed team's imported files.",
-  };
 
   return (
     <div>
@@ -10800,7 +10862,7 @@ function ObservationTab({ isCoach }) {
       {names.length > 0 && (
         <div style={{ marginBottom: 24 }}>
           <label style={labelStyle}>Team to view</label>
-          <select value={selected || ""} onChange={e => { setSelected(e.target.value || null); setReplacingImportId(null); setReplaceErr(""); setReplaceSuccessCount(null); }} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", maxWidth: 320 }}>
+          <select value={selected || ""} onChange={e => setSelected(e.target.value || null)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", maxWidth: 320 }}>
             <option value="">— Choose an observed team —</option>
             {names.map(name => <option key={name} value={name}>{name}</option>)}
           </select>
@@ -10823,56 +10885,7 @@ function ObservationTab({ isCoach }) {
               <Download size={14} /> Export PDF
             </button>
           </div>
-          {current.imports?.length > 0 && (
-            <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 14, marginBottom: 20 }}>
-              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 8 }}>
-                Files combined for this team ({current.imports.length}{includedImportCount < current.imports.length ? `, ${includedImportCount} counted` : ""})
-              </div>
-              {isCoach && <div style={{ fontSize: 11.5, color: "#5C6470", marginBottom: 6 }}>Untick a file to leave it out of the stats, player cards and clips below.</div>}
-              {current.imports.map(imp => (
-                <div key={imp.id} style={{ padding: "6px 0", borderTop: `1px solid ${LINE}` }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
-                    <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: "#D8DCE2", opacity: imp.excluded ? 0.5 : 1, cursor: isCoach ? "pointer" : "default" }}>
-                      {isCoach && <input type="checkbox" checked={!imp.excluded} onChange={() => toggleImportIncluded(selected, imp.id)} />}
-                      <span>{imp.fileName} <span style={{ color: "#5C6470" }}>· {new Date(imp.importedAt).toLocaleDateString()} · {imp.playsCount} actions{imp.excluded ? " · not counted" : ""}</span></span>
-                    </label>
-                    {isCoach && (
-                      <div style={{ display: "flex", gap: 10, alignItems: "center", flexShrink: 0 }}>
-                        <button onClick={() => { setReplacingImportId(replacingImportId === imp.id ? null : imp.id); setReplaceErr(""); setReplaceSuccessCount(null); }} style={{ background: "none", border: "none", color: AMBER, cursor: "pointer", fontSize: 11.5, fontFamily: "inherit" }}>
-                          {replacingImportId === imp.id ? "Cancel" : "Replace"}
-                        </button>
-                        <button onClick={() => removeImport(selected, imp.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }} title="Remove this file only"><X size={14} /></button>
-                      </div>
-                    )}
-                  </div>
-                  {isCoach && replacingImportId === imp.id && (
-                    <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px dashed ${LINE}` }}>
-                      <label style={labelStyle}>Replace with a new .dnk file</label>
-                      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                        <input type="file" accept=".dnk" onChange={e => handleReplaceImportFile(e, selected, imp.id)} style={{ color: "#8B93A1", fontSize: 13 }} />
-                        {replaceBusy && <span style={{ fontSize: 11.5, color: TEAL }}>Importing…</span>}
-                        {replaceSuccessCount !== null && <span style={{ fontSize: 11.5, color: TEAL }}>✓ Replaced — {replaceSuccessCount} actions now coded.</span>}
-                      </div>
-                      <div style={{ fontSize: 11.5, color: "#5C6470", marginTop: 6 }}>
-                        Replaces this file's coded actions only — the other files combined for this team are unaffected.
-                      </div>
-                      {replaceErr && <div style={{ color: RED, fontSize: 12, marginTop: 6 }}>{replaceErr}</div>}
-                    </div>
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-          {(current.imports?.length > 0 && includedImportCount === 0) ? (
-            <EmptyState text="All files are unticked — tick at least one above to see the stats." />
-          ) : (
-          <OffenseDefenseBreakdown
-            off={off} def={def} categories={currentObservationTagCategories()}
-            enableClipExport={isCoach}
-            clipGrouping={observationClipGrouping}
-            topContent={<ObservationPlayerStrip players={scoutingPlayers} off={off} def={def} isCoach={isCoach} categories={currentObservationTagCategories()} clipGrouping={observationClipGrouping} teamName={selected} />}
-          />
-          )}
+          <ObservationTeamPanel key={selected} teamName={selected} team={current} isCoach={isCoach} onChangeTeam={saveSelectedTeam} />
         </div>
       )}
 
@@ -10903,7 +10916,7 @@ function ObservationTab({ isCoach }) {
 
       {current && (
         <div className="print-only" id="observation-print-content">
-          <ObservationPrintReport name={selected} team={{ ...current, plays: includedPlays, imports: (current.imports || []).filter(imp => !imp.excluded) }} />
+          <ObservationPrintReport name={selected} team={{ ...current, plays: observationIncludedPlays(current), imports: (current.imports || []).filter(imp => !imp.excluded) }} />
         </div>
       )}
       <ExportModal report={exportReport} onClose={() => setExportReport(null)} />
@@ -13181,7 +13194,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
         )
       )}
 
-      {subtab === "collectif" && (isCoach || v.teamPlay) && <OffenseDefenseBreakdown off={teamOff} def={teamDef} detailTables={false} enableClipExport={isCoach} />}
+      {subtab === "collectif" && (isCoach || v.teamPlay) && <OffenseDefenseBreakdown off={teamOff} def={teamDef} detailTables={false} enableClipExport />}
 
       {subtab === "avance" && (isCoach || v.advanced) && (
         <>
