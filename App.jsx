@@ -2032,7 +2032,7 @@ function tagBreakdown(source) {
 // date/adversaire sur ces imports. N'a d'effet que là où l'appelant le passe explicitement —
 // aujourd'hui Team > Team Play, la fiche joueur et Scouting > Observation (voir TeamTab /
 // PlayerDetail / ObservationTab / ScoutingStaffPanel).
-function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, enableClipExport = false, clipGrouping }) {
+function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, enableClipExport = false, clipGrouping, topContent }) {
   const cats = categories || currentTagCategories();
   const [clipModal, setClipModal] = useState(null); // { name, side: "off"|"def", extraTags? } | null
   // Demandé par l'utilisateur : cliquer sur PPPP ou Open doit d'abord demander QUELS tags de
@@ -2103,6 +2103,7 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
 
   return (
     <>
+      {topContent}
       <SectionTitle eyebrow="Source: coding file" title="Offense — how the ball is played" />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 26 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
@@ -10343,6 +10344,173 @@ function ObservationPrintReport({ name, team }) {
   );
 }
 
+// Demandé par l'utilisateur : lier, par nom, les tags "Player" posés sur une équipe observée
+// (Scouting Observation) aux fiches joueurs déjà créées dans Scouting Report → Individual, pour
+// pouvoir afficher leur photo et leurs tags (attaque + défense) en haut de l'onglet Observation.
+// Les deux fonctionnalités utilisent deux registres de noms d'équipe indépendants (le nom libre
+// tapé dans Observation vs scouting_teams, le registre "Manage Team"/Scouting Report) : on
+// cherche donc une correspondance insensible à la casse/aux espaces plutôt qu'une égalité
+// stricte entre les deux. Le tag DNK lui-même (play.player) est comparé au prénom, au nom,
+// prénom+nom, nom+prénom, et au numéro de maillot de la fiche joueur — selon ce que le coach a
+// utilisé comme nom de tag "Player" dans son logiciel de coding.
+function scoutingPlayerNameCandidates(player) {
+  const first = normTag(player.firstName || "");
+  const last = normTag(player.lastName || "");
+  const jersey = normTag(String(player.jersey || ""));
+  return [first, last, first + last, last + first, jersey].filter(Boolean);
+}
+function matchesScoutingPlayer(tagName, player) {
+  const norm = normTag(tagName);
+  if (!norm) return false;
+  return scoutingPlayerNameCandidates(player).includes(norm);
+}
+
+// Charge les fiches joueurs de Scouting Report → Individual pour l'équipe adverse observée
+// correspondante (par nom), si elle existe.
+function useObservationScoutingPlayers(observedTeamName) {
+  const [players, setPlayers] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    if (!observedTeamName) { setPlayers([]); return; }
+    (async () => {
+      const teamNames = (await storeGet("scouting_teams")) || [];
+      const match = teamNames.find(n => normTag(n) === normTag(observedTeamName));
+      if (!match) { if (!cancelled) setPlayers([]); return; }
+      const ids = (await storeGet("scouting_players:" + match)) || [];
+      const list = [];
+      for (const id of ids) {
+        const p = await storeGet("scouting_player:" + match + ":" + id);
+        if (p) list.push(p);
+      }
+      if (!cancelled) setPlayers(list);
+    })();
+    return () => { cancelled = true; };
+  }, [observedTeamName]);
+  return players;
+}
+
+// Demandé par l'utilisateur : lors du coding, le joueur tagué est toujours celui de l'équipe qui
+// ATTAQUE à ce moment-là — donc indifféremment l'équipe observée ou son adversaire du jour (les
+// deux équipes s'attaquent chacune leur tour dans le même match). Rien dans le fichier .dnk ne dit
+// à quelle équipe appartient un tag : un même numéro de maillot (ex. "7") peut très bien exister
+// des deux côtés. Impossible de lever cette ambiguïté automatiquement — seul le coach, qui a vu le
+// match, sait si "7" est ici le joueur observé ou l'adversaire. On stocke donc, par équipe
+// observée, une décision explicite (coché = appartient à cette équipe) pour chaque tag distinct
+// rencontré ; tant qu'un tag n'a pas été coché, il n'alimente aucun encadré ni aucune stat joueur
+// (par sécurité, un tag non confirmé est traité comme n'appartenant PAS à l'équipe observée).
+function useObservationPlayerTagMap(teamName) {
+  const [map, setMap] = useState({});
+  useEffect(() => {
+    let cancelled = false;
+    if (!teamName) { setMap({}); return; }
+    storeGet("scouting_observation_player_tags:" + teamName).then(v => { if (!cancelled) setMap(v || {}); });
+    return () => { cancelled = true; };
+  }, [teamName]);
+  async function setTag(tag, belongs) {
+    const next = { ...map, [tag]: belongs };
+    setMap(next);
+    await storeSet("scouting_observation_player_tags:" + teamName, next);
+  }
+  return { map, setTag };
+}
+
+// Rangée de petits encadrés joueurs (photo + nom), affichée juste au-dessus de "Offense — how
+// the ball is played" dans l'onglet Observation. Seules les fiches dont le nom/numéro correspond
+// à au moins un tag "Player" CONFIRMÉ comme appartenant à cette équipe (voir ci-dessus) sont
+// affichées. Un clic ouvre les tags de ce joueur, attaque ET défense, avec le même export de
+// clips que partout ailleurs.
+function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGrouping, teamName }) {
+  const [openPlayer, setOpenPlayer] = useState(null);
+  const [showConfirm, setShowConfirm] = useState(false);
+  const { map: tagMap, setTag: setTagDecision } = useObservationPlayerTagMap(teamName);
+
+  const allTags = useMemo(() => {
+    const set = new Set();
+    for (const p of off) if (p.player) set.add(p.player);
+    for (const p of def) if (p.player) set.add(p.player);
+    return [...set].sort((a, b) => a.localeCompare(b, "fr"));
+  }, [off, def]);
+  const undecidedCount = allTags.filter(t => !(t in tagMap)).length;
+  const confirmedTags = useMemo(() => new Set(allTags.filter(t => tagMap[t] === true)), [allTags, tagMap]);
+  const confirmedNorm = useMemo(() => new Set([...confirmedTags].map(normTag)), [confirmedTags]);
+  const matched = players.filter(p => scoutingPlayerNameCandidates(p).some(c => confirmedNorm.has(c)));
+
+  if (!allTags.length) return null;
+  if (!isCoach && !matched.length) return null;
+
+  function playsFor(player) {
+    const match = (p) => p.player && confirmedTags.has(p.player) && matchesScoutingPlayer(p.player, player);
+    return { playerOff: off.filter(match), playerDef: def.filter(match) };
+  }
+
+  return (
+    <div style={{ marginBottom: 26 }}>
+      <SectionTitle eyebrow="From Scouting Report — Individual" title="Players tagged in this observation" />
+
+      {isCoach && (
+        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
+            <div style={{ fontSize: 12.5, color: "#D8DCE2" }}>
+              Which of these tagged players belong to <b>{teamName}</b> (not the opposing team)?
+              {undecidedCount > 0 && <span style={{ color: AMBER }}> · {undecidedCount} new tag{undecidedCount !== 1 ? "s" : ""} to review</span>}
+            </div>
+            <button onClick={() => setShowConfirm(s => !s)} style={{ background: "none", border: "none", color: AMBER, cursor: "pointer", fontSize: 12.5, fontFamily: "inherit" }}>
+              {showConfirm ? "Hide" : "Review"}
+            </button>
+          </div>
+          {showConfirm && (
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 12 }}>
+              {allTags.map(tag => (
+                <label key={tag} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", background: PANEL2, border: `1px solid ${tagMap[tag] === true ? TEAL : LINE}`, borderRadius: 8, fontSize: 12.5, color: "#D8DCE2", cursor: "pointer", fontFamily: "inherit" }}>
+                  <input type="checkbox" checked={tagMap[tag] === true} onChange={e => setTagDecision(tag, e.target.checked)} />
+                  {tag}
+                  {!(tag in tagMap) && <span style={{ fontSize: 10, color: AMBER }}>new</span>}
+                </label>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {matched.length === 0 ? (
+        isCoach && <EmptyState text={confirmedTags.size === 0 ? "Check the tags above that belong to this team to show their cards here." : "No Scouting Report profile matches the confirmed tags yet."} />
+      ) : (
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+          {matched.map(p => (
+            <button key={p.id} onClick={() => setOpenPlayer(p)} style={{
+              display: "flex", alignItems: "center", gap: 10, padding: "8px 14px 8px 8px",
+              background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, cursor: "pointer", fontFamily: "inherit",
+            }}>
+              <div style={{ width: 40, height: 40, borderRadius: 8, background: PANEL2, overflow: "hidden", flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center" }}>
+                {p.photo ? <img src={p.photo} alt="" style={{ width: "100%", height: "100%", objectFit: "cover" }} /> : <Camera size={16} color="#5C6470" />}
+              </div>
+              <div style={{ textAlign: "left" }}>
+                <div style={{ fontSize: 13, fontWeight: 700, color: PAPER }}>{[p.firstName, p.lastName].filter(Boolean).join(" ") || "—"}</div>
+                {p.jersey && <div style={{ fontSize: 11, color: "#8B93A1" }}>#{p.jersey}</div>}
+              </div>
+            </button>
+          ))}
+        </div>
+      )}
+
+      {openPlayer && (() => {
+        const { playerOff, playerDef } = playsFor(openPlayer);
+        return (
+          <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 150, display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "4vh 20px", overflowY: "auto" }}>
+            <div style={{ background: INK, border: `1px solid ${LINE}`, borderRadius: 14, padding: 22, maxWidth: 1200, width: "100%" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+                <div style={{ fontSize: 17, fontWeight: 800, color: PAPER }}>{[openPlayer.firstName, openPlayer.lastName].filter(Boolean).join(" ")}{openPlayer.jersey ? ` #${openPlayer.jersey}` : ""}</div>
+                <button onClick={() => setOpenPlayer(null)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer" }}><X size={20} /></button>
+              </div>
+              <OffenseDefenseBreakdown off={playerOff} def={playerDef} categories={categories} enableClipExport={isCoach} clipGrouping={clipGrouping} />
+            </div>
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
 function ObservationTab({ isCoach }) {
   const [observed, setObserved] = useState({}); // { teamName: { plays, importedAt } }
   const [loading, setLoading] = useState(true);
@@ -10354,6 +10522,46 @@ function ObservationTab({ isCoach }) {
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [exportReport, setExportReport] = useState(null);
   const fileRef = useRef();
+  const scoutingPlayers = useObservationScoutingPlayers(selected);
+  // Demandé par l'utilisateur : pouvoir remplacer un fichier .dnk déjà importé pour une équipe
+  // observée (ex. fichier mal codé) sans devoir le supprimer puis tout réimporter — même logique
+  // que le remplacement de fichier dans Import Match, mais ici limité aux actions de CE fichier
+  // (importId) ; les autres fichiers combinés pour la même équipe ne sont jamais touchés.
+  const [replacingImportId, setReplacingImportId] = useState(null);
+  const [replaceBusy, setReplaceBusy] = useState(false);
+  const [replaceErr, setReplaceErr] = useState("");
+  const [replaceSuccessCount, setReplaceSuccessCount] = useState(null);
+
+  async function handleReplaceImportFile(e, name, importId) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setReplaceErr(""); setReplaceSuccessCount(null); setReplaceBusy(true);
+    try {
+      const buf = await file.arrayBuffer();
+      const parsed = await parseDnkCodingFile(buf, currentObservationTagCategories(), "tag");
+      if (!parsed.plays.length) throw new Error("No action attributed to a player was found.");
+      const existing = observed[name];
+      if (!existing) throw new Error("Team not found.");
+      const taggedPlays = parsed.plays.map(p => ({ ...p, importId }));
+      const next = {
+        ...observed,
+        [name]: {
+          ...existing,
+          plays: [...existing.plays.filter(p => p.importId !== importId), ...taggedPlays],
+          imports: existing.imports.map(imp => imp.id === importId
+            ? { ...imp, fileName: file.name, importedAt: new Date().toISOString(), playsCount: taggedPlays.length }
+            : imp),
+        },
+      };
+      await storeSet("scouting_observations", next);
+      setObserved(next);
+      setReplaceSuccessCount(taggedPlays.length);
+    } catch (err) {
+      setReplaceErr(err.message || "Error reading the file.");
+    }
+    setReplaceBusy(false);
+    e.target.value = "";
+  }
 
   useEffect(() => { load(); }, []);
   async function load() {
@@ -10435,6 +10643,14 @@ function ObservationTab({ isCoach }) {
   // plusieurs fichiers sans qu'on connaisse la date de chacun) — le regroupement pour l'export
   // de clips (voir ClipExportModal) se fait donc par fichier importé (importId), avec son nom.
   const observationImportInfoById = new Map((current?.imports || []).map(imp => [imp.id, imp]));
+  const observationClipGrouping = {
+    keyOf: p => p.importId,
+    labelOf: p => observationImportInfoById.get(p.importId)?.fileName || "Imported file",
+    sortKeyOf: p => observationImportInfoById.get(p.importId)?.importedAt || "",
+    noun: "File",
+    missingTimestampHint: "replace {article} import with a .dnk project (remove it above, then re-import the .dnk) to include {pronoun}.",
+    scopeNote: "this observed team's imported files.",
+  };
 
   return (
     <div>
@@ -10491,7 +10707,7 @@ function ObservationTab({ isCoach }) {
       {names.length > 0 && (
         <div style={{ marginBottom: 24 }}>
           <label style={labelStyle}>Team to view</label>
-          <select value={selected || ""} onChange={e => setSelected(e.target.value || null)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", maxWidth: 320 }}>
+          <select value={selected || ""} onChange={e => { setSelected(e.target.value || null); setReplacingImportId(null); setReplaceErr(""); setReplaceSuccessCount(null); }} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", maxWidth: 320 }}>
             <option value="">— Choose an observed team —</option>
             {names.map(name => <option key={name} value={name}>{name}</option>)}
           </select>
@@ -10520,11 +10736,32 @@ function ObservationTab({ isCoach }) {
                 Files combined for this team ({current.imports.length})
               </div>
               {current.imports.map(imp => (
-                <div key={imp.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 0", borderTop: `1px solid ${LINE}` }}>
-                  <div style={{ fontSize: 12.5, color: "#D8DCE2" }}>
-                    {imp.fileName} <span style={{ color: "#5C6470" }}>· {new Date(imp.importedAt).toLocaleDateString()} · {imp.playsCount} actions</span>
+                <div key={imp.id} style={{ padding: "6px 0", borderTop: `1px solid ${LINE}` }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <div style={{ fontSize: 12.5, color: "#D8DCE2" }}>
+                      {imp.fileName} <span style={{ color: "#5C6470" }}>· {new Date(imp.importedAt).toLocaleDateString()} · {imp.playsCount} actions</span>
+                    </div>
+                    <div style={{ display: "flex", gap: 10, alignItems: "center", flexShrink: 0 }}>
+                      <button onClick={() => { setReplacingImportId(replacingImportId === imp.id ? null : imp.id); setReplaceErr(""); setReplaceSuccessCount(null); }} style={{ background: "none", border: "none", color: AMBER, cursor: "pointer", fontSize: 11.5, fontFamily: "inherit" }}>
+                        {replacingImportId === imp.id ? "Cancel" : "Replace"}
+                      </button>
+                      <button onClick={() => removeImport(selected, imp.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }} title="Remove this file only"><X size={14} /></button>
+                    </div>
                   </div>
-                  <button onClick={() => removeImport(selected, imp.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }} title="Remove this file only"><X size={14} /></button>
+                  {replacingImportId === imp.id && (
+                    <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px dashed ${LINE}` }}>
+                      <label style={labelStyle}>Replace with a new .dnk file</label>
+                      <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                        <input type="file" accept=".dnk" onChange={e => handleReplaceImportFile(e, selected, imp.id)} style={{ color: "#8B93A1", fontSize: 13 }} />
+                        {replaceBusy && <span style={{ fontSize: 11.5, color: TEAL }}>Importing…</span>}
+                        {replaceSuccessCount !== null && <span style={{ fontSize: 11.5, color: TEAL }}>✓ Replaced — {replaceSuccessCount} actions now coded.</span>}
+                      </div>
+                      <div style={{ fontSize: 11.5, color: "#5C6470", marginTop: 6 }}>
+                        Replaces this file's coded actions only — the other files combined for this team are unaffected.
+                      </div>
+                      {replaceErr && <div style={{ color: RED, fontSize: 12, marginTop: 6 }}>{replaceErr}</div>}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -10532,14 +10769,8 @@ function ObservationTab({ isCoach }) {
           <OffenseDefenseBreakdown
             off={off} def={def} categories={currentObservationTagCategories()}
             enableClipExport={isCoach}
-            clipGrouping={{
-              keyOf: p => p.importId,
-              labelOf: p => observationImportInfoById.get(p.importId)?.fileName || "Imported file",
-              sortKeyOf: p => observationImportInfoById.get(p.importId)?.importedAt || "",
-              noun: "File",
-              missingTimestampHint: "replace {article} import with a .dnk project (remove it above, then re-import the .dnk) to include {pronoun}.",
-              scopeNote: "this observed team's imported files.",
-            }}
+            clipGrouping={observationClipGrouping}
+            topContent={<ObservationPlayerStrip players={scoutingPlayers} off={off} def={def} isCoach={isCoach} categories={currentObservationTagCategories()} clipGrouping={observationClipGrouping} teamName={selected} />}
           />
         </div>
       )}
