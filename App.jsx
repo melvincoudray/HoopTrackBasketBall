@@ -316,6 +316,18 @@ function teamRank(byPlayer, statLabel, playerFirst) {
   return { rank: idx + 1, total: entries.length };
 }
 
+// Classement dans l'équipe pour une valeur CALCULÉE (pas une simple colonne du fichier) :
+// getVal(b) renvoie la valeur du joueur à partir de son bloc box score (ou undefined).
+function teamRankBy(byPlayer, getVal, playerName) {
+  const entries = Object.entries(byPlayer)
+    .map(([name, b]) => ({ name, val: getVal(b) }))
+    .filter(e => e.val !== undefined && e.val !== null && !Number.isNaN(e.val))
+    .sort((a, b) => b.val - a.val);
+  const idx = entries.findIndex(e => e.name === playerName);
+  if (idx === -1) return null;
+  return { rank: idx + 1, total: entries.length };
+}
+
 function fileToResizedDataURL(file, maxDim = 320, quality = 0.82) {
   return new Promise((resolve, reject) => {
     const img = new Image();
@@ -2579,6 +2591,15 @@ function buildFixedBoxScorePlayerTiles(box, allBox, playerName) {
     if (m === undefined && ms === undefined) return undefined;
     return (m || 0) + (ms || 0);
   }
+  // Même calcul, mais pour chaque joueur de l'équipe — sert au classement (demandé par
+  // l'utilisateur : ces encadrés n'affichaient pas "#N of M team").
+  const attOf = (b, madeLabel, missedLabel) => {
+    const m = madeLabel !== undefined ? b.averages[madeLabel] : undefined;
+    const ms = missedLabel !== undefined ? b.averages[missedLabel] : undefined;
+    if (m === undefined && ms === undefined) return undefined;
+    return (m || 0) + (ms || 0);
+  };
+  const rankSub = (getVal) => { const r = teamRankBy(allBox.byPlayer, getVal, playerName); return r ? `#${r.rank} of ${r.total} team` : null; };
   const att2 = attemptedAvg(made2Label, missed2Label);
   const att3 = attemptedAvg(made3Label, missed3Label);
   const attFT = attemptedAvg(madeFTLabel, missedFTLabel);
@@ -2597,21 +2618,21 @@ function buildFixedBoxScorePlayerTiles(box, allBox, playerName) {
     { key: "stl", label: "Steals", value: fmt(stlLabel), sub: subFor(stlLabel), tone: "teal" },
     { key: "blk", label: "Blocks", value: fmt(blkLabel), sub: subFor(blkLabel), tone: "teal" },
     { key: "made2", label: "2Pts Made", value: fmt(made2Label), sub: subFor(made2Label), tone: "teal" },
-    { key: "att2", label: "2Pts Attempted", value: att2 !== undefined ? att2.toFixed(1) : "–", sub: "average / game", tone: "teal" },
+    { key: "att2", label: "2Pts Attempted", value: att2 !== undefined ? att2.toFixed(1) : "–", sub: rankSub(b => attOf(b, made2Label, missed2Label)) || "average / game", tone: "teal" },
     { key: "pct2", label: "% 2Pts", value: fmt(pct2Label), sub: subFor(pct2Label), tone: "teal" },
     { key: "made3", label: "3Pts Made", value: fmt(made3Label), sub: subFor(made3Label), tone: "teal" },
-    { key: "att3", label: "3Pts Attempted", value: att3 !== undefined ? att3.toFixed(1) : "–", sub: "average / game", tone: "teal" },
+    { key: "att3", label: "3Pts Attempted", value: att3 !== undefined ? att3.toFixed(1) : "–", sub: rankSub(b => attOf(b, made3Label, missed3Label)) || "average / game", tone: "teal" },
     { key: "pct3", label: "% 3Pts", value: fmt(pct3Label), sub: subFor(pct3Label), tone: "teal" },
     { key: "madeFT", label: "FT Made", value: fmt(madeFTLabel), sub: subFor(madeFTLabel), tone: "teal" },
-    { key: "attFT", label: "FT Attempted", value: attFT !== undefined ? attFT.toFixed(1) : "–", sub: "average / game", tone: "teal" },
+    { key: "attFT", label: "FT Attempted", value: attFT !== undefined ? attFT.toFixed(1) : "–", sub: rankSub(b => attOf(b, madeFTLabel, missedFTLabel)) || "average / game", tone: "teal" },
     { key: "pctFT", label: "% FT", value: fmt(pctFTLabel), sub: subFor(pctFTLabel), tone: "teal" },
     { key: "eff", label: "Eff", value: fmt(effLabel), sub: subFor(effLabel), tone: "amber" },
     { key: "plusMinus", label: "+/-", value: plusMinusVal !== undefined && plusMinusVal !== null ? (plusMinusVal > 0 ? "+" : "") + plusMinusVal.toFixed(1) : "–", sub: subFor(plusMinusLabel), tone: "teal" },
     { key: "fd", label: "FD", value: fmt(foulsDrawnLabel), sub: subFor(foulsDrawnLabel), tone: "teal" },
     { key: "pf", label: "PF", value: fmt(foulsLabel), sub: subFor(foulsLabel), tone: "red" },
-    { key: "theoPoss", label: "Theoretical Possessions", value: theoreticalPoss !== undefined && theoreticalPoss !== null ? theoreticalPoss.toFixed(1) : "–", sub: minutesLabel !== undefined ? "based on team possessions & playing time" : "requires playing time", tone: "teal" },
-    { key: "usage", label: "% Usage", value: usagePct !== undefined && usagePct !== null ? usagePct.toFixed(1) + "%" : "–", sub: minutesLabel !== undefined ? "possessions ended / possessions played" : "requires playing time", tone: "red" },
-    { key: "gp", label: "Games played", value: String(box.entries.length), sub: "games he actually played in (box score)", tone: "amber" },
+    { key: "theoPoss", label: "Theoretical Possessions", value: theoreticalPoss !== undefined && theoreticalPoss !== null ? theoreticalPoss.toFixed(1) : "–", sub: (minutesLabel !== undefined && rankSub(b => b.averages["Theoretical possessions"])) || (minutesLabel !== undefined ? "based on team possessions & playing time" : "requires playing time"), tone: "teal" },
+    { key: "usage", label: "% Usage", value: usagePct !== undefined && usagePct !== null ? usagePct.toFixed(1) + "%" : "–", sub: (minutesLabel !== undefined && rankSub(b => b.averages["Usage%"])) || (minutesLabel !== undefined ? "possessions ended / possessions played" : "requires playing time"), tone: "red" },
+    { key: "gp", label: "Games played", value: String(box.entries.length), sub: rankSub(b => b.entries.length) || "games he actually played in (box score)", tone: "amber" },
   ];
 }
 
@@ -9610,6 +9631,21 @@ function ScoutingLayoutEditor({ player, layout, onSave, onResetShape, onClose, b
   useEffect(() => setDraft(layout), [layout]);
   const [selected, setSelected] = useState("photo");
   const dirty = JSON.stringify(draft) !== JSON.stringify(layout);
+  // Demandé par l'utilisateur : l'aperçu était coupé (la carte se dimensionnait sur une largeur
+  // fixe, plus grande que la colonne d'aperçu). On mesure donc la largeur RÉELLE de la colonne
+  // et la carte s'y ajuste, pour toujours voir le visuel en entier pendant le réglage.
+  const previewRef = useRef(null);
+  const [previewW, setPreviewW] = useState(0);
+  useEffect(() => {
+    const el = previewRef.current;
+    if (!el) return;
+    const measure = () => setPreviewW(el.clientWidth);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   function update(key, field, value) {
     const n = Math.max(0, Number(value) || 0);
@@ -9628,8 +9664,8 @@ function ScoutingLayoutEditor({ player, layout, onSave, onResetShape, onClose, b
         </div>
 
         <div style={{ display: "flex", gap: 24, flexWrap: "wrap" }}>
-          <div style={{ flex: "1 1 400px", minWidth: 320 }}>
-            <ScoutingPlayerCard player={player} isCoach={false} bgPhoto={bgPhoto} bgDarkness={bgDarkness} bgStretch={bgStretch} teamLogo={teamLogo} layout={draft} onEdit={() => {}} onDelete={() => {}} />
+          <div style={{ flex: "1 1 400px", minWidth: 320 }} ref={previewRef}>
+            <ScoutingPlayerCard player={player} isCoach={false} bgPhoto={bgPhoto} bgDarkness={bgDarkness} bgStretch={bgStretch} teamLogo={teamLogo} layout={draft} onEdit={() => {}} onDelete={() => {}} fitWidthPx={previewW || undefined} />
           </div>
 
           <div style={{ flex: "1 1 320px", minWidth: 280 }}>
@@ -9674,7 +9710,7 @@ function ScoutingLayoutEditor({ player, layout, onSave, onResetShape, onClose, b
   );
 }
 
-function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, teamLogo, onEdit, onDelete, printMode, onMoveUp, onMoveDown, isFirst, isLast, chartScale, layout, onEditLayout }) {
+function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, teamLogo, onEdit, onDelete, printMode, onMoveUp, onMoveDown, isFirst, isLast, chartScale, layout, onEditLayout, fitWidthPx }) {
   const [confirmDelete, setConfirmDelete] = useState(false);
   // 0 = aucun voile (photo visible à 100%), 100 = fond entièrement noir (photo invisible).
   const darkness = Math.max(0, Math.min(100, bgDarkness ?? 70)) / 100;
@@ -9691,7 +9727,7 @@ function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, t
   // l'export, pour tenir à 2 joueurs par page A4 portrait — 380px, déjà vérifié ; responsive à
   // l'écran, via une largeur CSS à 100%).
   const L = layout || DEFAULT_SCOUTING_LAYOUT;
-  const cardWidthPx = printMode ? 720 : Math.round(640 * Math.max(0.75, Math.min(1.8, chartScale ?? 1)) * (SCOUTING_LAYOUT_REF_W / 500));
+  const cardWidthPx = printMode ? 720 : fitWidthPx ? Math.round(fitWidthPx) : Math.round(640 * Math.max(0.75, Math.min(1.8, chartScale ?? 1)) * (SCOUTING_LAYOUT_REF_W / 500));
   const scaleFactor = cardWidthPx / SCOUTING_LAYOUT_REF_W; // pour mettre à l'échelle les tailles de police et la roue
   // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "Game Plan" coupait la 3ᵉ ligne dès que le
   // texte dépassait la hauteur fixe prévue) : demandé — que la carte s'adapte réellement, au
