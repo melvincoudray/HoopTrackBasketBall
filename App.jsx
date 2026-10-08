@@ -1208,6 +1208,14 @@ function SecondaryTagPickerModal({ name, side, category, cats, onConfirm, onClos
 // Observation n'ont pas de matchId/date/adversaire (une équipe observée peut combiner plusieurs
 // fichiers sans qu'on connaisse la date de chacun) — on regroupe alors par "importId" (un
 // fichier = un lot), avec le nom de fichier comme libellé.
+// Demandé par l'utilisateur : ne pas avoir à redonner les mêmes vidéos de match à chaque
+// ouverture de la fenêtre de clips (autre joueur, autre action, même match). On garde en mémoire
+// (le temps que le site reste ouvert) la RÉFÉRENCE vers chaque fichier choisi — pas une copie :
+// aucun espace disque ni mémoire en plus, quelle que soit la taille de la vidéo. Clé = type de
+// lot + identifiant du match (ou du fichier importé en Observation), donc partagée entre Player,
+// Team et Scouting. Rien n'est envoyé nulle part, et tout disparaît au rechargement de la page.
+const CLIP_VIDEO_CACHE = new Map();
+
 function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
   const keyOf = grouping?.keyOf || (p => p.matchId);
   const labelOf = grouping?.labelOf || (p => `${p.date} vs ${p.opponent}`);
@@ -1234,7 +1242,10 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
   const missingTimestampGroups = groups.filter(g => g.clips.length === 0);
   const totalClips = readyGroups.reduce((s, g) => s + g.clips.length, 0);
 
-  const [files, setFiles] = useState({}); // key -> File
+  const [files, setFiles] = useState({}); // key -> File (choisi ici) ; null = retiré volontairement
+  const cacheKeyOf = (k) => noun + "::" + k;
+  // Fichier effectif d'un lot : celui choisi dans cette fenêtre, sinon celui mémorisé plus tôt.
+  const fileOf = (k) => (files[k] !== undefined ? files[k] : CLIP_VIDEO_CACHE.get(cacheKeyOf(k)));
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState("");
   const [error, setError] = useState("");
@@ -1286,7 +1297,7 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
   // Demandé par l'utilisateur : inutile de fournir TOUTES les vidéos demandées — si le site en
   // réclame trois et qu'on n'en ajoute qu'une, seuls les clips de ce match sont générés (les
   // autres lots sont simplement ignorés). Le numéro affiché (n) reste celui de la liste.
-  const selectedGroups = readyGroups.map((g, i) => ({ g, n: i + 1 })).filter(x => files[x.g.key]);
+  const selectedGroups = readyGroups.map((g, i) => ({ g, n: i + 1 })).filter(x => fileOf(x.g.key));
   const selectedClips = selectedGroups.reduce((s, x) => s + x.g.clips.length, 0);
   const canGenerate = selectedGroups.length > 0;
   const generateLabel = canGenerate ? `View the clips (${selectedClips} clip${selectedClips !== 1 ? "s" : ""})` : "Add at least one video above";
@@ -1304,7 +1315,7 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
         let clipIdx = 0;
         for (let gi = 0; gi < selectedGroups.length; gi++) {
           const { g, n } = selectedGroups[gi];
-          const file = files[g.key];
+          const file = fileOf(g.key);
           setProgress(`Reading video ${gi + 1}/${selectedGroups.length} (${noun} ${n})…`);
           const videoMount = await mountVideoForFfmpeg(ffmpeg, file, gi);
           for (let ci = 0; ci < g.clips.length; ci++) {
@@ -1330,7 +1341,7 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
         let clipIdx = 0;
         for (let gi = 0; gi < selectedGroups.length; gi++) {
           const { g, n } = selectedGroups[gi];
-          const file = files[g.key];
+          const file = fileOf(g.key);
           setProgress(`Reading video ${gi + 1}/${selectedGroups.length} (${noun} ${n})…`);
           const videoMount = await mountVideoForFfmpeg(ffmpeg, file, gi);
           for (let ci = 0; ci < g.clips.length; ci++) {
@@ -1349,10 +1360,25 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
         }
         setProgress("Assembling the montage…");
         await ffmpeg.writeFile("concat.txt", concatLines.join("\n"));
-        const concatArgs = cutMode === "fast"
-          ? ["-f", "concat", "-safe", "0", "-i", "concat.txt", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", "output.mp4"]
-          : ["-f", "concat", "-safe", "0", "-i", "concat.txt", "-c", "copy", "output.mp4"];
-        await ffmpeg.exec(concatArgs);
+        // Demandé par l'utilisateur ("Fast cut" n'était pas du tout rapide) : l'assemblage
+        // ré-encodait TOUT le montage (x264 en WebAssembly, plusieurs minutes pour 46 clips). Les
+        // clips étant déjà coupés par copie, on les assemble désormais par simple copie aussi —
+        // quasi instantané. Si la copie échoue (clips de formats incompatibles entre vidéos),
+        // on retombe sur l'ancien ré-encodage, plus lent mais toujours fonctionnel.
+        let assembled = false;
+        try {
+          const code = await ffmpeg.exec(["-f", "concat", "-safe", "0", "-i", "concat.txt", "-c", "copy", "output.mp4"]);
+          if (runId !== runIdRef.current) return;
+          if (code === 0) { await ffmpeg.readFile("output.mp4"); assembled = true; }
+        } catch (e) {
+          if (runId !== runIdRef.current) return;
+        }
+        if (!assembled) {
+          if (cutMode !== "fast") throw new Error("Could not assemble the clips.");
+          setProgress("These videos have different formats — re-encoding the montage, this can take a few minutes…");
+          try { await ffmpeg.deleteFile("output.mp4"); } catch (e) {}
+          await ffmpeg.exec(["-f", "concat", "-safe", "0", "-i", "concat.txt", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", "output.mp4"]);
+        }
         const data = await ffmpeg.readFile("output.mp4");
         const blob = new Blob([data.buffer], { type: "video/mp4" });
         const url = URL.createObjectURL(blob);
@@ -1390,7 +1416,7 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
         </div>
         <p style={{ fontSize: 12.5, color: "#8B93A1", lineHeight: 1.6, margin: "8px 0 16px" }}>
           {totalClips} clip{totalClips !== 1 ? "s" : ""} found across {readyGroups.length} {pluralizeNoun(noun, readyGroups.length).toLowerCase()} ({scopeNote})
-          Insert the videos you have — you don't need all of them: only the ones you add are cut. Nothing is uploaded, everything is cut directly in your browser, purely for viewing.
+          Insert the videos you have — you don't need all of them: only the ones you add are cut. Videos you add are remembered until you close or reload the site, so you won't have to add them again. Nothing is uploaded, everything is cut directly in your browser, purely for viewing.
         </p>
 
         <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
@@ -1437,9 +1463,20 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
                 </div>
                 <input type="file" accept="video/*" disabled={busy} onChange={e => {
                   const f = e.target.files[0];
+                  if (f) CLIP_VIDEO_CACHE.set(cacheKeyOf(g.key), f);
                   setFiles(prev => ({ ...prev, [g.key]: f }));
                 }} style={{ color: "#8B93A1", fontSize: 12.5 }} />
-                {files[g.key] && <span style={{ fontSize: 11.5, color: TEAL }}>✓ {files[g.key].name}</span>}
+                {fileOf(g.key) && (
+                  <span style={{ fontSize: 11.5, color: TEAL }}>
+                    ✓ {fileOf(g.key).name}{files[g.key] === undefined ? " (remembered)" : ""}
+                    {!busy && (
+                      <button onClick={() => { CLIP_VIDEO_CACHE.delete(cacheKeyOf(g.key)); setFiles(prev => ({ ...prev, [g.key]: null })); }}
+                        style={{ marginLeft: 8, background: "none", border: "none", color: "#8B93A1", textDecoration: "underline", cursor: "pointer", fontSize: 11.5, fontFamily: "inherit", padding: 0 }}>
+                        Remove
+                      </button>
+                    )}
+                  </span>
+                )}
               </div>
             ))}
           </div>
