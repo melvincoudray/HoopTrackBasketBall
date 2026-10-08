@@ -1068,6 +1068,74 @@ async function parseDnkCodingFile(arrayBuffer, cats, unknownColumnDefault = "pla
   }
 }
 
+// Demandé par l'utilisateur : lire aussi les fichiers ".SCTimeline" (autre logiciel de tagging).
+// C'est un fichier JSON : deux lignes (Offense / Defense) contenant chacune des "instances"
+// (une action = un début, une fin, et des labels { group, name }). On le traduit EXACTEMENT dans
+// le même format de sortie que parseDnkCodingFile (même contrat), pour que tout le reste du
+// site — stats, joueurs, clips — fonctionne sans aucun changement.
+function parseSCTimelineCodingFile(parsedJson, cats, unknownColumnDefault = "player") {
+  const timeline = parsedJson && parsedJson.timeline;
+  if (!timeline || !Array.isArray(timeline.rows)) throw new Error("Unrecognized coding file (no timeline found).");
+  const knownPlayers = knownPlayersSet(cats);
+  const knownTags = allKnownTagsSet(cats);
+  const unconfirmedTagsSet = new Set();
+
+  const entries = [];
+  for (const row of timeline.rows) {
+    for (const inst of (row.instances || [])) entries.push({ button: row.name || "", inst });
+  }
+  if (!entries.length) throw new Error("This coding file contains no coded action yet.");
+  entries.sort((a, b) => (a.inst.startTime ?? 0) - (b.inst.startTime ?? 0));
+
+  const plays = entries.flatMap(({ button, inst }) => {
+    const tags = {};
+    const flaggedPlayers = [];
+    for (const label of (inst.labels || [])) {
+      const name = String(label.name ?? "").trim();
+      if (!name) continue;
+      const norm = normTag(name);
+      // Même règle que le .dnk : joueur si le groupe est "Player(s)", ou si le nom correspond
+      // déjà à un joueur connu dans Settings.
+      if (/^players?$/i.test(String(label.group || "").trim()) || knownPlayers.has(norm)) { flaggedPlayers.push(name); continue; }
+      tags[name] = 1;
+      if (!knownTags.has(norm) && unknownColumnDefault === "tag") unconfirmedTagsSet.add(name);
+    }
+    const base = { category: "Possession", button: String(button), tags, timestampStart: inst.startTime, timestampEnd: inst.endTime };
+    if (flaggedPlayers.length === 0) return [{ ...base, player: null }];
+    return flaggedPlayers.map(player => ({ ...base, player }));
+  });
+
+  const detectedPlayers = [...new Set(plays.map(p => p.player).filter(Boolean))];
+  const unconfirmedPlayers = detectedPlayers.filter(p => !knownPlayers.has(normTag(p)));
+  const pathHint = timeline.packagePath ? String(timeline.packagePath) : null;
+  return {
+    sheetName: pathHint ? pathHint.split(/[\\/]/).pop() : "SCTimeline project",
+    columnsDetected: (timeline.labels || []).length,
+    boundaryColumn: null,
+    totalRows: entries.length,
+    playsWithPlayer: plays.length,
+    detectedPlayers,
+    unconfirmedPlayers,
+    unconfirmedTags: [...unconfirmedTagsSet],
+    plays,
+    videoPathHint: pathHint,
+  };
+}
+
+// Point d'entrée unique pour tous les imports de codage : reconnaît le type de fichier d'après
+// son CONTENU (une base SQLite commence par "SQLite format 3"), pas d'après son extension.
+async function parseCodingFile(arrayBuffer, cats, unknownColumnDefault = "player") {
+  const head = new Uint8Array(arrayBuffer, 0, Math.min(15, arrayBuffer.byteLength));
+  const isSqlite = String.fromCharCode(...head) === "SQLite format 3";
+  if (isSqlite) return parseDnkCodingFile(arrayBuffer, cats, unknownColumnDefault);
+  let json = null;
+  try {
+    json = JSON.parse(new TextDecoder("utf-8").decode(arrayBuffer).replace(/^\uFEFF/, ""));
+  } catch (e) { /* pas du JSON non plus */ }
+  if (json && json.timeline) return parseSCTimelineCodingFile(json, cats, unknownColumnDefault);
+  throw new Error("Unrecognized coding file (expected a .dnk project or a .SCTimeline file).");
+}
+
 // ---------------------------------------------------------------------------
 // Découpage vidéo côté client (ffmpeg.wasm) — demandé par l'utilisateur : depuis Team > Team
 // Play, cliquer sur un Play (ex. "One Up") doit permettre d'insérer la vidéo de chaque match
@@ -1671,7 +1739,9 @@ function shootingSelection(plays, cats) {
   ].filter(d => d.value > 0);
 }
 
-function normTag(s) { return String(s).toLowerCase().replace(/[\s\-_]/g, ""); }
+// Demandé par l'utilisateur : le site ne tient PAS compte des accents ("Clément" = "Clement"),
+// car un même joueur peut être écrit avec ou sans accent d'un fichier de codage à l'autre.
+function normTag(s) { return String(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[\s\-_]/g, ""); }
 
 function tagIsSet(tags, canonicalLabel) {
   const norm = normTag(canonicalLabel);
@@ -6069,7 +6139,7 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatc
     try {
       await syncPlayerCategoryFromRoster(roster);
       const buf = await file.arrayBuffer();
-      const parsed = await parseDnkCodingFile(buf);
+      const parsed = await parseCodingFile(buf);
       if (!parsed.plays.length) throw new Error("No action attributed to a roster player was found.");
       const fileDataUrl = await new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -6099,7 +6169,7 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatc
     try {
       await syncPlayerCategoryFromRoster(roster);
       const buf = await file.arrayBuffer();
-      const parsed = await parseDnkCodingFile(buf);
+      const parsed = await parseCodingFile(buf);
       if (!parsed.plays.length) throw new Error("No action attributed to a roster player was found.");
       // Garde une copie du fichier original en base64, pour pouvoir le rouvrir plus tard —
       // taille raisonnable pour un projet .dnk (quelques centaines de Ko en général).
@@ -6141,7 +6211,7 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatc
       <SectionTitle eyebrow="01 — Raw data" title="Import a match" />
       <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 22, marginBottom: 24 }}>
         <p style={{ color: "#8B93A1", fontSize: 13.5, lineHeight: 1.6, margin: "0 0 16px" }}>
-          Drop the coding project file (<b>.dnk</b>) exported by the tagging software.
+          Drop the coding project file (<b>.dnk</b> or <b>.SCTimeline</b>) exported by the tagging software.
           Players, tags and timestamps are read directly from the project.
         </p>
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 14 }}>
@@ -6158,7 +6228,7 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatc
             <MatchTypeSelect value={matchType} onChange={setMatchType} />
           </div>
         </div>
-        <input ref={fileRef} type="file" accept=".dnk" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
+        <input ref={fileRef} type="file" accept=".dnk,.sctimeline,.SCTimeline" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
         {fileErr && <div style={{ color: RED, fontSize: 13, marginTop: 10 }}>{fileErr}</div>}
 
         {preview && (
@@ -6207,9 +6277,9 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatc
                     <button onClick={() => setEditingId(null)} style={{ padding: "6px 14px", background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>Cancel</button>
                   </div>
                   <div style={{ borderTop: `1px solid ${LINE}`, paddingTop: 10, marginTop: 2 }}>
-                    <label style={labelStyle}>Replace coding file (.dnk)</label>
+                    <label style={labelStyle}>Replace coding file (.dnk / .SCTimeline)</label>
                     <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                      <input type="file" accept=".dnk" onChange={e => handleReplaceFile(e, m.id)} style={{ color: "#8B93A1", fontSize: 13 }} />
+                      <input type="file" accept=".dnk,.sctimeline,.SCTimeline" onChange={e => handleReplaceFile(e, m.id)} style={{ color: "#8B93A1", fontSize: 13 }} />
                       {replaceBusy && <span style={{ fontSize: 11.5, color: TEAL }}>Importing…</span>}
                       {replaceSuccessCount !== null && <span style={{ fontSize: 11.5, color: TEAL }}>✓ Replaced — {replaceSuccessCount} actions now coded.</span>}
                     </div>
@@ -10719,7 +10789,7 @@ function ObservationTeamPanel({ teamName, team, isCoach, onChangeTeam }) {
     setReplaceErr(""); setReplaceSuccessCount(null); setReplaceBusy(true);
     try {
       const buf = await file.arrayBuffer();
-      const parsed = await parseDnkCodingFile(buf, currentObservationTagCategories(), "tag");
+      const parsed = await parseCodingFile(buf, currentObservationTagCategories(), "tag");
       if (!parsed.plays.length) throw new Error("No action attributed to a player was found.");
       const taggedPlays = parsed.plays.map(p => ({ ...p, importId }));
       await onChangeTeam({
@@ -10771,9 +10841,9 @@ function ObservationTeamPanel({ teamName, team, isCoach, onChangeTeam }) {
               </div>
               {isCoach && replacingImportId === imp.id && (
                 <div style={{ marginTop: 10, paddingTop: 10, borderTop: `1px dashed ${LINE}` }}>
-                  <label style={labelStyle}>Replace with a new .dnk file</label>
+                  <label style={labelStyle}>Replace with a new .dnk / .SCTimeline file</label>
                   <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-                    <input type="file" accept=".dnk" onChange={e => handleReplaceImportFile(e, imp.id)} style={{ color: "#8B93A1", fontSize: 13 }} />
+                    <input type="file" accept=".dnk,.sctimeline,.SCTimeline" onChange={e => handleReplaceImportFile(e, imp.id)} style={{ color: "#8B93A1", fontSize: 13 }} />
                     {replaceBusy && <span style={{ fontSize: 11.5, color: TEAL }}>Importing…</span>}
                     {replaceSuccessCount !== null && <span style={{ fontSize: 11.5, color: TEAL }}>✓ Replaced — {replaceSuccessCount} actions now coded.</span>}
                   </div>
@@ -10826,7 +10896,7 @@ function ObservationTab({ isCoach }) {
     setFileErr(""); setPreview(null);
     try {
       const buf = await file.arrayBuffer();
-      const parsed = await parseDnkCodingFile(buf, currentObservationTagCategories(), "tag");
+      const parsed = await parseCodingFile(buf, currentObservationTagCategories(), "tag");
       if (!parsed.plays.length) throw new Error("No action attributed to a player was found.");
       setPreview({ ...parsed, fileName: file.name });
     } catch (err) { setFileErr(err.message || "Error reading the file."); }
@@ -10887,7 +10957,7 @@ function ObservationTab({ isCoach }) {
       {isCoach && (
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 22, marginBottom: 24 }}>
           <p style={{ color: "#8B93A1", fontSize: 13.5, lineHeight: 1.6, margin: "0 0 16px" }}>
-            Import a coding project (<b>.dnk</b>, same format as Import Match) for an opponent team you've scouted. The app breaks
+            Import a coding project (<b>.dnk</b> or <b>.SCTimeline</b>, same format as Import Match) for an opponent team you've scouted. The app breaks
             down their tendencies by frequency and efficiency — plays, playtypes, screen defense, defense type, and
             any other category configured in <b>Settings</b>.
           </p>
@@ -10903,7 +10973,7 @@ function ObservationTab({ isCoach }) {
               </div>
             )}
           </div>
-          <input ref={fileRef} type="file" accept=".dnk" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
+          <input ref={fileRef} type="file" accept=".dnk,.sctimeline,.SCTimeline" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
           {fileErr && <div style={{ color: RED, fontSize: 13, marginTop: 10 }}>{fileErr}</div>}
 
           {preview && (
