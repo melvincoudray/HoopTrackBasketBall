@@ -1122,12 +1122,98 @@ function parseSCTimelineCodingFile(parsedJson, cats, unknownColumnDefault = "pla
   };
 }
 
+// Demandé par l'utilisateur : un même tag peut être écrit différemment d'un logiciel de tagging à
+// l'autre (ex. "Top 1 Man Back" / "Top Pick 1 Man Back"). L'onglet Backup permet de déclarer des
+// équivalences (variante → nom à conserver), enregistrées sous "tag_aliases". Elles sont
+// appliquées automatiquement à chaque import de codage, et peuvent aussi être appliquées d'un
+// coup aux données DÉJÀ importées (matchs + scouting observation).
+async function loadTagAliases() {
+  try {
+    const v = await storeGet("tag_aliases");
+    return Array.isArray(v) ? v.filter(a => a && a.from && a.to) : [];
+  } catch (e) { return []; }
+}
+function buildTagAliasMap(list) {
+  const m = new Map();
+  for (const a of (list || [])) {
+    const from = normTag(a.from), to = String(a.to).trim();
+    if (from && to && from !== normTag(to)) m.set(from, to);
+  }
+  return m;
+}
+// Résout les chaînes éventuelles (A→B puis B→C) sans jamais boucler.
+function resolveTagAlias(name, map) {
+  let cur = name, hops = 0;
+  while (map.has(normTag(cur)) && hops < 6) { cur = map.get(normTag(cur)); hops++; }
+  return cur;
+}
+function applyTagAliasesToTags(tags, map) {
+  if (!tags || !map.size) return { tags, changed: false };
+  let changed = false;
+  const out = {};
+  for (const [k, v] of Object.entries(tags)) {
+    const target = resolveTagAlias(k, map);
+    if (target !== k) changed = true;
+    out[target] = v;
+  }
+  return { tags: out, changed };
+}
+function applyTagAliasesToPlays(plays, map) {
+  let changedCount = 0;
+  const next = (plays || []).map(p => {
+    const r = applyTagAliasesToTags(p.tags, map);
+    if (!r.changed) return p;
+    changedCount++;
+    return { ...p, tags: r.tags };
+  });
+  return { plays: next, changedCount };
+}
+// Applique les équivalences à tout ce qui est déjà enregistré : matchs codés et scouting
+// observation (toutes les équipes). Renvoie le nombre d'actions modifiées.
+async function applyTagAliasesToExistingData(list) {
+  const map = buildTagAliasMap(list);
+  if (!map.size) return { matches: 0, observations: 0 };
+  let matches = 0, observations = 0;
+  const matchIdx = (await storeGet("match_index")) || [];
+  for (const m of matchIdx) {
+    const data = await storeGet("match:" + m.id);
+    if (!data || !Array.isArray(data.plays)) continue;
+    const r = applyTagAliasesToPlays(data.plays, map);
+    if (r.changedCount > 0) { await storeSet("match:" + m.id, { ...data, plays: r.plays }); matches += r.changedCount; }
+  }
+  const allObserved = (await storeGet("scouting_observations")) || {};
+  let obsChanged = false;
+  const nextObserved = { ...allObserved };
+  for (const [teamName, team] of Object.entries(allObserved)) {
+    if (!team || !Array.isArray(team.plays)) continue;
+    const r = applyTagAliasesToPlays(team.plays, map);
+    if (r.changedCount > 0) { nextObserved[teamName] = { ...team, plays: r.plays }; observations += r.changedCount; obsChanged = true; }
+  }
+  if (obsChanged) await storeSet("scouting_observations", nextObserved);
+  return { matches, observations };
+}
+
 // Point d'entrée unique pour tous les imports de codage : reconnaît le type de fichier d'après
 // son CONTENU (une base SQLite commence par "SQLite format 3"), pas d'après son extension.
 async function parseCodingFile(arrayBuffer, cats, unknownColumnDefault = "player") {
   const head = new Uint8Array(arrayBuffer, 0, Math.min(15, arrayBuffer.byteLength));
   const isSqlite = String.fromCharCode(...head) === "SQLite format 3";
-  if (isSqlite) return parseDnkCodingFile(arrayBuffer, cats, unknownColumnDefault);
+  let parsed = null;
+  if (isSqlite) parsed = await parseDnkCodingFile(arrayBuffer, cats, unknownColumnDefault);
+  else parsed = await parseTextCodingFile(arrayBuffer, cats, unknownColumnDefault);
+  // Équivalences de tags déclarées dans Backup : appliquées dès l'import.
+  const aliasMap = buildTagAliasMap(await loadTagAliases());
+  if (aliasMap.size) {
+    parsed.plays = applyTagAliasesToPlays(parsed.plays, aliasMap).plays;
+    if (Array.isArray(parsed.unconfirmedTags)) {
+      const known = allKnownTagsSet(cats);
+      parsed.unconfirmedTags = [...new Set(parsed.unconfirmedTags.map(t => resolveTagAlias(t, aliasMap)))].filter(t => !known.has(normTag(t)));
+    }
+  }
+  return parsed;
+}
+
+async function parseTextCodingFile(arrayBuffer, cats, unknownColumnDefault = "player") {
   let json = null;
   try {
     json = JSON.parse(new TextDecoder("utf-8").decode(arrayBuffer).replace(/^\uFEFF/, ""));
@@ -11814,6 +11900,85 @@ async function migratePlayerRename(oldName, newName) {
   }
 }
 
+function TagAliasesCard() {
+  const [list, setList] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [fromText, setFromText] = useState("");
+  const [toText, setToText] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => { loadTagAliases().then(l => { setList(l); setLoaded(true); }); }, []);
+
+  async function persist(next) {
+    setList(next);
+    await storeSet("tag_aliases", next);
+  }
+  async function add() {
+    setError(""); setStatus("");
+    const from = fromText.trim(), to = toText.trim();
+    if (!from || !to) { setError("Fill in both fields."); return; }
+    if (normTag(from) === normTag(to)) { setError("These two names are already treated as the same."); return; }
+    if (list.some(a => normTag(a.from) === normTag(from))) { setError("This variant already has an equivalence."); return; }
+    await persist([...list, { from, to }]);
+    setFromText(""); setToText("");
+    setStatus("Saved. It will apply to every future import — use the button below to apply it to what's already imported.");
+  }
+  async function remove(i) {
+    setError(""); setStatus("");
+    await persist(list.filter((_, idx) => idx !== i));
+  }
+  async function applyNow() {
+    setBusy(true); setError(""); setStatus("");
+    try {
+      const r = await applyTagAliasesToExistingData(list);
+      setStatus(r.matches + r.observations > 0
+        ? `Done — ${r.matches} action(s) updated in your matches, ${r.observations} in Scouting Observation. Reload the page to see the merged stats.`
+        : "Nothing to merge — no imported action uses these variants.");
+    } catch (err) { setError("Failed: " + (err.message || "unknown error")); }
+    setBusy(false);
+  }
+
+  return (
+    <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 22, marginBottom: 20 }}>
+      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>Tag equivalences</div>
+      <p style={{ color: "#8B93A1", fontSize: 13, lineHeight: 1.6, margin: "0 0 16px" }}>
+        Some tagging software writes the same tag differently (for example <b>Top Pick 1 Man Back</b> and <b>Top 1 Man Back</b>).
+        Declare it here: the variant is renamed to the name you keep, on every future import and, with the button below,
+        on everything already imported. Capital letters, accents, spaces and dashes are already ignored.
+      </p>
+
+      {loaded && list.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
+          {list.map((a, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, fontSize: 13 }}>
+              <span style={{ color: "#D8DCE2" }}>{a.from}</span>
+              <span style={{ color: "#5C6470" }}>→</span>
+              <span style={{ color: TEAL, fontWeight: 600, flex: 1 }}>{a.to}</span>
+              <button onClick={() => remove(i)} title="Remove" style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", display: "flex" }}><Trash2 size={14} /></button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
+        <input value={fromText} onChange={e => setFromText(e.target.value)} placeholder="Variant to rename (e.g. Top Pick 1 Man Back)" style={{ ...inputStyle, letterSpacing: "normal", flex: "1 1 220px", minWidth: 180 }} />
+        <span style={{ color: "#5C6470" }}>→</span>
+        <input value={toText} onChange={e => setToText(e.target.value)} placeholder="Name to keep (e.g. Top 1 Man Back)" style={{ ...inputStyle, letterSpacing: "normal", flex: "1 1 220px", minWidth: 180 }} />
+        <button onClick={add} style={btnSecondary}>Add</button>
+      </div>
+
+      <button disabled={busy || list.length === 0} onClick={applyNow}
+        style={{ ...btnPrimary, width: "auto", padding: "10px 20px", opacity: (busy || list.length === 0) ? 0.5 : 1, cursor: (busy || list.length === 0) ? "default" : "pointer" }}>
+        {busy ? "Applying…" : "Apply to already imported data"}
+      </button>
+      {status && <div style={{ fontSize: 13, color: TEAL, marginTop: 10 }}>{status}</div>}
+      {error && <div style={{ fontSize: 13, color: RED, marginTop: 10 }}>{error}</div>}
+    </div>
+  );
+}
+
 function BackupTab({ team, roster }) {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
@@ -11911,6 +12076,8 @@ function BackupTab({ team, roster }) {
         </button>
         {migrateStatus && <div style={{ fontSize: 13, color: TEAL, marginTop: 10 }}>{migrateStatus}</div>}
       </div>
+
+      <TagAliasesCard />
 
       <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 22, marginBottom: 20 }}>
         <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>Export</div>
