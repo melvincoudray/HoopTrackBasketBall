@@ -10171,11 +10171,12 @@ const DRAW_TOOLS = [
   ["shoot", "Shoot", '<svg viewBox="0 0 22 14"><path d="M1 5.5 H14 M1 8.5 H14" stroke="currentColor" stroke-width="1.5"/><path d="M21 7 L13 2.5 L13 11.5z" fill="currentColor"/></svg>'],
   ["del", "Erase", '<svg viewBox="0 0 22 14"><path d="M5 3 H17 M8 3 V1 H14 V3 M7 3 L8 13 H14 L15 3" stroke="currentColor" stroke-width="1.4" fill="none"/></svg>'],
 ];
+const LINE_HINT = (w) => `Click to start ${w} (on a player to attach it), click again at each change of direction (rounded if “Curved” is on), double-click to finish. Esc cancels.`;
 const DRAW_HINTS = {
-  sel: "Drag a player or the ball. Click a line to select it, then drag its round handle to curve it (double-click the handle to straighten). Double-click an attacker to ring the ball handler.",
+  sel: "Drag a player or the ball. Click a line to select it, then drag its round handles to reshape it (double-click a handle to switch that bend between rounded and sharp). Double-click an attacker to ring the ball handler.",
   o: "Click the court to place the next attacker (1 to 5).", x: "Click the court to place a defender.", ball: "Click the court to place the ball.",
-  cut: "Drag from a player to where he cuts.", pass: "Drag from the passer to the receiver.", dribble: "Drag from the ball handler to where he dribbles.",
-  screen: "Drag from the screener toward the player he screens.", shoot: "Drag from the shooter toward the basket: a double line with one arrowhead means a shot.",
+  cut: LINE_HINT("the cut"), pass: LINE_HINT("the pass"), dribble: LINE_HINT("the dribble"),
+  screen: LINE_HINT("the screen"), shoot: LINE_HINT("the shot (double line, one arrowhead)"),
   del: "Click a player or a line to erase it.",
 };
 const DRAW_LINE_TOOLS = ["cut", "pass", "dribble", "screen", "shoot"];
@@ -10201,16 +10202,22 @@ function drawCourtSvg(p) {
     `<path d="M190 470 A60 60 0 0 1 310 470" fill="none" stroke="${l}" stroke-width="1.5"/>`;
 }
 
-// Géométrie des lignes : courbe de Bézier optionnelle (point milieu "m"), têtes de flèche calculées.
-function drawCtrl(a, m, b) { return { x: 2 * m.x - (a.x + b.x) / 2, y: 2 * m.y - (a.y + b.y) / 2 }; }
+// Géométrie des lignes : suite de points ; chaque point intermédiaire est soit un angle franc, soit
+// arrondi (c: true → courbe lisse qui passe par le point). Les anciennes lignes (a, b, m) sont lues telles quelles.
+function drawPts(l) { return l.pts ? l.pts : (l.m ? [l.a, { x: l.m.x, y: l.m.y, c: true }, l.b] : [l.a, l.b]); }
 function drawSamplePts(l) {
-  const a = l.a, b = l.b, N = 44, pts = [], c = l.m ? drawCtrl(a, l.m, b) : null;
-  for (let i = 0; i <= N; i++) {
-    const t = i / N;
-    if (c) { const u = 1 - t; pts.push({ x: u * u * a.x + 2 * u * t * c.x + t * t * b.x, y: u * u * a.y + 2 * u * t * c.y + t * t * b.y }); }
-    else pts.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+  const P = drawPts(l), n = P.length, out = [{ x: P[0].x, y: P[0].y }], STEPS = 24;
+  const seg = (i) => ({ x: P[i + 1].x - P[i].x, y: P[i + 1].y - P[i].y });
+  const tan = (i, fb) => (i > 0 && i < n - 1 && P[i].c) ? { x: (P[i + 1].x - P[i - 1].x) / 2, y: (P[i + 1].y - P[i - 1].y) / 2 } : fb;
+  for (let i = 0; i < n - 1; i++) {
+    const A = P[i], B = P[i + 1], sv = seg(i), m0 = tan(i, sv), m1 = tan(i + 1, sv);
+    for (let k = 1; k <= STEPS; k++) {
+      const t = k / STEPS, t2 = t * t, t3 = t2 * t;
+      const h00 = 2 * t3 - 3 * t2 + 1, h10 = t3 - 2 * t2 + t, h01 = -2 * t3 + 3 * t2, h11 = t3 - t2;
+      out.push({ x: h00 * A.x + h10 * m0.x + h01 * B.x + h11 * m1.x, y: h00 * A.y + h10 * m0.y + h01 * B.y + h11 * m1.y });
+    }
   }
-  return pts;
+  return out;
 }
 function drawCum(pts) { const s = [0]; for (let i = 1; i < pts.length; i++) s.push(s[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y)); return s; }
 function drawSlice(pts, s0, s1) {
@@ -10241,7 +10248,7 @@ function drawResample(pts, step) {
 function drawToPath(pts) { return pts.map((p, i) => (i ? "L" : "M") + drawF(p.x) + " " + drawF(p.y)).join(" "); }
 const DRAW_HEAD = 11, DRAW_HW = 5.6;
 function drawLineSvg(l, pal) {
-  const pts = drawSamplePts(l), L = drawCum(pts), tot = L[L.length - 1], n = pts.length, e = pts[n - 1], p = pts[n - 4];
+  const pts = drawSamplePts(l), L = drawCum(pts), tot = L[L.length - 1], n = pts.length, e = pts[n - 1], p = pts[Math.max(0, n - 4)];
   let ux = e.x - p.x, uy = e.y - p.y; const d = Math.hypot(ux, uy) || 1; ux /= d; uy /= d;
   const nx = -uy, ny = ux, start = l.from ? 13 : 0, col = pal.off;
   const head = (back) => {
@@ -10266,7 +10273,8 @@ function drawLineSvg(l, pal) {
   }
   return "";
 }
-function drawMidPt(l) { return l.m ? l.m : { x: (l.a.x + l.b.x) / 2, y: (l.a.y + l.b.y) / 2 }; }
+function drawNorm(l) { if (!l.pts) { l.pts = drawClone(drawPts(l)); delete l.a; delete l.b; delete l.m; } return l; }
+function drawLast(l) { const P = drawPts(l); return P[P.length - 1]; }
 function drawItemSvg(it, pal) {
   if (it.t === "o") {
     const R = pal.big ? 21 : 12, FS = pal.big ? 27 : 13, RH = pal.big ? 28 : 18;
@@ -10485,6 +10493,7 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
       if ((e.key === "Delete" || e.key === "Backspace") && S.sel >= 0 && S.lines[S.sel] && !/INPUT|TEXTAREA|SELECT/.test((document.activeElement || {}).tagName || "")) {
         snap(); S.lines.splice(S.sel, 1); S.sel = -1; redraw();
       }
+      if (e.key === "Escape" && S.draft) { S.draft = null; redraw(); }
     }
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
@@ -10500,7 +10509,26 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
   function lineDist(p, l) { const q = drawSamplePts(l); let m = 1e9; for (let i = 1; i < q.length; i++) m = Math.min(m, segDist(p, q[i - 1], q[i])); return m; }
   function hitLine(p) { for (let i = S.lines.length - 1; i >= 0; i--) { if (lineDist(p, S.lines[i]) < 9) return i; } return -1; }
   function nextNum() { const used = {}; S.items.forEach(i => { if (i.t === "o") used[i.n] = 1; }); for (let n = 1; n <= 5; n++) if (!used[n]) return n; return S.items.filter(i => i.t === "o").length + 1; }
-  function autoCurve(d) { const dx = d.b.x - d.a.x, dy = d.b.y - d.a.y, L = Math.hypot(dx, dy) || 1; d.m = { x: (d.a.x + d.b.x) / 2 - dy * 0.22, y: (d.a.y + d.b.y) / 2 + dx * 0.22 }; }
+  const HANDLE_R = 12;
+  function hitHandle(p) {
+    if (!(S.sel >= 0 && S.lines[S.sel])) return null;
+    const P = drawPts(S.lines[S.sel]);
+    for (let i = P.length - 1; i >= 0; i--) if (Math.hypot(P[i].x - p.x, P[i].y - p.y) < HANDLE_R) return { li: S.sel, pi: i };
+    return null;
+  }
+  function finishDraft(p) {
+    const d = S.draft; S.draft = null;
+    const P = d.pts.slice();
+    if (P.length > 1) P.pop(); // le 1er clic du double-clic a déjà ajouté un point : c'est la fin de la flèche
+    P.push({ x: p.x, y: p.y });
+    let len = 0; for (let i = 1; i < P.length; i++) len += Math.hypot(P[i].x - P[i - 1].x, P[i].y - P[i - 1].y);
+    if (P.length >= 2 && len > 18) {
+      snap();
+      S.lines.push({ kind: d.kind, from: d.from, pts: P.map((q, i) => (i > 0 && i < P.length - 1 && q.c) ? { x: q.x, y: q.y, c: true } : { x: q.x, y: q.y }) });
+      S.sel = S.lines.length - 1;
+    }
+    redraw();
+  }
 
   function onDown(e) {
     const p = pt(e), tool = S.tool;
@@ -10510,11 +10538,17 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
       S.items.push({ id: S.nid++, t: tool, x: p.x, y: p.y, n: tool === "o" ? nextNum() : "" }); redraw(); return;
     }
     if (DRAW_LINE_TOOLS.includes(tool)) {
+      const now = Date.now();
+      if (S.draft) {
+        const lt = S.lastDown;
+        if (lt && now - lt.t < 450 && Math.hypot(p.x - lt.x, p.y - lt.y) < 16) { finishDraft(p); S.lastDown = null; return; }
+        S.draft.pts.push({ x: p.x, y: p.y, c: S.curved }); S.cursor = p; S.lastDown = { t: now, x: p.x, y: p.y }; redraw(); return;
+      }
       const h = hitItem(p, 22), a = h ? { x: h.x, y: h.y } : p;
-      S.draft = { kind: tool, a, b: p, from: h ? h.id : null }; redraw(); return;
+      S.draft = { kind: tool, from: h ? h.id : null, pts: [{ x: a.x, y: a.y }] }; S.cursor = p; S.lastDown = { t: now, x: p.x, y: p.y }; redraw(); return;
     }
     if (tool === "sel") {
-      if (S.sel >= 0 && S.lines[S.sel]) { const m = drawMidPt(S.lines[S.sel]); if (Math.hypot(m.x - p.x, m.y - p.y) < 14) { snap(); S.dragH = S.sel; return; } }
+      const hh = hitHandle(p); if (hh) { snap(); S.dragH = hh; return; }
       const h2 = hitItem(p, 20); if (h2) { snap(); S.drag = h2.id; return; }
       S.sel = hitLine(p); redraw(); return;
     }
@@ -10527,24 +10561,21 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
   }
   function onMove(e) {
     const p = pt(e);
-    if (S.draft) { S.draft.b = p; if (S.curved) autoCurve(S.draft); redraw(); }
-    else if (S.dragH !== null) { S.lines[S.dragH].m = { x: p.x, y: p.y }; redraw(); }
+    if (S.draft) { S.cursor = p; redraw(); }
+    else if (S.dragH) {
+      const l = drawNorm(S.lines[S.dragH.li]), q = l.pts[S.dragH.pi];
+      q.x = p.x; q.y = p.y; if (S.dragH.pi === 0) l.from = null; redraw();
+    }
     else if (S.drag) {
       const it = S.items.find(i => i.id === S.drag);
-      if (it) { it.x = p.x; it.y = p.y; S.lines.forEach(l => { if (l.from === it.id) { l.a.x = it.x; l.a.y = it.y; } }); redraw(); }
+      if (it) { it.x = p.x; it.y = p.y; S.lines.forEach(l => { if (l.from === it.id) { drawNorm(l); l.pts[0].x = it.x; l.pts[0].y = it.y; } }); redraw(); }
     }
   }
-  function onUp() {
-    if (S.draft) {
-      const d = S.draft; S.draft = null;
-      if (Math.hypot(d.b.x - d.a.x, d.b.y - d.a.y) > 18) { snap(); S.lines.push(d); S.sel = S.lines.length - 1; }
-      redraw();
-    }
-    S.drag = null; S.dragH = null;
-  }
+  function onUp() { S.drag = null; S.dragH = null; }
   function onDbl(e) {
     if (S.tool !== "sel") return; const p = pt(e);
-    if (S.sel >= 0 && S.lines[S.sel]) { const m = drawMidPt(S.lines[S.sel]); if (Math.hypot(m.x - p.x, m.y - p.y) < 14) { snap(); delete S.lines[S.sel].m; redraw(); return; } }
+    const hh = hitHandle(p);
+    if (hh) { const l = drawNorm(S.lines[hh.li]); if (hh.pi > 0 && hh.pi < l.pts.length - 1) { snap(); l.pts[hh.pi].c = !l.pts[hh.pi].c; redraw(); } return; }
     const h = hitItem(p, 20); if (h && h.t === "o") { snap(); h.h = !h.h; redraw(); }
   }
   function undo() { if (!S.undo.length) return; const s = JSON.parse(S.undo.pop()); S.items = s.items; S.lines = s.lines; S.nid = s.nid; S.sel = -1; S.frames[S.fi] = { ...S.frames[S.fi], items: S.items, lines: S.lines }; redraw(); }
@@ -10555,7 +10586,7 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
     const cur = S.frames[S.fi], nf = { items: [], lines: [], cap: "" };
     if (keep) {
       // étape suivante : mêmes joueurs, placés là où leurs cuts / dribbles les ont amenés, sans les flèches
-      nf.items = drawClone(cur.items).map(it => { cur.lines.forEach(l => { if (l.from === it.id && (l.kind === "cut" || l.kind === "dribble")) { it.x = l.b.x; it.y = l.b.y; } }); return it; });
+      nf.items = drawClone(cur.items).map(it => { cur.lines.forEach(l => { if (l.from === it.id && (l.kind === "cut" || l.kind === "dribble")) { const e = drawLast(l); it.x = e.x; it.y = e.y; } }); return it; });
     }
     S.frames.splice(S.fi + 1, 0, nf); loadFrame(S.fi + 1);
   }
@@ -10579,8 +10610,15 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
 
   const extra = (() => {
     let x = "";
-    if (S.draft) x += drawLineSvg(S.draft, DRAW_PAL_EDIT);
-    if (S.sel >= 0 && S.lines[S.sel] && S.tool === "sel") { const m = drawMidPt(S.lines[S.sel]); x += `<circle cx="${drawF(m.x)}" cy="${drawF(m.y)}" r="8" fill="${PANEL}" stroke="${AMBER}" stroke-width="2.4"/>`; }
+    if (S.draft) {
+      const P = S.draft.pts, c = S.cursor;
+      const live = c && Math.hypot(c.x - P[P.length - 1].x, c.y - P[P.length - 1].y) > 2 ? [...P, { x: c.x, y: c.y }] : P;
+      if (live.length >= 2) x += drawLineSvg({ kind: S.draft.kind, from: S.draft.from, pts: live }, DRAW_PAL_EDIT);
+      P.forEach(q => { x += `<circle cx="${drawF(q.x)}" cy="${drawF(q.y)}" r="3.5" fill="${AMBER}"/>`; });
+    }
+    if (S.sel >= 0 && S.lines[S.sel] && S.tool === "sel") {
+      drawPts(S.lines[S.sel]).forEach((q, i, A) => { x += `<circle cx="${drawF(q.x)}" cy="${drawF(q.y)}" r="${i > 0 && i < A.length - 1 ? 8 : 6}" fill="${i > 0 && i < A.length - 1 && !q.c ? AMBER : PANEL}" stroke="${AMBER}" stroke-width="2.4"/>`; });
+    }
     return x;
   })();
   const toolBtn = (on) => ({ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 10px", background: on ? AMBER : PANEL2, color: on ? "#1A1300" : PAPER, border: `1px solid ${on ? AMBER : LINE}`, borderRadius: 7, fontSize: 12.5, fontWeight: 500, cursor: "pointer", fontFamily: "inherit" });
@@ -10593,7 +10631,7 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
       <style>{`.draw-tool svg { width: 22px; height: 14px; flex: none; }`}</style>
       <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
         {DRAW_TOOLS.map(([id, label, icon]) => (
-          <button key={id} className="draw-tool" onClick={() => { S.tool = id; S.sel = -1; redraw(); }} style={toolBtn(S.tool === id)}>
+          <button key={id} className="draw-tool" onClick={() => { S.tool = id; S.sel = -1; S.draft = null; redraw(); }} style={toolBtn(S.tool === id)}>
             <span style={{ display: "inline-flex" }} dangerouslySetInnerHTML={{ __html: icon }} />{label}
           </button>
         ))}
