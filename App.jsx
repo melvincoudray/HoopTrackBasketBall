@@ -1162,26 +1162,30 @@ function applyTagAliasesToPlays(plays, map) {
   let changedCount = 0;
   const next = (plays || []).map(p => {
     const r = applyTagAliasesToTags(p.tags, map);
-    if (!r.changed) return p;
+    // Demandé par l'utilisateur : même chose pour le NOM d'un joueur écrit de deux façons
+    // (ex. "Shoqbonyo" / "Shogbonyo" d'un match à l'autre).
+    const playerTarget = p.player ? resolveTagAlias(p.player, map) : p.player;
+    const playerChanged = !!p.player && playerTarget !== p.player;
+    if (!r.changed && !playerChanged) return p;
     changedCount++;
-    return { ...p, tags: r.tags };
+    return { ...p, tags: r.tags, ...(playerChanged ? { player: playerTarget } : {}) };
   });
   return { plays: next, changedCount };
 }
 // Applique les équivalences à tout ce qui est déjà enregistré : matchs codés et scouting
 // observation (toutes les équipes). Renvoie le nombre d'actions modifiées.
-async function applyTagAliasesToExistingData(list) {
+async function applyTagAliasesToExistingData(list, scope = { matches: false, observations: true }) {
   const map = buildTagAliasMap(list);
   if (!map.size) return { matches: 0, observations: 0 };
   let matches = 0, observations = 0;
-  const matchIdx = (await storeGet("match_index")) || [];
+  const matchIdx = scope.matches ? ((await storeGet("match_index")) || []) : [];
   for (const m of matchIdx) {
     const data = await storeGet("match:" + m.id);
     if (!data || !Array.isArray(data.plays)) continue;
     const r = applyTagAliasesToPlays(data.plays, map);
     if (r.changedCount > 0) { await storeSet("match:" + m.id, { ...data, plays: r.plays }); matches += r.changedCount; }
   }
-  const allObserved = (await storeGet("scouting_observations")) || {};
+  const allObserved = scope.observations ? ((await storeGet("scouting_observations")) || {}) : {};
   let obsChanged = false;
   const nextObserved = { ...allObserved };
   for (const [teamName, team] of Object.entries(allObserved)) {
@@ -1191,6 +1195,43 @@ async function applyTagAliasesToExistingData(list) {
   }
   if (obsChanged) await storeSet("scouting_observations", nextObserved);
   return { matches, observations };
+}
+
+// Outil de récupération (demandé par l'utilisateur après une fusion qui avait rendu des tags
+// invisibles dans Team) : retrouve, dans les données DÉJÀ importées, tous les noms de tags qui
+// contiennent un texte donné (sans tenir compte des accents/majuscules/espaces), avec le nombre
+// d'actions concernées dans les matchs et dans Scouting Observation.
+async function scanTagNamesInData(query) {
+  const q = normTag(query);
+  const found = new Map(); // nom exact -> { matches: n actions, matchCount, observations: n actions }
+  if (!q) return [];
+  const bump = (name, field) => {
+    if (!found.has(name)) found.set(name, { name, matches: 0, matchIds: new Set(), observations: 0 });
+    found.get(name)[field]++;
+  };
+  const matchIdx = (await storeGet("match_index")) || [];
+  for (const m of matchIdx) {
+    const data = await storeGet("match:" + m.id);
+    for (const p of ((data && data.plays) || [])) {
+      for (const name of [...Object.keys(p.tags || {}), ...(p.player ? [p.player] : [])]) {
+        if (normTag(name).includes(q)) { bump(name, "matches"); found.get(name).matchIds.add(m.id); }
+      }
+    }
+  }
+  const allObserved = (await storeGet("scouting_observations")) || {};
+  for (const team of Object.values(allObserved)) {
+    for (const p of ((team && team.plays) || [])) {
+      for (const name of [...Object.keys(p.tags || {}), ...(p.player ? [p.player] : [])]) {
+        if (normTag(name).includes(q)) bump(name, "observations");
+      }
+    }
+  }
+  return Array.from(found.values()).map(r => ({ ...r, matchCount: r.matchIds.size })).sort((a, b) => a.name.localeCompare(b.name));
+}
+// Renomme UN tag (nom exact) vers un autre, dans les matchs et/ou dans Scouting Observation.
+async function renameTagInData(oldName, newName, scope) {
+  const list = [{ from: oldName, to: newName }];
+  return applyTagAliasesToExistingData(list, scope);
 }
 
 // Point d'entrée unique pour tous les imports de codage : reconnaît le type de fichier d'après
@@ -1205,6 +1246,9 @@ async function parseCodingFile(arrayBuffer, cats, unknownColumnDefault = "player
   const aliasMap = buildTagAliasMap(await loadTagAliases());
   if (aliasMap.size) {
     parsed.plays = applyTagAliasesToPlays(parsed.plays, aliasMap).plays;
+    parsed.detectedPlayers = [...new Set(parsed.plays.map(p => p.player).filter(Boolean))];
+    const knownP = knownPlayersSet(cats);
+    parsed.unconfirmedPlayers = parsed.detectedPlayers.filter(p => !knownP.has(normTag(p)));
     if (Array.isArray(parsed.unconfirmedTags)) {
       const known = allKnownTagsSet(cats);
       parsed.unconfirmedTags = [...new Set(parsed.unconfirmedTags.map(t => resolveTagAlias(t, aliasMap)))].filter(t => !known.has(normTag(t)));
@@ -11900,6 +11944,71 @@ async function migratePlayerRename(oldName, newName) {
   }
 }
 
+function TagFinderCard() {
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState(null);
+  const [newNames, setNewNames] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
+
+  async function search(text) {
+    setError("");
+    const r = await scanTagNamesInData(text ?? query);
+    setResults(r);
+  }
+  async function runSearch() {
+    setBusy(true); setStatus("");
+    try { await search(); } catch (err) { setError("Search failed: " + (err.message || "unknown error")); }
+    setBusy(false);
+  }
+  async function rename(oldName, scope, label) {
+    const target = (newNames[oldName] || "").trim();
+    if (!target) { setError("Type the new name first."); return; }
+    setBusy(true); setError(""); setStatus("");
+    try {
+      const r = await renameTagInData(oldName, target, scope);
+      setStatus(`Done — "${oldName}" renamed to "${target}" in ${label}: ${r.matches + r.observations} action(s) updated. Reload the page to see it.`);
+      await search();
+    } catch (err) { setError("Failed: " + (err.message || "unknown error")); }
+    setBusy(false);
+  }
+
+  return (
+    <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 22, marginBottom: 20 }}>
+      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>Find / rename a tag or player name in imported data</div>
+      <p style={{ color: "#8B93A1", fontSize: 13, lineHeight: 1.6, margin: "0 0 16px" }}>
+        Use this if a tag no longer shows up where it should, or if a player's name is spelled two ways (e.g. in two
+        scouting files). Search part of the name: you'll see every spelling actually stored in your matches (Team / Players)
+        and in Scouting Observation, with the number of actions, and you can rename one to the spelling you want to keep.
+      </p>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+        <input value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => { if (e.key === "Enter") runSearch(); }}
+          placeholder="Part of the name, e.g. Man Back" style={{ ...inputStyle, letterSpacing: "normal", flex: "1 1 240px", minWidth: 200 }} />
+        <button disabled={busy || !query.trim()} onClick={runSearch} style={btnSecondary}>{busy ? "…" : "Search"}</button>
+      </div>
+
+      {results && results.length === 0 && <div style={{ fontSize: 13, color: "#8B93A1" }}>No tag containing this text in your imported data.</div>}
+      {results && results.map(r => (
+        <div key={r.name} style={{ padding: 12, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, marginBottom: 8 }}>
+          <div style={{ fontSize: 13.5, fontWeight: 700, color: PAPER, marginBottom: 4 }}>{r.name}</div>
+          <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 8 }}>
+            {r.matches} action{r.matches !== 1 ? "s" : ""} in {r.matchCount} match{r.matchCount !== 1 ? "es" : ""} · {r.observations} action{r.observations !== 1 ? "s" : ""} in Scouting Observation
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+            <input value={newNames[r.name] || ""} onChange={e => setNewNames(n => ({ ...n, [r.name]: e.target.value }))}
+              placeholder="Rename to…" style={{ ...inputStyle, letterSpacing: "normal", flex: "1 1 200px", minWidth: 160 }} />
+            <button disabled={busy || r.matches === 0} onClick={() => rename(r.name, { matches: true, observations: false }, "your matches")} style={{ ...btnSecondary, opacity: r.matches === 0 ? 0.5 : 1 }}>Rename in my matches</button>
+            <button disabled={busy || r.observations === 0} onClick={() => rename(r.name, { matches: false, observations: true }, "Scouting Observation")} style={{ ...btnSecondary, opacity: r.observations === 0 ? 0.5 : 1 }}>Rename in Scouting</button>
+          </div>
+        </div>
+      ))}
+      {status && <div style={{ fontSize: 13, color: TEAL, marginTop: 10 }}>{status}</div>}
+      {error && <div style={{ fontSize: 13, color: RED, marginTop: 10 }}>{error}</div>}
+    </div>
+  );
+}
+
 function TagAliasesCard() {
   const [list, setList] = useState([]);
   const [loaded, setLoaded] = useState(false);
@@ -11908,6 +12017,8 @@ function TagAliasesCard() {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [error, setError] = useState("");
+  const [applyObs, setApplyObs] = useState(true);
+  const [applyMatches, setApplyMatches] = useState(false);
 
   useEffect(() => { loadTagAliases().then(l => { setList(l); setLoaded(true); }); }, []);
 
@@ -11932,7 +12043,7 @@ function TagAliasesCard() {
   async function applyNow() {
     setBusy(true); setError(""); setStatus("");
     try {
-      const r = await applyTagAliasesToExistingData(list);
+      const r = await applyTagAliasesToExistingData(list, { matches: applyMatches, observations: applyObs });
       setStatus(r.matches + r.observations > 0
         ? `Done — ${r.matches} action(s) updated in your matches, ${r.observations} in Scouting Observation. Reload the page to see the merged stats.`
         : "Nothing to merge — no imported action uses these variants.");
@@ -11942,10 +12053,10 @@ function TagAliasesCard() {
 
   return (
     <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 22, marginBottom: 20 }}>
-      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>Tag equivalences</div>
+      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>Tag &amp; player name equivalences</div>
       <p style={{ color: "#8B93A1", fontSize: 13, lineHeight: 1.6, margin: "0 0 16px" }}>
         Some tagging software writes the same tag differently (for example <b>Top Pick 1 Man Back</b> and <b>Top 1 Man Back</b>).
-        Declare it here: the variant is renamed to the name you keep, on every future import and, with the button below,
+        Declare it here (it also works for a player's name spelled two ways): the variant is renamed to the name you keep, on every future import and, with the button below,
         on everything already imported. Capital letters, accents, spaces and dashes are already ignored.
       </p>
 
@@ -11963,14 +12074,23 @@ function TagAliasesCard() {
       )}
 
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", marginBottom: 10 }}>
-        <input value={fromText} onChange={e => setFromText(e.target.value)} placeholder="Variant to rename (e.g. Top Pick 1 Man Back)" style={{ ...inputStyle, letterSpacing: "normal", flex: "1 1 220px", minWidth: 180 }} />
+        <input value={fromText} onChange={e => setFromText(e.target.value)} placeholder="Variant to rename (e.g. Shoqbonyo)" style={{ ...inputStyle, letterSpacing: "normal", flex: "1 1 220px", minWidth: 180 }} />
         <span style={{ color: "#5C6470" }}>→</span>
-        <input value={toText} onChange={e => setToText(e.target.value)} placeholder="Name to keep (e.g. Top 1 Man Back)" style={{ ...inputStyle, letterSpacing: "normal", flex: "1 1 220px", minWidth: 180 }} />
+        <input value={toText} onChange={e => setToText(e.target.value)} placeholder="Name to keep (e.g. Shogbonyo)" style={{ ...inputStyle, letterSpacing: "normal", flex: "1 1 220px", minWidth: 180 }} />
         <button onClick={add} style={btnSecondary}>Add</button>
       </div>
 
-      <button disabled={busy || list.length === 0} onClick={applyNow}
-        style={{ ...btnPrimary, width: "auto", padding: "10px 20px", opacity: (busy || list.length === 0) ? 0.5 : 1, cursor: (busy || list.length === 0) ? "default" : "pointer" }}>
+      <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 12, fontSize: 12.5, color: "#D8DCE2" }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+          <input type="checkbox" checked={applyObs} onChange={e => setApplyObs(e.target.checked)} /> Apply to Scouting Observation
+        </label>
+        <label style={{ display: "flex", alignItems: "flex-start", gap: 8, cursor: "pointer" }}>
+          <input type="checkbox" checked={applyMatches} onChange={e => setApplyMatches(e.target.checked)} style={{ marginTop: 3 }} />
+          <span>Apply to my matches (Team / Players) <span style={{ color: "#8B93A1" }}>— careful: the name you keep must be the exact tag name in your Settings, otherwise those actions disappear from Team.</span></span>
+        </label>
+      </div>
+      <button disabled={busy || list.length === 0 || (!applyObs && !applyMatches)} onClick={applyNow}
+        style={{ ...btnPrimary, width: "auto", padding: "10px 20px", opacity: (busy || list.length === 0 || (!applyObs && !applyMatches)) ? 0.5 : 1, cursor: (busy || list.length === 0 || (!applyObs && !applyMatches)) ? "default" : "pointer" }}>
         {busy ? "Applying…" : "Apply to already imported data"}
       </button>
       {status && <div style={{ fontSize: 13, color: TEAL, marginTop: 10 }}>{status}</div>}
@@ -12078,6 +12198,7 @@ function BackupTab({ team, roster }) {
       </div>
 
       <TagAliasesCard />
+      <TagFinderCard />
 
       <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 22, marginBottom: 20 }}>
         <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>Export</div>
