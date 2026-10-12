@@ -3,7 +3,7 @@ import * as XLSX from "xlsx";
 import initSqlJs from "sql.js";
 import { FFmpeg } from "@ffmpeg/ffmpeg";
 import { toBlobURL } from "@ffmpeg/util";
-import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon, Calendar, Star, Bell, BellOff } from "lucide-react";
+import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon, Calendar, Star, Bell, BellOff, Pencil } from "lucide-react";
 import {
   PieChart, Pie, Cell, ComposedChart, Bar as RBar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
   RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar,
@@ -4184,6 +4184,12 @@ export default function App() {
             You don't have the permission to see this.
           </div>
         )}
+        {tab === "draw" && (session.role === "coach" || visibility.tabs.draw) && <DrawTab isCoach={session.role === "coach"} team={team} />}
+        {tab === "draw" && session.role === "player" && !visibility.tabs.draw && (
+          <div style={{ padding: 30, textAlign: "center", color: "#5C6470", border: `1px dashed ${LINE}`, borderRadius: 12, fontSize: 13.5 }}>
+            You don't have the permission to see this.
+          </div>
+        )}
         {tab === "planning" && (session.role === "coach" || visibility.tabs.planning) && <PlanningTab isCoach={session.role === "coach"} team={team} roster={roster} playerName={session.role === "player" ? session.name : null} />}
         {tab === "planning" && session.role === "player" && !visibility.tabs.planning && (
           <div style={{ padding: 30, textAlign: "center", color: "#5C6470", border: `1px dashed ${LINE}`, borderRadius: 12, fontSize: 13.5 }}>
@@ -4707,7 +4713,7 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
           <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 8 }}>Visible to players</div>
           {visibility && (
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
-              {[["players", "Players tab"], ["team", "Team tab"], ["scouting", "Scouting tab"], ["planning", "Planning tab"]].map(([key, label]) => (
+              {[["players", "Players tab"], ["team", "Team tab"], ["scouting", "Scouting tab"], ["planning", "Planning tab"], ["draw", "Draw tab (read-only)"]].map(([key, label]) => (
                 <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
                   <input type="checkbox" checked={visibility.tabs[key]} onChange={() => toggleTab(key)} /> {label}
                 </label>
@@ -5360,6 +5366,7 @@ function BottomTabBar({ tab, setTab, isCoach, visibility }) {
     ...(isCoach || v.tabs.players ? [{ id: "players", label: "Players", icon: Users }] : []),
     ...(isCoach || v.tabs.team ? [{ id: "team", label: "Team", icon: LayoutGrid }] : []),
     ...(isCoach || v.tabs.scouting ? [{ id: "scouting", label: "Scouting", icon: Search }] : []),
+    ...(isCoach || v.tabs.draw ? [{ id: "draw", label: "Draw", icon: Pencil }] : []),
     ...(isCoach ? [{ id: "backup", label: "Backup", icon: Download }] : []),
     ...(isCoach ? [{ id: "settings", label: "Settings", icon: ClipboardList }] : []),
   ];
@@ -8208,7 +8215,7 @@ const MENTAL_CRITERIA = [
 // ---------------------------------------------------------------------------
 
 const DEFAULT_VISIBILITY = {
-  tabs: { players: true, team: true, scouting: true, planning: true },
+  tabs: { players: true, team: true, scouting: true, planning: true, draw: false },
   playerDetail: { stats: true, objectives: true, training: true, mental: true, wellness: true, role: true, meetings: true },
   team: { standings: true, teamPlay: true, advanced: true, resources: true, reboundContest: true, shootingGrid: true },
   // Demandé par l'utilisateur : Comparison / Scouting Report / Observation, chacune
@@ -10142,6 +10149,698 @@ function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, t
 // Onglet "Staff" du Scouting Report : fichiers déposés par le staff (PDF, images) pour cette
 // équipe précise, et reprise automatique des stats/graphiques d'Observation pour la MÊME
 // équipe si elle a déjà été observée — pas besoin de redupliquer l'information ailleurs.
+// ---------------------------------------------------------------------------
+// Draw — dessin de plays, playbooks (groupes + plusieurs diagrammes par play), export PDF et
+// envoi vers Scouting Report › Staff. Modifiable par les coachs uniquement ; les joueurs (si
+// l'onglet leur est rendu visible) sont en lecture seule.
+// Stockage : "draw_playbooks" = [{ id, name, club, plays:[{ id, name, group, frames:[{ items, lines, cap }] }] }]
+//            "draw_staff:<équipe>" = [{ id, name, group, frames, note }]  (plays envoyées au Staff)
+// ---------------------------------------------------------------------------
+
+const DRAW_PAL_EDIT = { court: "#1D232C", line: "#4A5566", off: "#E8EAED", offtxt: "#12161C", def: "#E5685B", ball: "#F2A93B" };
+const DRAW_PAL_PRINT = { court: "#ffffff", line: "#000000", off: "#000000", offtxt: "#ffffff", def: "#000000", ball: "#000000", big: true };
+const DRAW_TOOLS = [
+  ["sel", "Move", '<svg viewBox="0 0 22 14"><path d="M4 2 L4 12 L7 9 L10 13 L12 12 L9 8 L13 8 z" fill="currentColor"/></svg>'],
+  ["o", "Attacker", '<svg viewBox="0 0 22 14"><circle cx="11" cy="7" r="5.5" fill="none" stroke="currentColor" stroke-width="1.6"/></svg>'],
+  ["x", "Defender", '<svg viewBox="0 0 22 14"><path d="M7 2 L15 12 M15 2 L7 12" stroke="currentColor" stroke-width="2" fill="none"/></svg>'],
+  ["ball", "Ball", '<svg viewBox="0 0 22 14"><circle cx="11" cy="7" r="4" fill="currentColor"/></svg>'],
+  ["cut", "Cut", '<svg viewBox="0 0 22 14"><path d="M1 12 L16 4" stroke="currentColor" stroke-width="1.8"/><path d="M21 2 L13 2.5 L16.5 9z" fill="currentColor"/></svg>'],
+  ["pass", "Pass", '<svg viewBox="0 0 22 14"><path d="M1 12 L16 4" stroke="currentColor" stroke-width="1.8" stroke-dasharray="3 2"/><path d="M21 2 L13 2.5 L16.5 9z" fill="currentColor"/></svg>'],
+  ["dribble", "Dribble", '<svg viewBox="0 0 22 14"><path d="M1 9 Q3 4 5 9 T9 9 T13 9" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M21 9 L13 5.5 L13 12.5z" fill="currentColor"/></svg>'],
+  ["screen", "Screen", '<svg viewBox="0 0 22 14"><path d="M1 7 H16 M16 2 V12" stroke="currentColor" stroke-width="2" fill="none"/></svg>'],
+  ["shoot", "Shoot", '<svg viewBox="0 0 22 14"><path d="M1 5.5 H14 M1 8.5 H14" stroke="currentColor" stroke-width="1.5"/><path d="M21 7 L13 2.5 L13 11.5z" fill="currentColor"/></svg>'],
+  ["del", "Erase", '<svg viewBox="0 0 22 14"><path d="M5 3 H17 M8 3 V1 H14 V3 M7 3 L8 13 H14 L15 3" stroke="currentColor" stroke-width="1.4" fill="none"/></svg>'],
+];
+const DRAW_HINTS = {
+  sel: "Drag a player or the ball. Click a line to select it, then drag its round handle to curve it (double-click the handle to straighten). Double-click an attacker to ring the ball handler.",
+  o: "Click the court to place the next attacker (1 to 5).", x: "Click the court to place a defender.", ball: "Click the court to place the ball.",
+  cut: "Drag from a player to where he cuts.", pass: "Drag from the passer to the receiver.", dribble: "Drag from the ball handler to where he dribbles.",
+  screen: "Drag from the screener toward the player he screens.", shoot: "Drag from the shooter toward the basket: a double line with one arrowhead means a shot.",
+  del: "Click a player or a line to erase it.",
+};
+const DRAW_LINE_TOOLS = ["cut", "pass", "dribble", "screen", "shoot"];
+const DRAW_OWN = "__own__"; // valeur de "club" pour notre propre équipe
+
+function drawF(n) { return Math.round(n * 10) / 10; }
+function drawEsc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+function drawClone(o) { return JSON.parse(JSON.stringify(o)); }
+
+// Terrain : panier en haut, ligne médiane en bas. 3 points = vrai demi-cercle (rayon 220)
+// raccordé en douceur aux lignes de coin.
+function drawCourtSvg(p) {
+  const l = p.line;
+  return `<rect x="0" y="0" width="500" height="470" fill="${p.court}"/>` +
+    `<rect x="1" y="1" width="498" height="469" fill="none" stroke="${l}" stroke-width="2"/>` +
+    `<rect x="168" y="1" width="164" height="192" fill="none" stroke="${l}" stroke-width="1.5"/>` +
+    `<path d="M190 193 A60 60 0 0 0 310 193" fill="none" stroke="${l}" stroke-width="1.5"/>` +
+    `<path d="M190 193 A60 60 0 0 1 310 193" fill="none" stroke="${l}" stroke-width="1.2" stroke-dasharray="6 5"/>` +
+    `<path d="M30 1 V52 A220 220 0 0 0 470 52 V1" fill="none" stroke="${l}" stroke-width="1.5"/>` +
+    `<path d="M208 52 A42 42 0 0 0 292 52" fill="none" stroke="${l}" stroke-width="1.5"/>` +
+    `<line x1="220" y1="40" x2="280" y2="40" stroke="${l}" stroke-width="2.4"/>` +
+    `<circle cx="250" cy="52" r="8" fill="none" stroke="${l}" stroke-width="1.6"/>` +
+    `<path d="M190 470 A60 60 0 0 1 310 470" fill="none" stroke="${l}" stroke-width="1.5"/>`;
+}
+
+// Géométrie des lignes : courbe de Bézier optionnelle (point milieu "m"), têtes de flèche calculées.
+function drawCtrl(a, m, b) { return { x: 2 * m.x - (a.x + b.x) / 2, y: 2 * m.y - (a.y + b.y) / 2 }; }
+function drawSamplePts(l) {
+  const a = l.a, b = l.b, N = 44, pts = [], c = l.m ? drawCtrl(a, l.m, b) : null;
+  for (let i = 0; i <= N; i++) {
+    const t = i / N;
+    if (c) { const u = 1 - t; pts.push({ x: u * u * a.x + 2 * u * t * c.x + t * t * b.x, y: u * u * a.y + 2 * u * t * c.y + t * t * b.y }); }
+    else pts.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+  }
+  return pts;
+}
+function drawCum(pts) { const s = [0]; for (let i = 1; i < pts.length; i++) s.push(s[i - 1] + Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y)); return s; }
+function drawSlice(pts, s0, s1) {
+  const L = drawCum(pts), tot = L[L.length - 1];
+  s1 = Math.min(s1, tot); if (s0 > s1 - 1) s0 = Math.max(0, s1 - 1);
+  const out = [];
+  for (let i = 1; i < pts.length; i++) {
+    const A = pts[i - 1], B = pts[i], la = L[i - 1], lb = L[i];
+    if (lb < s0 || la > s1) continue;
+    const ta = Math.max(0, (s0 - la) / ((lb - la) || 1)), tb = Math.min(1, (s1 - la) / ((lb - la) || 1));
+    if (!out.length) out.push({ x: A.x + (B.x - A.x) * ta, y: A.y + (B.y - A.y) * ta });
+    out.push({ x: A.x + (B.x - A.x) * tb, y: A.y + (B.y - A.y) * tb });
+  }
+  return out.length ? out : [pts[0], pts[0]];
+}
+function drawResample(pts, step) {
+  const L = drawCum(pts), tot = L[L.length - 1], out = [];
+  let j = 1;
+  for (let s = 0; s <= tot; s += step) {
+    while (j < pts.length - 1 && L[j] < s) j++;
+    const A = pts[j - 1], B = pts[j], seg = (L[j] - L[j - 1]) || 1, t = (s - L[j - 1]) / seg;
+    out.push({ x: A.x + (B.x - A.x) * t, y: A.y + (B.y - A.y) * t, tx: (B.x - A.x) / seg, ty: (B.y - A.y) / seg, s });
+  }
+  const e = pts[pts.length - 1], q = pts[pts.length - 2], d = Math.hypot(e.x - q.x, e.y - q.y) || 1;
+  out.push({ x: e.x, y: e.y, tx: (e.x - q.x) / d, ty: (e.y - q.y) / d, s: tot });
+  return out;
+}
+function drawToPath(pts) { return pts.map((p, i) => (i ? "L" : "M") + drawF(p.x) + " " + drawF(p.y)).join(" "); }
+const DRAW_HEAD = 11, DRAW_HW = 5.6;
+function drawLineSvg(l, pal) {
+  const pts = drawSamplePts(l), L = drawCum(pts), tot = L[L.length - 1], n = pts.length, e = pts[n - 1], p = pts[n - 4];
+  let ux = e.x - p.x, uy = e.y - p.y; const d = Math.hypot(ux, uy) || 1; ux /= d; uy /= d;
+  const nx = -uy, ny = ux, start = l.from ? 13 : 0, col = pal.off;
+  const head = (back) => {
+    const tx = e.x - ux * back, ty = e.y - uy * back;
+    return `<path d="M${drawF(tx)} ${drawF(ty)} L${drawF(tx - ux * DRAW_HEAD + nx * DRAW_HW)} ${drawF(ty - uy * DRAW_HEAD + ny * DRAW_HW)} L${drawF(tx - ux * DRAW_HEAD - nx * DRAW_HW)} ${drawF(ty - uy * DRAW_HEAD - ny * DRAW_HW)} Z" fill="${col}" stroke="${col}" stroke-width="1" stroke-linejoin="round"/>`;
+  };
+  const sw = `fill="none" stroke="${col}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"`;
+  if (l.kind === "cut") return `<path d="${drawToPath(drawSlice(pts, start, tot - DRAW_HEAD + 2))}" ${sw}/>` + head(0);
+  if (l.kind === "pass") return `<path d="${drawToPath(drawSlice(pts, start, tot - DRAW_HEAD + 2))}" ${sw} stroke-dasharray="6 5"/>` + head(0);
+  if (l.kind === "shoot") {
+    const rs = drawResample(drawSlice(pts, start, tot - DRAW_HEAD + 2), 3), a1 = [], a2 = [];
+    rs.forEach(r => { a1.push({ x: r.x - r.ty * 2.5, y: r.y + r.tx * 2.5 }); a2.push({ x: r.x + r.ty * 2.5, y: r.y - r.tx * 2.5 }); });
+    return `<path d="${drawToPath(a1)}" ${sw} stroke-width="1.7"/><path d="${drawToPath(a2)}" ${sw} stroke-width="1.7"/>` + head(0);
+  }
+  if (l.kind === "screen") {
+    return `<path d="${drawToPath(drawSlice(pts, start, tot))} M${drawF(e.x - nx * 11)} ${drawF(e.y - ny * 11)} L${drawF(e.x + nx * 11)} ${drawF(e.y + ny * 11)}" ${sw}/>`;
+  }
+  if (l.kind === "dribble") {
+    const rs = drawResample(drawSlice(pts, start, tot - DRAW_HEAD + 2), 2.5), S = rs[rs.length - 1].s, w = [];
+    rs.forEach(r => { const taper = Math.min(1, r.s / 14, (S - r.s) / 14), off = 3.8 * taper * Math.sin(r.s * 2 * Math.PI / 11); w.push({ x: r.x - r.ty * off, y: r.y + r.tx * off }); });
+    return `<path d="${drawToPath(w)}" ${sw} stroke-width="1.9"/>` + head(0);
+  }
+  return "";
+}
+function drawMidPt(l) { return l.m ? l.m : { x: (l.a.x + l.b.x) / 2, y: (l.a.y + l.b.y) / 2 }; }
+function drawItemSvg(it, pal) {
+  if (it.t === "o") {
+    const R = pal.big ? 21 : 12, FS = pal.big ? 27 : 13, RH = pal.big ? 28 : 18;
+    return `<g>${it.h ? `<circle cx="${it.x}" cy="${it.y}" r="${RH}" fill="none" stroke="${pal.off}" stroke-width="1.8"/>` : ""}<circle cx="${it.x}" cy="${it.y}" r="${R}" fill="${pal.off}"/><text x="${it.x}" y="${drawF(it.y + FS * 0.36)}" text-anchor="middle" font-size="${FS}" font-weight="700" fill="${pal.offtxt}" font-family="Arial,Helvetica,sans-serif">${drawEsc(it.n)}</text></g>`;
+  }
+  if (it.t === "x") {
+    const D = pal.big ? 14 : 9;
+    return `<g stroke="${pal.def}" stroke-width="${pal.big ? 3.6 : 3}" stroke-linecap="round"><path d="M${it.x - D} ${it.y - D} L${it.x + D} ${it.y + D} M${it.x + D} ${it.y - D} L${it.x - D} ${it.y + D}"/></g>`;
+  }
+  return `<circle cx="${it.x}" cy="${it.y}" r="6.5" fill="${pal.ball}" stroke="${pal.court}" stroke-width="1.5"/>`;
+}
+function drawFrameSvg(fr, pal, extra) {
+  return drawCourtSvg(pal) + (fr.lines || []).map(l => drawLineSvg(l, pal)).join("") + (fr.items || []).map(it => drawItemSvg(it, pal)).join("") + (extra || "");
+}
+function DrawThumb({ frame, pal, style }) {
+  return <svg viewBox="0 0 500 470" style={{ width: "100%", height: "auto", display: "block", ...style }} dangerouslySetInnerHTML={{ __html: drawFrameSvg(frame, pal || DRAW_PAL_EDIT) }} />;
+}
+function drawGroupsOf(book) {
+  const g = [], idx = {};
+  (book.plays || []).forEach((p, i) => {
+    const n = p.group || "Plays";
+    if (!(n in idx)) { idx[n] = g.length; g.push({ name: n, plays: [] }); }
+    g[idx[n]].plays.push({ p, i });
+  });
+  return g;
+}
+function drawNewBook(name) { return { id: uid(), name, club: DRAW_OWN, plays: [] }; }
+
+// ---------------------------------------------------------------------------
+// Pages d'export (aperçu + PDF) — chaque page fait 900 x 1273 px (format A4), marquée
+// data-new-page pour que tryExportPdf coupe exactement entre les pages.
+// ---------------------------------------------------------------------------
+
+function drawBuildPages(book, title, colsSetting, logoUrl) {
+  const gs = drawGroupsOf(book);
+  gs.forEach(g => {
+    g.cols = colsSetting === "auto" ? Math.min(3, Math.max(1, ...g.plays.map(o => o.p.frames.length))) : Number(colsSetting);
+    g.rpp = g.cols === 1 ? 4 : 3;
+    g.rows = [];
+    g.plays.forEach(o => {
+      o.row = g.rows.length;
+      for (let k = 0; k < o.p.frames.length; k += g.cols) g.rows.push(o.p.frames.slice(k, k + g.cols).map(f => ({ p: o.p, f })));
+    });
+  });
+  const lines = [];
+  gs.forEach((g, gi) => {
+    lines.push({ t: "g", n: (gi + 1) + ".", l: g.name, gi });
+    g.plays.forEach((o, pi) => lines.push({ t: "s", n: (gi + 1) + "." + (pi + 1), l: o.p.name, gi, o }));
+  });
+  const perToc = 20, tocPages = Math.max(1, Math.ceil(lines.length / perToc));
+  let page = tocPages + 1; const start = [];
+  gs.forEach(g => { start.push(page); page += Math.max(1, Math.ceil(g.rows.length / g.rpp)); });
+
+  const pageStyle = { width: 900, height: 1273, background: "#fff", color: "#000", fontFamily: "Arial, Helvetica, sans-serif", position: "relative", boxSizing: "border-box", padding: "63px 63px 80px", overflow: "hidden" };
+  const num = (n) => <div style={{ position: "absolute", right: 45, bottom: 30, fontSize: 22 }}>{n}</div>;
+  const logo = logoUrl ? <img src={logoUrl} alt="" style={{ width: 84, height: 84, objectFit: "contain" }} /> : <div style={{ width: 84, height: 84 }} />;
+  const pages = [];
+
+  for (let tp = 0; tp < tocPages; tp++) {
+    const chunk = lines.slice(tp * perToc, tp * perToc + perToc);
+    pages.push(
+      <div key={"toc" + tp} data-new-page="true" style={pageStyle}>
+        {tp === 0 ? (
+          <>
+            <div style={{ border: "4px solid #000", display: "flex", alignItems: "center", justifyContent: "space-between", padding: "20px 28px", marginBottom: 30 }}>
+              {logo}<div style={{ fontSize: 62, fontWeight: 700, textAlign: "center" }}>{title}</div>{logo}
+            </div>
+            <div style={{ textAlign: "center", fontSize: 36, fontWeight: 700, margin: "28px 0 36px" }}>Table of Contents</div>
+          </>
+        ) : <div style={{ textAlign: "center", fontSize: 36, fontWeight: 700, margin: "10px 0 36px" }}>{title} - Contents (cont.)</div>}
+        {chunk.map((x, k) => {
+          const pg = start[x.gi] + (x.t === "s" ? Math.floor(x.o.row / gs[x.gi].rpp) : 0);
+          return (
+            <div key={k} style={{ display: "flex", fontSize: 24, fontWeight: 700, padding: "6px 0", marginTop: x.t === "g" && k > 0 ? 14 : 0, paddingLeft: x.t === "s" ? 50 : 0 }}>
+              <span style={{ width: x.t === "s" ? 90 : 90, flexShrink: 0 }}>{x.n}</span><span style={{ flex: 1 }}>{x.l}</span><span>{pg}</span>
+            </div>
+          );
+        })}
+        {num(tp + 1)}
+      </div>
+    );
+  }
+  gs.forEach((g, gi) => {
+    const np = Math.max(1, Math.ceil(g.rows.length / g.rpp));
+    for (let k = 0; k < np; k++) {
+      const rows = g.rows.slice(k * g.rpp, k * g.rpp + g.rpp);
+      pages.push(
+        <div key={"g" + gi + "-" + k} data-new-page="true" style={pageStyle}>
+          <div style={{ textAlign: "center", marginBottom: 26 }}>
+            <div style={{ fontSize: 54 }}>{title}</div>
+            <div style={{ fontSize: 34, fontWeight: 700, marginTop: 8 }}>{g.name}</div>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: `repeat(${g.cols}, minmax(0, 1fr))`, gap: "28px 34px", width: g.cols === 1 ? "20%" : g.cols === 2 ? "50%" : "84%", alignContent: "start" }}>
+            {rows.map((row, ri) => (
+              <React.Fragment key={ri}>
+                {row.map((c, ci) => (
+                  <div key={ci} style={{ minWidth: 0 }}>
+                    <div style={{ textAlign: "center", fontSize: 15, lineHeight: 1.15, marginBottom: 3 }}>{c.p.name}<div style={{ fontSize: 11 }}>{c.p.group || "Plays"}</div></div>
+                    <DrawThumb frame={c.f} pal={DRAW_PAL_PRINT} style={{ border: "3px solid #000", boxSizing: "border-box" }} />
+                    {c.f.cap ? <div style={{ fontSize: 12, marginTop: 3 }}>{c.f.cap}</div> : null}
+                  </div>
+                ))}
+                {Array.from({ length: g.cols - row.length }).map((_, z) => <div key={"pad" + z} />)}
+              </React.Fragment>
+            ))}
+          </div>
+          {num(start[gi] + k)}
+        </div>
+      );
+    }
+  });
+  return pages;
+}
+
+function DrawExportPanel({ book, teamLogo, scoutingTeams, onSetClub, onClose }) {
+  const [title, setTitle] = useState(book.name);
+  const [cols, setCols] = useState("auto");
+  const [preview, setPreview] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [report, setReport] = useState(null);
+  const [msg, setMsg] = useState("");
+  const club = book.club || DRAW_OWN;
+  const logoUrl = club === DRAW_OWN ? (teamLogo || null) : (scoutingTeams?.[club]?.logo || null);
+  const pages = useMemo(() => drawBuildPages(book, title || book.name, cols, logoUrl), [book, title, cols, logoUrl]);
+  const filename = `playbook_${(title || book.name).replace(/[^\w\-]+/g, "_")}_${todayLocal()}.pdf`;
+
+  async function doExport() {
+    setBusy(true); setMsg("");
+    try {
+      const ok = await tryExportPdf("draw-print-content", filename, "light", "portrait", 1.4, 0.8);
+      if (!ok) {
+        const r = buildReportHtml("draw-print-content", filename.replace(/\.pdf$/, ".html"), "light");
+        if (r) { tryDownload(r.full, r.filename); setReport(r); }
+        else setMsg("Export failed — try again after the page has fully loaded.");
+      }
+    } finally { setBusy(false); }
+  }
+
+  const clubNames = Object.keys(scoutingTeams || {});
+  return (
+    <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 20 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+        <SectionTitle eyebrow="Export" title={`Playbook “${book.name}”`} />
+        <button onClick={onClose} style={{ ...btnSecondary, padding: "7px 12px", fontSize: 12.5 }}>Close</button>
+      </div>
+      <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 14 }}>
+        <div>
+          <label style={labelStyle}>Club (logo)</label>
+          <select value={club} onChange={e => onSetClub(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", fontSize: 13, padding: "8px 10px", width: "auto", minWidth: 170 }}>
+            <option value={DRAW_OWN}>Our club</option>
+            {clubNames.map(n => <option key={n} value={n}>{n}</option>)}
+          </select>
+        </div>
+        <div>
+          <label style={labelStyle}>Title</label>
+          <input value={title} onChange={e => setTitle(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", fontSize: 13, padding: "8px 10px", width: 220 }} />
+        </div>
+        <div>
+          <label style={labelStyle}>Diagrams per row</label>
+          <select value={cols} onChange={e => setCols(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", fontSize: 13, padding: "8px 10px", width: "auto" }}>
+            <option value="auto">Auto</option><option value="1">1 (4 per page)</option><option value="2">2 (6 per page)</option><option value="3">3 (9 per page)</option>
+          </select>
+        </div>
+        <button onClick={doExport} disabled={busy} style={{ ...btnPrimary, flex: "none", padding: "9px 18px", opacity: busy ? 0.6 : 1 }}>{busy ? "Export…" : "Download PDF"}</button>
+        <button onClick={() => setPreview(p => !p)} style={{ ...btnSecondary, padding: "9px 14px", fontSize: 12.5 }}>{preview ? "Hide preview" : "Show preview"}</button>
+      </div>
+      {!logoUrl && <div style={{ fontSize: 12, color: AMBER, marginBottom: 10 }}>{club === DRAW_OWN ? "No logo set for your club yet — the title is exported without one." : `No logo saved for ${club} (Scouting Report → Team logo) — the title is exported without one.`}</div>}
+      {msg && <div style={{ fontSize: 12.5, color: RED, marginBottom: 10 }}>{msg}</div>}
+      {preview && (
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+          {pages.map((pg, i) => (
+            <div key={i} style={{ width: 270, height: 382, border: `1px solid ${LINE}`, borderRadius: 4, overflow: "hidden", position: "relative", flex: "none" }}>
+              <div style={{ transform: "scale(0.3)", transformOrigin: "top left", width: 900, height: 1273, pointerEvents: "none" }}>{React.cloneElement(pg, { key: undefined })}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {/* Contenu réellement exporté (hors écran, comme les autres exports du site) */}
+      <div className="print-only" id="draw-print-content" style={{ width: 900 }}>{pages}</div>
+      <ExportModal report={report} onClose={() => setReport(null)} />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Éditeur (coach)
+// ---------------------------------------------------------------------------
+
+function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault }) {
+  const S = useRef({ tool: "sel", frames: [{ items: [], lines: [], cap: "" }], fi: 0, items: [], lines: [], nid: 100, undo: [], draft: null, drag: null, dragH: null, sel: -1, curved: false }).current;
+  const svgRef = useRef();
+  const [, bump] = useState(0);
+  const redraw = () => bump(x => x + 1);
+  const [name, setName] = useState("New play");
+  const [group, setGroup] = useState("Plays");
+  const [cap, setCap] = useState("");
+  const [bookIdx, setBookIdx] = useState(bookIdxDefault ?? 0);
+  const [msg, setMsg] = useState("");
+
+  function loadFrame(i, frames) {
+    if (frames) S.frames = frames;
+    S.fi = i; const f = S.frames[i] || { items: [], lines: [], cap: "" };
+    S.items = f.items; S.lines = f.lines; S.undo = []; S.sel = -1; S.nid = 100;
+    setCap(f.cap || ""); redraw();
+  }
+  function syncFrame() { S.frames[S.fi] = { items: S.items, lines: S.lines, cap }; }
+  useEffect(() => {
+    if (initial) {
+      setName(initial.name); setGroup(initial.group || "Plays");
+      loadFrame(0, drawClone(initial.frames));
+    } else loadFrame(0, [{ items: [], lines: [], cap: "" }]);
+  }, [loadKey]);
+  useEffect(() => { if (bookIdxDefault !== undefined && bookIdxDefault !== null) setBookIdx(bookIdxDefault); }, [bookIdxDefault]);
+  useEffect(() => {
+    function onKey(e) {
+      if ((e.key === "Delete" || e.key === "Backspace") && S.sel >= 0 && S.lines[S.sel] && !/INPUT|TEXTAREA|SELECT/.test((document.activeElement || {}).tagName || "")) {
+        snap(); S.lines.splice(S.sel, 1); S.sel = -1; redraw();
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, []);
+
+  function snap() { S.undo.push(JSON.stringify({ items: S.items, lines: S.lines, nid: S.nid })); if (S.undo.length > 40) S.undo.shift(); }
+  function pt(e) {
+    const r = svgRef.current.getBoundingClientRect();
+    return { x: Math.max(8, Math.min(492, (e.clientX - r.left) / r.width * 500)), y: Math.max(8, Math.min(462, (e.clientY - r.top) / r.height * 470)) };
+  }
+  const hitItem = (p, r) => { let best = null, bd = r || 18; S.items.forEach(it => { const d = Math.hypot(it.x - p.x, it.y - p.y); if (d <= bd) { bd = d; best = it; } }); return best; };
+  function segDist(p, a, b) { const dx = b.x - a.x, dy = b.y - a.y, L = dx * dx + dy * dy || 1, t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / L)); return Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t)); }
+  function lineDist(p, l) { const q = drawSamplePts(l); let m = 1e9; for (let i = 1; i < q.length; i++) m = Math.min(m, segDist(p, q[i - 1], q[i])); return m; }
+  function hitLine(p) { for (let i = S.lines.length - 1; i >= 0; i--) { if (lineDist(p, S.lines[i]) < 9) return i; } return -1; }
+  function nextNum() { const used = {}; S.items.forEach(i => { if (i.t === "o") used[i.n] = 1; }); for (let n = 1; n <= 5; n++) if (!used[n]) return n; return S.items.filter(i => i.t === "o").length + 1; }
+  function autoCurve(d) { const dx = d.b.x - d.a.x, dy = d.b.y - d.a.y, L = Math.hypot(dx, dy) || 1; d.m = { x: (d.a.x + d.b.x) / 2 - dy * 0.22, y: (d.a.y + d.b.y) / 2 + dx * 0.22 }; }
+
+  function onDown(e) {
+    const p = pt(e), tool = S.tool;
+    try { svgRef.current.setPointerCapture(e.pointerId); } catch (err) { /* non bloquant */ }
+    if (tool === "o" || tool === "x" || tool === "ball") {
+      if (tool === "ball" && S.items.some(i => i.t === "ball")) { S.items = S.items.filter(i => i.t !== "ball"); S.frames[S.fi].items = S.items; } else snap();
+      S.items.push({ id: S.nid++, t: tool, x: p.x, y: p.y, n: tool === "o" ? nextNum() : "" }); redraw(); return;
+    }
+    if (DRAW_LINE_TOOLS.includes(tool)) {
+      const h = hitItem(p, 22), a = h ? { x: h.x, y: h.y } : p;
+      S.draft = { kind: tool, a, b: p, from: h ? h.id : null }; redraw(); return;
+    }
+    if (tool === "sel") {
+      if (S.sel >= 0 && S.lines[S.sel]) { const m = drawMidPt(S.lines[S.sel]); if (Math.hypot(m.x - p.x, m.y - p.y) < 14) { snap(); S.dragH = S.sel; return; } }
+      const h2 = hitItem(p, 20); if (h2) { snap(); S.drag = h2.id; return; }
+      S.sel = hitLine(p); redraw(); return;
+    }
+    if (tool === "del") {
+      const h3 = hitItem(p, 18);
+      if (h3) { snap(); S.items = S.items.filter(i => i !== h3); S.lines = S.lines.filter(l => l.from !== h3.id); }
+      else { const k = hitLine(p); if (k >= 0) { snap(); S.lines.splice(k, 1); } }
+      S.sel = -1; S.frames[S.fi].items = S.items; S.frames[S.fi].lines = S.lines; redraw();
+    }
+  }
+  function onMove(e) {
+    const p = pt(e);
+    if (S.draft) { S.draft.b = p; if (S.curved) autoCurve(S.draft); redraw(); }
+    else if (S.dragH !== null) { S.lines[S.dragH].m = { x: p.x, y: p.y }; redraw(); }
+    else if (S.drag) {
+      const it = S.items.find(i => i.id === S.drag);
+      if (it) { it.x = p.x; it.y = p.y; S.lines.forEach(l => { if (l.from === it.id) { l.a.x = it.x; l.a.y = it.y; } }); redraw(); }
+    }
+  }
+  function onUp() {
+    if (S.draft) {
+      const d = S.draft; S.draft = null;
+      if (Math.hypot(d.b.x - d.a.x, d.b.y - d.a.y) > 18) { snap(); S.lines.push(d); S.sel = S.lines.length - 1; }
+      redraw();
+    }
+    S.drag = null; S.dragH = null;
+  }
+  function onDbl(e) {
+    if (S.tool !== "sel") return; const p = pt(e);
+    if (S.sel >= 0 && S.lines[S.sel]) { const m = drawMidPt(S.lines[S.sel]); if (Math.hypot(m.x - p.x, m.y - p.y) < 14) { snap(); delete S.lines[S.sel].m; redraw(); return; } }
+    const h = hitItem(p, 20); if (h && h.t === "o") { snap(); h.h = !h.h; redraw(); }
+  }
+  function undo() { if (!S.undo.length) return; const s = JSON.parse(S.undo.pop()); S.items = s.items; S.lines = s.lines; S.nid = s.nid; S.sel = -1; S.frames[S.fi] = { ...S.frames[S.fi], items: S.items, lines: S.lines }; redraw(); }
+  function clearAll() { snap(); S.items = []; S.lines = []; S.sel = -1; S.frames[S.fi] = { ...S.frames[S.fi], items: S.items, lines: S.lines }; redraw(); }
+
+  function addFrame(keep) {
+    syncFrame();
+    const cur = S.frames[S.fi], nf = { items: [], lines: [], cap: "" };
+    if (keep) {
+      // étape suivante : mêmes joueurs, placés là où leurs cuts / dribbles les ont amenés, sans les flèches
+      nf.items = drawClone(cur.items).map(it => { cur.lines.forEach(l => { if (l.from === it.id && (l.kind === "cut" || l.kind === "dribble")) { it.x = l.b.x; it.y = l.b.y; } }); return it; });
+    }
+    S.frames.splice(S.fi + 1, 0, nf); loadFrame(S.fi + 1);
+  }
+  function delFrame() { syncFrame(); S.frames.splice(S.fi, 1); loadFrame(Math.max(0, S.fi - 1)); }
+  function gotoFrame(i) { syncFrame(); loadFrame(i); }
+
+  function currentPlay() {
+    syncFrame();
+    return { name: name.trim() || "Untitled play", group: group.trim() || "Plays", frames: drawClone(S.frames) };
+  }
+  const hasContent = () => S.frames.some((f, i) => (i === S.fi ? S.items.length || S.lines.length : (f.items.length || f.lines.length)));
+  async function save() {
+    if (!hasContent()) { setMsg("Draw something first."); return; }
+    await onSave(currentPlay(), Number(bookIdx));
+    setMsg("Saved.");
+  }
+  function insert() {
+    if (!hasContent()) { setMsg("Draw something first."); return; }
+    setMsg(""); onInsert(currentPlay());
+  }
+
+  const extra = (() => {
+    let x = "";
+    if (S.draft) x += drawLineSvg(S.draft, DRAW_PAL_EDIT);
+    if (S.sel >= 0 && S.lines[S.sel] && S.tool === "sel") { const m = drawMidPt(S.lines[S.sel]); x += `<circle cx="${drawF(m.x)}" cy="${drawF(m.y)}" r="8" fill="${PANEL}" stroke="${AMBER}" stroke-width="2.4"/>`; }
+    return x;
+  })();
+  const toolBtn = (on) => ({ display: "inline-flex", alignItems: "center", gap: 6, padding: "6px 10px", background: on ? AMBER : PANEL2, color: on ? "#1A1300" : PAPER, border: `1px solid ${on ? AMBER : LINE}`, borderRadius: 7, fontSize: 12.5, fontWeight: 500, cursor: "pointer", fontFamily: "inherit" });
+  const smallBtn = { padding: "7px 12px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 7, color: PAPER, fontSize: 12.5, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" };
+  const field = { ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", fontSize: 13, padding: "8px 10px" };
+  const groupsList = [...new Set(books.flatMap(b => (b.plays || []).map(p => p.group || "Plays")))];
+
+  return (
+    <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
+      <style>{`.draw-tool svg { width: 22px; height: 14px; flex: none; }`}</style>
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+        {DRAW_TOOLS.map(([id, label, icon]) => (
+          <button key={id} className="draw-tool" onClick={() => { S.tool = id; S.sel = -1; redraw(); }} style={toolBtn(S.tool === id)}>
+            <span style={{ display: "inline-flex" }} dangerouslySetInnerHTML={{ __html: icon }} />{label}
+          </button>
+        ))}
+        <button className="draw-tool" onClick={() => { S.curved = !S.curved; redraw(); }} style={toolBtn(S.curved)}>
+          <span style={{ display: "inline-flex" }} dangerouslySetInnerHTML={{ __html: '<svg viewBox="0 0 22 14"><path d="M2 12 Q8 0 20 5" stroke="currentColor" stroke-width="1.8" fill="none"/></svg>' }} />Curved
+        </button>
+        <button onClick={undo} style={smallBtn}>Undo</button>
+        <button onClick={clearAll} style={{ ...smallBtn, color: "#8B93A1", background: "transparent" }}>Clear</button>
+      </div>
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center" }}>
+        {S.frames.map((f, i) => <button key={i} onClick={() => gotoFrame(i)} style={toolBtn(i === S.fi)}>Diagram {i + 1}</button>)}
+        <button onClick={() => addFrame(true)} style={smallBtn}>+ Next step</button>
+        <button onClick={() => addFrame(false)} style={smallBtn}>+ Blank</button>
+        {S.frames.length > 1 && <button onClick={delFrame} style={{ ...smallBtn, color: "#8B93A1", background: "transparent" }}>Delete diagram</button>}
+      </div>
+      <div style={{ background: "#1D232C", border: `1px solid ${LINE}`, borderRadius: 8, padding: 6, touchAction: "none" }}>
+        <svg ref={svgRef} viewBox="0 0 500 470" style={{ display: "block", width: "100%", height: "auto", maxHeight: 560, cursor: "crosshair", userSelect: "none" }}
+          onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp} onDoubleClick={onDbl}
+          dangerouslySetInnerHTML={{ __html: drawFrameSvg({ items: S.items, lines: S.lines }, DRAW_PAL_EDIT, extra) }} />
+      </div>
+      <div style={{ fontSize: 12, color: "#8B93A1", lineHeight: 1.5 }}>{DRAW_HINTS[S.tool]}</div>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 }}>
+        <div><label style={labelStyle}>Play name</label><input value={name} onChange={e => setName(e.target.value)} style={field} /></div>
+        <div>
+          <label style={labelStyle}>Group</label>
+          <input value={group} onChange={e => setGroup(e.target.value)} list="draw-groups" style={field} />
+          <datalist id="draw-groups">{groupsList.map(g => <option key={g} value={g} />)}</datalist>
+        </div>
+        <div style={{ gridColumn: "1 / -1" }}><label style={labelStyle}>Caption (this diagram)</label><input value={cap} onChange={e => setCap(e.target.value)} placeholder="Short note printed under the diagram" style={field} /></div>
+      </div>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <select value={bookIdx} onChange={e => setBookIdx(e.target.value)} style={{ ...field, width: "auto", minWidth: 150 }}>
+          {books.map((b, i) => <option key={b.id} value={i}>{b.name}</option>)}
+        </select>
+        <button onClick={save} disabled={!books.length} style={{ ...btnPrimary, flex: "none", padding: "9px 16px", fontSize: 13, opacity: books.length ? 1 : 0.5 }}>Save play</button>
+        <button onClick={insert} style={smallBtn}>Insert in Scouting Report — Staff</button>
+        {!books.length && <span style={{ fontSize: 12, color: AMBER }}>Create a playbook first.</span>}
+        {msg && <span style={{ fontSize: 12.5, color: TEAL }}>{msg}</span>}
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Onglet Draw
+// ---------------------------------------------------------------------------
+
+function DrawTab({ isCoach, team }) {
+  const scouting = useScoutingTeams();
+  const [books, setBooks] = useState(null);
+  const [loadKey, setLoadKey] = useState(0);
+  const [initial, setInitial] = useState(null);
+  const [cur, setCur] = useState(null); // { b, p } : play chargée dans l'éditeur
+  const [exportIdx, setExportIdx] = useState(null);
+  const [viewer, setViewer] = useState(null); // { b, p } : lecture seule (joueurs)
+  const [insertCtx, setInsertCtx] = useState(null); // { play } | { book }
+  const [insertTeam, setInsertTeam] = useState("");
+  const [toast, setToast] = useState("");
+  const [confirmDel, setConfirmDel] = useState(null);
+  const [newBookName, setNewBookName] = useState("");
+
+  useEffect(() => { (async () => setBooks((await storeGet("draw_playbooks")) || []))(); }, []);
+  const say = (m) => { setToast(m); setTimeout(() => setToast(""), 3500); };
+  async function saveBooks(next) { setBooks(next); await storeSet("draw_playbooks", next); }
+
+  if (books === null) return <EmptyState text="Loading…" />;
+
+  const teamNames = Object.keys(scouting.teams || {});
+
+  async function savePlay(play, bi) {
+    const next = books.map(b => ({ ...b, plays: [...b.plays] }));
+    const book = next[bi]; if (!book) return;
+    if (cur && cur.b === bi && book.plays[cur.p] && book.plays[cur.p].name === play.name) {
+      book.plays[cur.p] = { ...book.plays[cur.p], ...play };
+    } else {
+      book.plays.push({ id: uid(), ...play });
+      setCur({ b: bi, p: book.plays.length - 1 });
+    }
+    await saveBooks(next);
+  }
+  function loadPlay(bi, pi) {
+    const p = books[bi].plays[pi];
+    if (isCoach) { setInitial(p); setCur({ b: bi, p: pi }); setLoadKey(k => k + 1); window.scrollTo({ top: 0, behavior: "smooth" }); }
+    else setViewer({ b: bi, p: pi });
+  }
+  async function addBook() {
+    const n = newBookName.trim() || `Playbook ${books.length + 1}`;
+    await saveBooks([...books, drawNewBook(n)]); setNewBookName("");
+  }
+  async function deleteBook(bi) { await saveBooks(books.filter((_, i) => i !== bi)); setConfirmDel(null); if (exportIdx === bi) setExportIdx(null); setCur(null); }
+  async function deletePlay(bi, pi) {
+    const next = books.map((b, i) => i === bi ? { ...b, plays: b.plays.filter((_, k) => k !== pi) } : b);
+    await saveBooks(next); setConfirmDel(null); setCur(null);
+  }
+  async function setClub(bi, club) { await saveBooks(books.map((b, i) => i === bi ? { ...b, club } : b)); }
+  async function renameBook(bi, name) { await saveBooks(books.map((b, i) => i === bi ? { ...b, name } : b)); }
+
+  async function doInsert() {
+    const t = insertTeam || teamNames[0];
+    if (!t || !insertCtx) return;
+    const key = "draw_staff:" + t;
+    const existing = (await storeGet(key)) || [];
+    const plays = insertCtx.book !== undefined ? books[insertCtx.book].plays : [insertCtx.play];
+    const added = plays.map(p => ({ id: uid(), name: p.name, group: p.group || "Plays", frames: drawClone(p.frames), note: "" }));
+    await storeSet(key, [...existing, ...added]);
+    // Un playbook entier envoyé à une équipe adverse prend automatiquement son logo, tant que
+    // son club n'a jamais été choisi explicitement.
+    if (insertCtx.book !== undefined && (!books[insertCtx.book].club || books[insertCtx.book].club === DRAW_OWN)) await setClub(insertCtx.book, t);
+    setInsertCtx(null);
+    say(`${added.length} play${added.length > 1 ? "s" : ""} inserted in Scouting Report › Staff for ${t}.`);
+  }
+
+  const smallBtn = { padding: "6px 11px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 7, color: PAPER, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" };
+  const own = team?.logo || null;
+
+  const playbooksPanel = (
+    <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, display: "flex", flexDirection: "column", gap: 12, minWidth: 0 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 17, fontWeight: 700 }}>Playbooks</div>
+        {isCoach && (
+          <div style={{ display: "flex", gap: 6 }}>
+            <input value={newBookName} onChange={e => setNewBookName(e.target.value)} placeholder="New playbook name" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", fontSize: 12.5, padding: "6px 9px", width: 150 }} />
+            <button onClick={addBook} style={smallBtn}>New</button>
+          </div>
+        )}
+      </div>
+      {books.length === 0 && <EmptyState text={isCoach ? "No playbook yet. Create one, draw a play and save it." : "No playbook shared yet."} />}
+      {books.map((b, bi) => (
+        <div key={b.id} style={{ border: `1px solid ${LINE}`, borderRadius: 10, overflow: "hidden" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "9px 10px", background: PANEL2, flexWrap: "wrap" }}>
+            <div style={{ fontWeight: 600, fontSize: 13.5 }}>{b.name} <span style={{ color: "#5C6470", fontWeight: 400, fontSize: 12 }}>· {b.plays.length} plays</span></div>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <button onClick={() => setExportIdx(bi)} style={smallBtn}>Export</button>
+              {isCoach && <button onClick={() => { setInsertCtx({ book: bi }); setInsertTeam(teamNames[0] || ""); }} style={smallBtn}>Insert in Staff</button>}
+              {isCoach && (confirmDel === "b" + bi
+                ? <><button onClick={() => deleteBook(bi)} style={{ ...smallBtn, color: RED }}>Confirm</button><button onClick={() => setConfirmDel(null)} style={{ ...smallBtn, color: "#8B93A1" }}>Cancel</button></>
+                : <button onClick={() => setConfirmDel("b" + bi)} style={{ ...smallBtn, color: "#8B93A1", background: "transparent" }}><Trash2 size={12} /></button>)}
+            </div>
+          </div>
+          {b.plays.length === 0 ? <div style={{ padding: 12, fontSize: 12.5, color: "#8B93A1" }}>No play yet.</div> : drawGroupsOf(b).map(g => (
+            <div key={g.name}>
+              <div style={{ padding: "10px 10px 0", fontSize: 10.5, letterSpacing: "0.1em", textTransform: "uppercase", color: "#8B93A1" }}>{g.name} · {g.plays.length}</div>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(112px, 1fr))", gap: 8, padding: 10 }}>
+                {g.plays.map(o => (
+                  <div key={o.i} style={{ background: "#1D232C", border: `1px solid ${cur && cur.b === bi && cur.p === o.i ? AMBER : LINE}`, borderRadius: 6, padding: 4, display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
+                    <button onClick={() => loadPlay(bi, o.i)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left", color: PAPER, fontFamily: "inherit", fontSize: 12, display: "flex", flexDirection: "column", gap: 4 }}>
+                      <DrawThumb frame={o.p.frames[0]} />
+                      <span style={{ padding: "0 2px" }}>{o.p.name}{o.p.frames.length > 1 && <span style={{ color: "#8B93A1", fontSize: 10.5 }}> · {o.p.frames.length} diagrams</span>}</span>
+                    </button>
+                    {isCoach && (confirmDel === `p${bi}-${o.i}`
+                      ? <div style={{ display: "flex", gap: 8 }}><button onClick={() => deletePlay(bi, o.i)} style={{ fontSize: 11, color: RED, background: "none", border: "none", cursor: "pointer" }}>Confirm</button><button onClick={() => setConfirmDel(null)} style={{ fontSize: 11, color: "#8B93A1", background: "none", border: "none", cursor: "pointer" }}>Cancel</button></div>
+                      : <button onClick={() => setConfirmDel(`p${bi}-${o.i}`)} style={{ fontSize: 11, color: "#5C6470", background: "none", border: "none", cursor: "pointer", textAlign: "left", padding: "0 2px" }}>Delete</button>)}
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+
+  return (
+    <div>
+      <style>{`.draw-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr); gap: 16px; align-items: start; } @media (max-width: 860px) { .draw-grid { grid-template-columns: minmax(0, 1fr); } }`}</style>
+      <SectionTitle eyebrow="Draw" title="Plays and playbooks" />
+      {toast && <div style={{ fontSize: 13, color: TEAL, marginBottom: 12 }}>{toast}</div>}
+
+      {insertCtx && (
+        <div style={{ background: PANEL2, border: `1px solid ${AMBER}`, borderRadius: 10, padding: 14, marginBottom: 16, display: "flex", flexDirection: "column", gap: 10 }}>
+          <div style={{ fontSize: 13 }}>Insert {insertCtx.book !== undefined ? `the playbook “${books[insertCtx.book].name}” (${books[insertCtx.book].plays.length} plays)` : `the play “${insertCtx.play.name}”`} into Scouting Report › Staff.</div>
+          {teamNames.length === 0 ? <div style={{ fontSize: 12.5, color: AMBER }}>No team in Scouting yet — add one in Scouting → Manage teams first.</div> : (
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <label style={{ ...labelStyle, margin: 0 }}>Opponent</label>
+              <select value={insertTeam || teamNames[0]} onChange={e => setInsertTeam(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", fontSize: 13, padding: "7px 10px", width: "auto", minWidth: 150 }}>
+                {teamNames.map(n => <option key={n} value={n}>{n}</option>)}
+              </select>
+              <button onClick={doInsert} style={{ ...btnPrimary, flex: "none", padding: "8px 16px", fontSize: 13 }}>Insert</button>
+              <button onClick={() => setInsertCtx(null)} style={{ ...btnSecondary, padding: "8px 14px", fontSize: 13 }}>Cancel</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {exportIdx !== null && books[exportIdx] && (
+        <DrawExportPanel key={books[exportIdx].id} book={books[exportIdx]} teamLogo={own} scoutingTeams={scouting.teams} onSetClub={(c) => setClub(exportIdx, c)} onClose={() => setExportIdx(null)} />
+      )}
+
+      {viewer && books[viewer.b] && books[viewer.b].plays[viewer.p] && (
+        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 8 }}>
+            <div style={{ fontSize: 17, fontWeight: 700 }}>{books[viewer.b].plays[viewer.p].name} <span style={{ fontSize: 12, color: "#8B93A1", fontWeight: 400 }}>· {books[viewer.b].plays[viewer.p].group || "Plays"}</span></div>
+            <button onClick={() => setViewer(null)} style={{ ...btnSecondary, padding: "6px 12px", fontSize: 12.5 }}>Close</button>
+          </div>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))", gap: 14 }}>
+            {books[viewer.b].plays[viewer.p].frames.map((f, i) => (
+              <div key={i}><DrawThumb frame={f} style={{ border: `1px solid ${LINE}`, borderRadius: 6 }} />{f.cap && <div style={{ fontSize: 12.5, color: "#C8CDD5", marginTop: 6 }}>{f.cap}</div>}</div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isCoach ? (
+        <div className="draw-grid">
+          <DrawEditor books={books} loadKey={loadKey} initial={initial} bookIdxDefault={cur ? cur.b : 0} onSave={savePlay} onInsert={(play) => { setInsertCtx({ play }); setInsertTeam(teamNames[0] || ""); window.scrollTo({ top: 0, behavior: "smooth" }); }} />
+          {playbooksPanel}
+        </div>
+      ) : playbooksPanel}
+    </div>
+  );
+}
+
+// Plays envoyées vers l'onglet Staff d'une équipe adverse (voir DrawTab › Insert in Staff).
+function StaffDrawPlays({ teamName, isCoach }) {
+  const [plays, setPlays] = useState(null);
+  const [confirmId, setConfirmId] = useState(null);
+  const key = "draw_staff:" + teamName;
+  useEffect(() => { (async () => setPlays((await storeGet(key)) || []))(); }, [teamName]);
+  if (plays === null || plays.length === 0) return null;
+  async function persist(next) { setPlays(next); await storeSet(key, next); }
+  return (
+    <div style={{ marginBottom: 28 }}>
+      <SectionTitle eyebrow="Draw" title="Plays shared by the staff" />
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 12 }}>
+        {plays.map(p => (
+          <div key={p.id} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 10, display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
+            <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(2, p.frames.length)}, 1fr)`, gap: 4 }}>
+              {p.frames.map((f, i) => <DrawThumb key={i} frame={f} style={{ borderRadius: 4 }} />)}
+            </div>
+            <div style={{ fontWeight: 600, fontSize: 13.5 }}>{p.name} <span style={{ color: "#8B93A1", fontWeight: 400, fontSize: 12 }}>· {p.group || "Plays"}</span></div>
+            {p.frames.some(f => f.cap) && <div style={{ fontSize: 12, color: "#8B93A1" }}>{p.frames.map(f => f.cap).filter(Boolean).join(" · ")}</div>}
+            {isCoach ? (
+              <textarea defaultValue={p.note || ""} placeholder="Staff notes: how we defend it, who guards whom…" onBlur={e => { if (e.target.value !== (p.note || "")) persist(plays.map(x => x.id === p.id ? { ...x, note: e.target.value } : x)); }}
+                style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", fontSize: 12.5, padding: "8px 10px", minHeight: 54, resize: "vertical" }} />
+            ) : (p.note ? <div style={{ fontSize: 12.5, color: "#D8DCE2", whiteSpace: "pre-wrap" }}>{p.note}</div> : null)}
+            {isCoach && (confirmId === p.id
+              ? <div style={{ display: "flex", gap: 8 }}><button onClick={() => { persist(plays.filter(x => x.id !== p.id)); setConfirmId(null); }} style={{ fontSize: 11.5, color: RED, background: "none", border: "none", cursor: "pointer" }}>Confirm</button><button onClick={() => setConfirmId(null)} style={{ fontSize: 11.5, color: "#8B93A1", background: "none", border: "none", cursor: "pointer" }}>Cancel</button></div>
+              : <button onClick={() => setConfirmId(p.id)} style={{ fontSize: 11.5, color: RED, background: "none", border: "none", cursor: "pointer", textAlign: "left", padding: 0 }}>Remove</button>)}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+
+
 function ScoutingStaffPanel({ teamName, isCoach }) {
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -10240,6 +10939,8 @@ function ScoutingStaffPanel({ teamName, isCoach }) {
           ))}
         </div>
       )}
+
+      <StaffDrawPlays teamName={teamName} isCoach={isCoach} />
 
       <SectionTitle eyebrow="Observation" title="Stats & charts for this team" />
       {!observation || (observation.plays || []).length === 0 ? (
@@ -11041,7 +11742,8 @@ function rankStat(plays, label) {
   return { n: m.length, freq: (100 * m.length) / plays.length, ppp: pts / m.length };
 }
 
-function useAllObservations(matchFilter) {
+function useAllObservations(matchFilter, side = "off") {
+  const keep = side === "def" ? isDefense : isOffense;
   const [state, setState] = useState({ loading: true, teams: {} });
   useEffect(() => {
     let alive = true;
@@ -11049,7 +11751,7 @@ function useAllObservations(matchFilter) {
       const all = (await storeGet("scouting_observations")) || {};
       let out = {};
       for (const [name, team] of Object.entries(all)) {
-        const plays = observationIncludedPlays(team).filter(isOffense);
+        const plays = observationIncludedPlays(team).filter(keep);
         let tagMap = {};
         try { tagMap = (await storeGet("scouting_observation_player_tags:" + name)) || {}; } catch (e) { /* non bloquant */ }
         const confirmed = new Set(Object.entries(tagMap).filter(([, v]) => v === true).map(([k]) => k));
@@ -11066,7 +11768,7 @@ function useAllObservations(matchFilter) {
         for (const m of idx) {
           if (matchFilter && !matchFilter.has(matchKey(m.date, m.opponent))) continue;
           const d = await storeGet("match:" + m.id);
-          ((d && d.plays) || []).forEach(p => { if (isOffense(p)) ownPlays.push(p); });
+          ((d && d.plays) || []).forEach(p => { if (keep(p)) ownPlays.push(p); });
         }
         if (ownPlays.length) {
           const confirmed = new Set(ownPlays.map(p => p.player).filter(x => x && (rosterNames.size === 0 || rosterNames.has(x))));
@@ -11076,7 +11778,7 @@ function useAllObservations(matchFilter) {
       if (alive) setState({ loading: false, teams: out });
     })();
     return () => { alive = false; };
-  }, [matchFilter]);
+  }, [matchFilter, side]);
   return state;
 }
 
@@ -11112,7 +11814,12 @@ function RankPanel({ children, style }) {
 }
 
 function ScoutingRankingsTab({ matchFilter }) {
-  const { loading, teams } = useAllObservations(matchFilter);
+  // Off / Def : on classe les actions offensives OU défensives (jamais les deux). En défense, les
+  // points comptés sont ceux encaissés : plus le PPPP est bas, meilleur est le classement.
+  const [side, setSide] = useState("off");
+  const isDef = side === "def";
+  const sideWord = isDef ? "defensive" : "offensive";
+  const { loading, teams } = useAllObservations(matchFilter, side);
   const cats = currentObservationTagCategories();
   const [view, setView] = useState("teams");
   const [group, setGroup] = useState("Playtype");
@@ -11122,7 +11829,8 @@ function ScoutingRankingsTab({ matchFilter }) {
 
   const names = Object.keys(teams);
   const catName = (RANK_GROUPS.find(g => g[0] === group) || RANK_GROUPS[0])[1];
-  const labels = categoryTags(catName, cats);
+  // Tags rangés par ordre alphabétique (insensible à la casse/aux accents) pour les retrouver plus vite.
+  const labels = [...categoryTags(catName, cats)].sort((x, y) => String(x).localeCompare(String(y), "fr", { sensitivity: "base", numeric: true }));
   const curLabel = labels.includes(label) ? label : (labels[0] || "");
 
   const teamRows = useMemo(() => {
@@ -11139,16 +11847,16 @@ function ScoutingRankingsTab({ matchFilter }) {
 
   // ---- Vue Teams ----
   function renderTeams() {
-    const sorted = [...teamRows].sort((a, b) => metric === "freq" ? b.s.freq - a.s.freq : b.s.ppp - a.s.ppp);
+    const sorted = [...teamRows].sort((a, b) => metric === "freq" ? b.s.freq - a.s.freq : (isDef ? a.s.ppp - b.s.ppp : b.s.ppp - a.s.ppp));
     const most = [...teamRows].sort((a, b) => b.s.freq - a.s.freq)[0];
     const eligible = teamRows.filter(r => r.s.n >= RANK_SAMPLE_WARN);
-    const best = [...(eligible.length ? eligible : teamRows)].sort((a, b) => b.s.ppp - a.s.ppp)[0];
+    const best = [...(eligible.length ? eligible : teamRows)].sort((a, b) => isDef ? a.s.ppp - b.s.ppp : b.s.ppp - a.s.ppp)[0];
     const ownIdx = sorted.findIndex(r => teams[r.name].own);
     const rows = sorted.map(r => ({
       name: r.name, own: !!teams[r.name].own, n: r.s.n, v: metric === "freq" ? r.s.freq : r.s.ppp,
       a: metric === "freq" ? r.s.freq.toFixed(1) + "%" : r.s.ppp.toFixed(2),
       b: metric === "freq" ? r.s.ppp.toFixed(2) : r.s.freq.toFixed(1) + "%",
-      tone: metric === "ppp" && r.s.n >= RANK_SAMPLE_WARN ? (r.s.ppp >= 1.1 ? TEAL : r.s.ppp < 0.9 ? RED : undefined) : undefined,
+      tone: metric === "ppp" && r.s.n >= RANK_SAMPLE_WARN ? (isDef ? (r.s.ppp <= 0.9 ? TEAL : r.s.ppp >= 1.1 ? RED : undefined) : (r.s.ppp >= 1.1 ? TEAL : r.s.ppp < 0.9 ? RED : undefined)) : undefined,
     }));
     return (
       <RankPanel>
@@ -11164,12 +11872,12 @@ function ScoutingRankingsTab({ matchFilter }) {
               <div style={{ background: PANEL2, borderRadius: 8, padding: 12 }}>
                 <div style={{ fontSize: 11.5, color: "#8B93A1" }}>Uses it the most</div>
                 <div style={{ fontSize: 20, fontWeight: 700, margin: "2px 0" }}>{most.name}</div>
-                <div style={{ fontSize: 12, color: "#8B93A1" }}>{most.s.freq.toFixed(1)}% of offensive actions · {most.s.n} times</div>
+                <div style={{ fontSize: 12, color: "#8B93A1" }}>{most.s.freq.toFixed(1)}% of {sideWord} actions · {most.s.n} times</div>
               </div>
               <div style={{ background: PANEL2, borderRadius: 8, padding: 12 }}>
-                <div style={{ fontSize: 11.5, color: "#8B93A1" }}>Most efficient{eligible.length ? "" : " (small samples)"}</div>
+                <div style={{ fontSize: 11.5, color: "#8B93A1" }}>{isDef ? "Best defense (fewest points allowed)" : "Most efficient"}{eligible.length ? "" : " (small samples)"}</div>
                 <div style={{ fontSize: 20, fontWeight: 700, margin: "2px 0" }}>{best.name}</div>
-                <div style={{ fontSize: 12, color: "#8B93A1" }}>{best.s.ppp.toFixed(2)} points per action · {best.s.n} actions</div>
+                <div style={{ fontSize: 12, color: "#8B93A1" }}>{best.s.ppp.toFixed(2)} points {isDef ? "allowed " : ""}per action · {best.s.n} actions</div>
               </div>
             </div>
             {ownIdx >= 0 && <div style={{ fontSize: 13, color: TEAL, marginBottom: 10 }}>Our team ranks <b>#{ownIdx + 1}</b> of {sorted.length} on {metric === "freq" ? "frequency" : "efficiency"} for {curLabel}.</div>}
@@ -11177,7 +11885,7 @@ function ScoutingRankingsTab({ matchFilter }) {
           </>
         )}
         <p style={{ color: "#5C6470", fontSize: 12, lineHeight: 1.5, margin: "12px 0 0" }}>
-          Frequency = share of the team's offensive actions carrying this tag. PPPP = points per tagged action (made baskets and free throws). Observed teams with different numbers of files are compared on shares, not totals.
+          Frequency = share of the team's {sideWord} actions carrying this tag. PPPP = points {isDef ? "allowed " : ""}per tagged action (made baskets and free throws){isDef ? " — lower is better on defense" : ""}. Observed teams with different numbers of files are compared on shares, not totals.
         </p>
       </RankPanel>
     );
@@ -11194,7 +11902,7 @@ function ScoutingRankingsTab({ matchFilter }) {
     return (
       <RankPanel>
         <p style={{ color: "#8B93A1", fontSize: 13, lineHeight: 1.5, margin: "0 0 12px" }}>
-          Each cell is the share of the team's offensive actions. The small number is the team's rank (1 to 3) on that tag; the second line is PPPP.
+          Each cell is the share of the team's {sideWord} actions. The small number is the team's rank (1 to 3) on that tag; the second line is PPPP.
         </p>
         <div style={{ overflowX: "auto" }}>
           <table style={{ borderCollapse: "collapse", minWidth: 560, width: "100%", fontVariantNumeric: "tabular-nums" }}>
@@ -11241,9 +11949,9 @@ function ScoutingRankingsTab({ matchFilter }) {
     return out;
   }
   function renderPlayers() {
-    const list = playersFor(curLabel).filter(r => r.n >= minPoss).sort((a, b) => b.ppp - a.ppp);
-    const rows = list.slice(0, 15).map(r => ({ name: r.player, own: !!teams[r.team].own, sub: r.team, n: r.n, v: r.ppp, a: r.ppp.toFixed(2), b: String(r.n), tone: r.ppp >= 1.1 ? TEAL : r.ppp < 0.9 ? RED : undefined }));
-    const bests = labels.map(l => { const c = playersFor(l).filter(r => r.n >= minPoss).sort((a, b) => b.ppp - a.ppp)[0]; return c ? { l, c } : null; }).filter(Boolean);
+    const list = playersFor(curLabel).filter(r => r.n >= minPoss).sort((a, b) => isDef ? a.ppp - b.ppp : b.ppp - a.ppp);
+    const rows = list.slice(0, 15).map(r => ({ name: r.player, own: !!teams[r.team].own, sub: r.team, n: r.n, v: r.ppp, a: r.ppp.toFixed(2), b: String(r.n), tone: isDef ? (r.ppp <= 0.9 ? TEAL : r.ppp >= 1.1 ? RED : undefined) : (r.ppp >= 1.1 ? TEAL : r.ppp < 0.9 ? RED : undefined) }));
+    const bests = labels.map(l => { const c = playersFor(l).filter(r => r.n >= minPoss).sort((a, b) => isDef ? a.ppp - b.ppp : b.ppp - a.ppp)[0]; return c ? { l, c } : null; }).filter(Boolean);
     const anyConfirmed = names.some(n => teams[n].confirmed.size > 0);
     return (
       <>
@@ -11260,7 +11968,7 @@ function ScoutingRankingsTab({ matchFilter }) {
             <div style={{ color: "#8B93A1", fontSize: 13 }}>No player reaches {minPoss} actions on “{curLabel}”.</div>
           ) : (
             <>
-              <p style={{ color: "#8B93A1", fontSize: 13, lineHeight: 1.5, margin: "0 0 10px" }}>Players of all observed teams ranked by PPPP on <b style={{ color: PAPER }}>{curLabel}</b> (offensive actions where the player is tagged).</p>
+              <p style={{ color: "#8B93A1", fontSize: 13, lineHeight: 1.5, margin: "0 0 10px" }}>Players of all observed teams ranked by PPPP on <b style={{ color: PAPER }}>{curLabel}</b> ({sideWord} actions where the player is tagged{isDef ? "; lower PPPP = better defender" : ""}).</p>
               <RankBars rows={rows} cols={["PPPP", "Actions", "Player"]} />
             </>
           )}
@@ -11308,7 +12016,7 @@ function ScoutingRankingsTab({ matchFilter }) {
         paint: shots.length && paint.length ? (100 * paint.length) / shots.length : null,
       };
     });
-    const defs = [["pppp", "PPPP", "high", v => v.toFixed(2)], ["tov", "TOV %", "low", v => v.toFixed(1)], ["open", "Open shots %", "high", v => v.toFixed(0)], ["three", "3pt share %", "high", v => v.toFixed(0)], ["paint", "Paint share %", "high", v => v.toFixed(0)]];
+    const defs = [["pppp", isDef ? "PPPP allowed" : "PPPP", isDef ? "low" : "high", v => v.toFixed(2)], ["tov", isDef ? "TOV forced %" : "TOV %", isDef ? "high" : "low", v => v.toFixed(1)], ["open", isDef ? "Open shots allowed %" : "Open shots %", isDef ? "low" : "high", v => v.toFixed(0)], ["three", "3pt share %", isDef ? "low" : "high", v => v.toFixed(0)], ["paint", "Paint share %", isDef ? "low" : "high", v => v.toFixed(0)]];
     return (
       <RankPanel>
         <p style={{ color: "#8B93A1", fontSize: 13, lineHeight: 1.5, margin: "0 0 12px" }}>One column per aspect, across all observed teams. Best value in green, worst in red.</p>
@@ -11335,7 +12043,7 @@ function ScoutingRankingsTab({ matchFilter }) {
           </table>
         </div>
         <p style={{ color: "#5C6470", fontSize: 12, lineHeight: 1.5, margin: "12px 0 0" }}>
-          TOV % = turnovers per offensive action. Open shots % = Open ÷ (Open + Contested). 3pt share = 3-point attempts among tagged shots. Paint share needs the “Paint” shot-zone tag.
+          TOV % = turnovers per {sideWord} action{isDef ? " (forced by the defense)" : ""}. Open shots % = Open ÷ (Open + Contested). 3pt share = 3-point attempts among tagged shots. Paint share needs the “Paint” shot-zone tag.
         </p>
       </RankPanel>
     );
@@ -11344,10 +12052,14 @@ function ScoutingRankingsTab({ matchFilter }) {
   const needsContext = view !== "results";
   return (
     <div>
-      <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap", alignItems: "center" }}>
         {views.map(([id, lbl]) => (
           <button key={id} onClick={() => setView(id)} style={{ padding: "7px 14px", borderRadius: 7, border: `1px solid ${view === id ? AMBER : LINE}`, background: view === id ? PANEL2 : "transparent", color: view === id ? AMBER : "#8B93A1", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>{lbl}</button>
         ))}
+        <div style={{ marginLeft: "auto", display: "inline-flex", border: `1px solid ${LINE}`, borderRadius: 7, overflow: "hidden" }} role="group" aria-label="Offense or Defense">
+          <button onClick={() => setSide("off")} aria-pressed={!isDef} style={pill(!isDef)}>Off</button>
+          <button onClick={() => setSide("def")} aria-pressed={isDef} style={pill(isDef)}>Def</button>
+        </div>
       </div>
       {needsContext && (
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 16 }}>
