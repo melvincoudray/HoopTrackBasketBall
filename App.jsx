@@ -746,9 +746,13 @@ function parseFibaLeaderboardFile(arrayBuffer, side = "offense") {
 // 3%, LFR, LFT, LF%, RT, RO, RD, PD, IN, BP, CT, FTE, FPR. N'importe ni "Points allowed" (à
 // saisir manuellement ensuite) ni les possessions (calculées ici) — cf. la demande initiale.
 const CLASSIC_HEADER_ALIASES = {
-  name: ["équipe", "equipe", "team"], mj: ["mj"], pts: ["pts"], eff: ["eva"],
-  r2: ["2r"], t2: ["2t"], r3: ["3r"], t3: ["3t"], lfr: ["lfr"], lft: ["lft"],
-  rt: ["rt"], ro: ["ro"], rd: ["rd"], pd: ["pd"], int: ["in"], bp: ["bp"], ct: ["ct"], fte: ["fte"],
+  // Deux jeux d'en-têtes reconnus : abrégé français (EVA, 2R, 2T…) et anglais complet
+  // (Eff, 2Pts Made, 2Pts Attempted, FT Made, Reb Tot, Ast, Stl, TOV, Blk, PF…).
+  name: ["équipe", "equipe", "team"], mj: ["mj", "gp", "games"], pts: ["pts"], eff: ["eva", "eff", "evaluation"],
+  r2: ["2r", "2ptsmade"], t2: ["2t", "2ptsattempted"], r3: ["3r", "3ptsmade"], t3: ["3t", "3ptsattempted"],
+  lfr: ["lfr", "ftmade"], lft: ["lft", "ftattempted"],
+  rt: ["rt", "rebtot"], ro: ["ro", "reboff"], rd: ["rd", "rebdef"], pd: ["pd", "ast"], int: ["in", "stl"],
+  bp: ["bp", "tov"], ct: ["ct", "blk"], fte: ["fte", "pf"],
 };
 function parseClassicScoutingFile(arrayBuffer) {
   const wb = XLSX.read(arrayBuffer, { type: "array" });
