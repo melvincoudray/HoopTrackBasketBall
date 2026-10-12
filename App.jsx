@@ -4719,7 +4719,7 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
                 </label>
               ))}
               <div style={{ height: 1, background: LINE, margin: "4px 0" }} />
-              {[["comparison", "Scouting — Comparison"], ["scoutingReport", "Scouting — Scouting Report"], ["observation", "Scouting — Observation"]].map(([key, label]) => (
+              {[["comparison", "Scouting — Comparison"], ["scoutingReport", "Scouting — Scouting Report"], ["observation", "Scouting — Observation"], ["rankings", "Scouting — Rankings"]].map(([key, label]) => (
                 <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
                   <input type="checkbox" checked={visibility.scouting[key]} onChange={() => toggleScouting(key)} /> {label}
                 </label>
@@ -8214,7 +8214,7 @@ const DEFAULT_VISIBILITY = {
   // Demandé par l'utilisateur : Comparison / Scouting Report / Observation, chacune
   // décochable séparément (auparavant, "Observation" était cachée aux joueurs de façon figée
   // dans le code, sans case à cocher — et les deux autres restaient toujours visibles).
-  scouting: { comparison: true, scoutingReport: true, observation: true },
+  scouting: { comparison: true, scoutingReport: true, observation: true, rankings: true },
   wellnessCharts: false, // les graphiques Wellness sont cachés aux joueurs par défaut
 };
 
@@ -11022,6 +11022,338 @@ function ObservationTeamPanel({ teamName, team, isCoach, onChangeTeam }) {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Scouting — Rankings : compare TOUTES les équipes observées (et leurs joueurs) entre elles,
+// à partir des mêmes actions que l'onglet Observation (fichiers décochés ignorés). Une action
+// d'attaque = une possession ; PPPP = points par action tagguée (même calcul que partout).
+// ---------------------------------------------------------------------------
+
+const RANK_GROUPS = [
+  ["Playtype", "Playtypes"], ["Play", "Plays"], ["Coverage faced", "Screen defense"],
+  ["Spacing", "Spacing"], ["Shot zone", "Shot zone"], ["Shot selection", "Shot selection"],
+];
+const RANK_SAMPLE_WARN = 5;
+
+function rankStat(plays, label) {
+  const m = plays.filter(p => tagIsSet(p.tags, label));
+  if (!m.length) return null;
+  const pts = m.reduce((s, p) => s + playPoints(p.tags), 0);
+  return { n: m.length, freq: (100 * m.length) / plays.length, ppp: pts / m.length };
+}
+
+function useAllObservations() {
+  const [state, setState] = useState({ loading: true, teams: {} });
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const all = (await storeGet("scouting_observations")) || {};
+      const out = {};
+      for (const [name, team] of Object.entries(all)) {
+        const plays = observationIncludedPlays(team).filter(isOffense);
+        let tagMap = {};
+        try { tagMap = (await storeGet("scouting_observation_player_tags:" + name)) || {}; } catch (e) { /* non bloquant */ }
+        const confirmed = new Set(Object.entries(tagMap).filter(([, v]) => v === true).map(([k]) => k));
+        out[name] = { plays, confirmed };
+      }
+      if (alive) setState({ loading: false, teams: out });
+    })();
+    return () => { alive = false; };
+  }, []);
+  return state;
+}
+
+function RankBars({ rows, cols }) {
+  // rows : [{ name, sub, v, a, b, n, tone }] déjà triées
+  const max = Math.max(0.0001, ...rows.map(r => r.v));
+  return (
+    <div style={{ display: "flex", flexDirection: "column" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "26px minmax(90px,1.2fr) 2fr 62px 62px", gap: 10, padding: "6px 0", fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470" }}>
+        <span>#</span><span>{cols[2]}</span><span /><span style={{ textAlign: "right" }}>{cols[0]}</span><span style={{ textAlign: "right" }}>{cols[1]}</span>
+      </div>
+      {rows.map((r, i) => (
+        <div key={r.name + i} style={{ display: "grid", gridTemplateColumns: "26px minmax(90px,1.2fr) 2fr 62px 62px", gap: 10, alignItems: "center", padding: "8px 0", borderTop: `1px solid ${LINE}` }}>
+          <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, color: "#5C6470" }}>{i + 1}</span>
+          <span style={{ fontSize: 13.5, fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.name}>
+            {r.name}{r.sub && <span style={{ color: "#5C6470", fontWeight: 400, fontSize: 12 }}> · {r.sub}</span>}
+            {r.n < RANK_SAMPLE_WARN && <span title="Small sample" style={{ marginLeft: 6, fontSize: 10, color: AMBER }}>small sample</span>}
+          </span>
+          <span style={{ height: 10, background: PANEL2, borderRadius: 3, position: "relative" }}>
+            <span style={{ position: "absolute", left: 0, top: 0, bottom: 0, width: `${(r.v / max) * 100}%`, background: i < 3 ? AMBER : "#3A4453", borderRadius: 3 }} />
+          </span>
+          <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 13, textAlign: "right", color: r.tone || PAPER }}>{r.a}</span>
+          <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 13, textAlign: "right", color: "#8B93A1" }}>{r.b}</span>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RankPanel({ children, style }) {
+  return <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 16, ...style }}>{children}</div>;
+}
+
+function ScoutingRankingsTab() {
+  const { loading, teams } = useAllObservations();
+  const cats = currentObservationTagCategories();
+  const [view, setView] = useState("teams");
+  const [group, setGroup] = useState("Playtype");
+  const [label, setLabel] = useState("");
+  const [metric, setMetric] = useState("freq");
+  const [minPoss, setMinPoss] = useState(5);
+
+  const names = Object.keys(teams);
+  const catName = (RANK_GROUPS.find(g => g[0] === group) || RANK_GROUPS[0])[1];
+  const labels = categoryTags(catName, cats);
+  const curLabel = labels.includes(label) ? label : (labels[0] || "");
+
+  const teamRows = useMemo(() => {
+    return names.map(n => ({ name: n, total: teams[n].plays.length, s: rankStat(teams[n].plays, curLabel) })).filter(r => r.s);
+  }, [teams, curLabel]);
+
+  const selectStyle = { ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", fontSize: 13, padding: "8px 10px", width: "auto", minWidth: 140 };
+  const pill = (on) => ({ padding: "7px 12px", border: "none", cursor: "pointer", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", background: on ? AMBER : PANEL2, color: on ? "#1B1305" : "#8B93A1" });
+
+  if (loading) return <EmptyState text="Loading…" />;
+  if (names.length === 0) return <EmptyState text="No opponent team has been observed yet. Import coding files in the Observation tab first." />;
+
+  const views = [["teams", "Teams"], ["heat", "Heatmap"], ["players", "Players"], ["results", "Results"]];
+
+  // ---- Vue Teams ----
+  function renderTeams() {
+    const sorted = [...teamRows].sort((a, b) => metric === "freq" ? b.s.freq - a.s.freq : b.s.ppp - a.s.ppp);
+    const most = [...teamRows].sort((a, b) => b.s.freq - a.s.freq)[0];
+    const eligible = teamRows.filter(r => r.s.n >= RANK_SAMPLE_WARN);
+    const best = [...(eligible.length ? eligible : teamRows)].sort((a, b) => b.s.ppp - a.s.ppp)[0];
+    const rows = sorted.map(r => ({
+      name: r.name, n: r.s.n, v: metric === "freq" ? r.s.freq : r.s.ppp,
+      a: metric === "freq" ? r.s.freq.toFixed(1) + "%" : r.s.ppp.toFixed(2),
+      b: metric === "freq" ? r.s.ppp.toFixed(2) : r.s.freq.toFixed(1) + "%",
+      tone: metric === "ppp" && r.s.n >= RANK_SAMPLE_WARN ? (r.s.ppp >= 1.1 ? TEAL : r.s.ppp < 0.9 ? RED : undefined) : undefined,
+    }));
+    return (
+      <RankPanel>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 14 }}>
+          <div style={{ display: "inline-flex", border: `1px solid ${LINE}`, borderRadius: 7, overflow: "hidden" }}>
+            <button style={pill(metric === "freq")} onClick={() => setMetric("freq")}>Frequency</button>
+            <button style={pill(metric === "ppp")} onClick={() => setMetric("ppp")}>Efficiency (PPPP)</button>
+          </div>
+        </div>
+        {teamRows.length === 0 ? <div style={{ color: "#8B93A1", fontSize: 13 }}>No observed team has an action tagged “{curLabel}”.</div> : (
+          <>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit,minmax(200px,1fr))", gap: 10, marginBottom: 14 }}>
+              <div style={{ background: PANEL2, borderRadius: 8, padding: 12 }}>
+                <div style={{ fontSize: 11.5, color: "#8B93A1" }}>Uses it the most</div>
+                <div style={{ fontSize: 20, fontWeight: 700, margin: "2px 0" }}>{most.name}</div>
+                <div style={{ fontSize: 12, color: "#8B93A1" }}>{most.s.freq.toFixed(1)}% of offensive actions · {most.s.n} times</div>
+              </div>
+              <div style={{ background: PANEL2, borderRadius: 8, padding: 12 }}>
+                <div style={{ fontSize: 11.5, color: "#8B93A1" }}>Most efficient{eligible.length ? "" : " (small samples)"}</div>
+                <div style={{ fontSize: 20, fontWeight: 700, margin: "2px 0" }}>{best.name}</div>
+                <div style={{ fontSize: 12, color: "#8B93A1" }}>{best.s.ppp.toFixed(2)} points per action · {best.s.n} actions</div>
+              </div>
+            </div>
+            <RankBars rows={rows} cols={metric === "freq" ? ["Freq", "PPPP", "Team"] : ["PPPP", "Freq", "Team"]} />
+          </>
+        )}
+        <p style={{ color: "#5C6470", fontSize: 12, lineHeight: 1.5, margin: "12px 0 0" }}>
+          Frequency = share of the team's offensive actions carrying this tag. PPPP = points per tagged action (made baskets and free throws). Observed teams with different numbers of files are compared on shares, not totals.
+        </p>
+      </RankPanel>
+    );
+  }
+
+  // ---- Vue Heatmap ----
+  function renderHeat() {
+    const matrix = {};
+    names.forEach(n => { matrix[n] = {}; labels.forEach(l => { matrix[n][l] = rankStat(teams[n].plays, l); }); });
+    const usedLabels = labels.filter(l => names.some(n => matrix[n][l]));
+    const topOf = {};
+    usedLabels.forEach(l => { topOf[l] = names.filter(n => matrix[n][l]).sort((a, b) => matrix[b][l].freq - matrix[a][l].freq).slice(0, 3); });
+    const maxFreq = Math.max(1, ...usedLabels.flatMap(l => names.map(n => matrix[n][l] ? matrix[n][l].freq : 0)));
+    return (
+      <RankPanel>
+        <p style={{ color: "#8B93A1", fontSize: 13, lineHeight: 1.5, margin: "0 0 12px" }}>
+          Each cell is the share of the team's offensive actions. The small number is the team's rank (1 to 3) on that tag; the second line is PPPP.
+        </p>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", minWidth: 560, width: "100%", fontVariantNumeric: "tabular-nums" }}>
+            <thead>
+              <tr>
+                <th style={{ textAlign: "left", fontSize: 10.5, color: "#5C6470", padding: "6px 8px", position: "sticky", left: 0, background: PANEL }}>Team</th>
+                {usedLabels.map(l => <th key={l} style={{ fontSize: 10.5, color: "#5C6470", padding: "6px 8px", textAlign: "right", textTransform: "uppercase", letterSpacing: "0.04em" }}>{l}</th>)}
+              </tr>
+            </thead>
+            <tbody>
+              {names.map(n => (
+                <tr key={n} style={{ borderTop: `1px solid ${LINE}` }}>
+                  <td style={{ fontWeight: 600, fontSize: 13, padding: "6px 8px", position: "sticky", left: 0, background: PANEL }}>{n}</td>
+                  {usedLabels.map(l => {
+                    const s = matrix[n][l]; const k = s ? topOf[l].indexOf(n) : -1;
+                    return (
+                      <td key={l} style={{ padding: "6px 8px", textAlign: "right", fontSize: 12, fontFamily: "ui-monospace, monospace", background: s ? `color-mix(in srgb, ${AMBER} ${Math.round(Math.min(s.freq / maxFreq, 1) * 60)}%, ${PANEL})` : "transparent", fontWeight: k === 0 ? 700 : 400 }}>
+                        {s ? <>{s.freq.toFixed(1)}%{k >= 0 && <sup style={{ color: PAPER }}> {k + 1}</sup>}<div style={{ fontSize: 10.5, color: "#8B93A1" }}>{s.ppp.toFixed(2)}</div></> : <span style={{ color: "#5C6470" }}>–</span>}
+                      </td>
+                    );
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </RankPanel>
+    );
+  }
+
+  // ---- Vue Players ----
+  function playersFor(l) {
+    const out = [];
+    names.forEach(n => {
+      const t = teams[n];
+      const byPlayer = new Map();
+      t.plays.forEach(p => { if (p.player && t.confirmed.has(p.player)) { if (!byPlayer.has(p.player)) byPlayer.set(p.player, []); byPlayer.get(p.player).push(p); } });
+      byPlayer.forEach((pl, player) => {
+        const m = pl.filter(p => tagIsSet(p.tags, l));
+        if (!m.length) return;
+        out.push({ player, team: n, n: m.length, ppp: m.reduce((s, p) => s + playPoints(p.tags), 0) / m.length });
+      });
+    });
+    return out;
+  }
+  function renderPlayers() {
+    const list = playersFor(curLabel).filter(r => r.n >= minPoss).sort((a, b) => b.ppp - a.ppp);
+    const rows = list.slice(0, 15).map(r => ({ name: r.player, sub: r.team, n: r.n, v: r.ppp, a: r.ppp.toFixed(2), b: String(r.n), tone: r.ppp >= 1.1 ? TEAL : r.ppp < 0.9 ? RED : undefined }));
+    const bests = labels.map(l => { const c = playersFor(l).filter(r => r.n >= minPoss).sort((a, b) => b.ppp - a.ppp)[0]; return c ? { l, c } : null; }).filter(Boolean);
+    const anyConfirmed = names.some(n => teams[n].confirmed.size > 0);
+    return (
+      <>
+        <RankPanel>
+          <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 12 }}>
+            <label style={{ ...labelStyle, margin: 0 }}>Minimum</label>
+            <select value={minPoss} onChange={e => setMinPoss(Number(e.target.value))} style={selectStyle}>
+              {[3, 5, 8, 12].map(x => <option key={x} value={x}>{x}+ actions</option>)}
+            </select>
+          </div>
+          {!anyConfirmed ? (
+            <div style={{ color: "#8B93A1", fontSize: 13, lineHeight: 1.5 }}>No tagged player has been confirmed yet. In Observation, open “Which of these tagged players belong to…” for each team and tick the players.</div>
+          ) : rows.length === 0 ? (
+            <div style={{ color: "#8B93A1", fontSize: 13 }}>No player reaches {minPoss} actions on “{curLabel}”.</div>
+          ) : (
+            <>
+              <p style={{ color: "#8B93A1", fontSize: 13, lineHeight: 1.5, margin: "0 0 10px" }}>Players of all observed teams ranked by PPPP on <b style={{ color: PAPER }}>{curLabel}</b> (offensive actions where the player is tagged).</p>
+              <RankBars rows={rows} cols={["PPPP", "Actions", "Player"]} />
+            </>
+          )}
+        </RankPanel>
+        {anyConfirmed && (
+          <RankPanel>
+            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.1em", color: AMBER, marginBottom: 8 }}>Best player per tag — {group}</div>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 480 }}>
+                <thead><tr>{["Tag", "Player", "Team", "Actions", "PPPP"].map((h, i) => <th key={h} style={{ textAlign: i < 3 ? "left" : "right", fontSize: 10.5, color: "#5C6470", padding: "6px 8px", textTransform: "uppercase", letterSpacing: "0.05em" }}>{h}</th>)}</tr></thead>
+                <tbody>
+                  {bests.length === 0 ? <tr><td colSpan={5} style={{ padding: 10, color: "#8B93A1", fontSize: 13 }}>Not enough actions yet.</td></tr> : bests.map(({ l, c }) => (
+                    <tr key={l} style={{ borderTop: `1px solid ${LINE}` }}>
+                      <td style={{ padding: "6px 8px", fontWeight: 600, fontSize: 13 }}>{l}</td>
+                      <td style={{ padding: "6px 8px", fontSize: 13 }}>{c.player}</td>
+                      <td style={{ padding: "6px 8px", fontSize: 13, color: "#8B93A1" }}>{c.team}</td>
+                      <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "ui-monospace, monospace", fontSize: 12.5 }}>{c.n}</td>
+                      <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "ui-monospace, monospace", fontSize: 12.5, color: TEAL }}>{c.ppp.toFixed(2)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </RankPanel>
+        )}
+      </>
+    );
+  }
+
+  // ---- Vue Results ----
+  function renderResults() {
+    const shotZoneTags = categoryTags("Shot zone", cats);
+    const rows = names.map(n => {
+      const pl = teams[n].plays;
+      const shots = pl.filter(p => isMake(p.tags) || isMiss(p.tags));
+      const threes = shots.filter(p => Object.keys(p.tags).some(k => /^3\s*PT[+-]$/i.test(k) && p.tags[k]));
+      const paint = shotZoneTags.some(z => normTag(z) === "paint") ? shots.filter(p => tagIsSet(p.tags, "Paint")) : [];
+      const open = openPct(pl.filter(p => tagIsSet(p.tags, "Open") || tagIsSet(p.tags, "Contested") || tagIsSet(p.tags, "Ouvert")));
+      return {
+        n, actions: pl.length,
+        pppp: pl.length ? pl.reduce((s, p) => s + playPoints(p.tags), 0) / pl.length : null,
+        tov: pl.length ? (100 * pl.filter(p => isTOV(p.tags)).length) / pl.length : null,
+        open,
+        three: shots.length ? (100 * threes.length) / shots.length : null,
+        paint: shots.length && paint.length ? (100 * paint.length) / shots.length : null,
+      };
+    });
+    const defs = [["pppp", "PPPP", "high", v => v.toFixed(2)], ["tov", "TOV %", "low", v => v.toFixed(1)], ["open", "Open shots %", "high", v => v.toFixed(0)], ["three", "3pt share %", "high", v => v.toFixed(0)], ["paint", "Paint share %", "high", v => v.toFixed(0)]];
+    return (
+      <RankPanel>
+        <p style={{ color: "#8B93A1", fontSize: 13, lineHeight: 1.5, margin: "0 0 12px" }}>One column per aspect, across all observed teams. Best value in green, worst in red.</p>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ borderCollapse: "collapse", width: "100%", minWidth: 520 }}>
+            <thead><tr><th style={{ textAlign: "left", fontSize: 10.5, color: "#5C6470", padding: "6px 8px", position: "sticky", left: 0, background: PANEL }}>Team</th>
+              <th style={{ textAlign: "right", fontSize: 10.5, color: "#5C6470", padding: "6px 8px" }}>ACTIONS</th>
+              {defs.map(d => <th key={d[0]} style={{ textAlign: "right", fontSize: 10.5, color: "#5C6470", padding: "6px 8px", textTransform: "uppercase", letterSpacing: "0.04em" }}>{d[1]}</th>)}</tr></thead>
+            <tbody>
+              {rows.map(r => (
+                <tr key={r.n} style={{ borderTop: `1px solid ${LINE}` }}>
+                  <td style={{ fontWeight: 600, fontSize: 13, padding: "6px 8px", position: "sticky", left: 0, background: PANEL }}>{r.n}</td>
+                  <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "ui-monospace, monospace", fontSize: 12, color: "#8B93A1" }}>{r.actions}</td>
+                  {defs.map(([k, , dir, fmt]) => {
+                    const vals = rows.map(x => x[k]).filter(v => v !== null && v !== undefined);
+                    const v = r[k]; const mx = Math.max(...vals), mn = Math.min(...vals);
+                    const good = dir === "high" ? mx : mn, bad = dir === "high" ? mn : mx;
+                    const tone = v === null || v === undefined || vals.length < 2 ? "#5C6470" : v === good ? TEAL : v === bad ? RED : PAPER;
+                    return <td key={k} style={{ padding: "6px 8px", textAlign: "right", fontFamily: "ui-monospace, monospace", fontSize: 12.5, color: tone }}>{v === null || v === undefined ? "–" : fmt(v)}</td>;
+                  })}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <p style={{ color: "#5C6470", fontSize: 12, lineHeight: 1.5, margin: "12px 0 0" }}>
+          TOV % = turnovers per offensive action. Open shots % = Open ÷ (Open + Contested). 3pt share = 3-point attempts among tagged shots. Paint share needs the “Paint” shot-zone tag.
+        </p>
+      </RankPanel>
+    );
+  }
+
+  const needsContext = view !== "results";
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 6, marginBottom: 16, flexWrap: "wrap" }}>
+        {views.map(([id, lbl]) => (
+          <button key={id} onClick={() => setView(id)} style={{ padding: "7px 14px", borderRadius: 7, border: `1px solid ${view === id ? AMBER : LINE}`, background: view === id ? PANEL2 : "transparent", color: view === id ? AMBER : "#8B93A1", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>{lbl}</button>
+        ))}
+      </div>
+      {needsContext && (
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "flex-end", marginBottom: 16 }}>
+          <div>
+            <label style={labelStyle}>Category</label>
+            <select value={group} onChange={e => { setGroup(e.target.value); setLabel(""); }} style={selectStyle}>
+              {RANK_GROUPS.map(g => <option key={g[0]} value={g[0]}>{g[0]}</option>)}
+            </select>
+          </div>
+          {view !== "heat" && (
+            <div>
+              <label style={labelStyle}>Tag</label>
+              <select value={curLabel} onChange={e => setLabel(e.target.value)} style={selectStyle}>
+                {labels.map(l => <option key={l} value={l}>{l}</option>)}
+              </select>
+            </div>
+          )}
+        </div>
+      )}
+      {view === "teams" && renderTeams()}
+      {view === "heat" && renderHeat()}
+      {view === "players" && renderPlayers()}
+      {view === "results" && renderResults()}
+    </div>
+  );
+}
+
 function ObservationTab({ isCoach }) {
   const [observed, setObserved] = useState({}); // { teamName: { plays, importedAt } }
   const [loading, setLoading] = useState(true);
@@ -11350,7 +11682,7 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
     <div>
       <SectionTitle eyebrow="Scouting" title="Team comparison" />
       <div style={{ display: "flex", gap: 8, marginBottom: 20, borderBottom: `1px solid ${LINE}`, paddingBottom: 10, flexWrap: "wrap" }}>
-        {[["comparaison", "Comparison", "comparison"], ["rapport", "Scouting Report", "scoutingReport"], ["observation", "Observation", "observation"], ...(isCoach ? [["gerer", "Manage teams"]] : [])]
+        {[["comparaison", "Comparison", "comparison"], ["rapport", "Scouting Report", "scoutingReport"], ["observation", "Observation", "observation"], ["classement", "Rankings", "rankings"], ...(isCoach ? [["gerer", "Manage teams"]] : [])]
           .filter(([id, , key]) => id === "gerer" ? isCoach : (isCoach || v[key]))
           .map(([id, label]) => (
           <button key={id} onClick={() => setSubtab(id)} style={{
@@ -11363,6 +11695,7 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
       {subtab === "comparaison" && (isCoach || v.comparison) && (scouting.loading ? <EmptyState text="Loading…" /> : <ScoutingComparison teams={allTeams} />)}
       {subtab === "rapport" && (isCoach || v.scoutingReport) && <ScoutingReportTab isCoach={isCoach} teamNames={Object.keys(scouting.teams)} scoutingTeams={scouting.teams} onSaveLogo={scouting.saveLogo} initialTeam={initialReportTeam} />}
       {subtab === "observation" && (isCoach || v.observation) && <ObservationTab isCoach={isCoach} />}
+      {subtab === "classement" && (isCoach || v.rankings) && <ScoutingRankingsTab />}
 
       {subtab === "gerer" && isCoach && (
         <div>
