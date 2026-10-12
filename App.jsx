@@ -10169,6 +10169,7 @@ const DRAW_TOOLS = [
   ["dribble", "Dribble", '<svg viewBox="0 0 22 14"><path d="M1 9 Q3 4 5 9 T9 9 T13 9" stroke="currentColor" stroke-width="1.6" fill="none"/><path d="M21 9 L13 5.5 L13 12.5z" fill="currentColor"/></svg>'],
   ["screen", "Screen", '<svg viewBox="0 0 22 14"><path d="M1 7 H16 M16 2 V12" stroke="currentColor" stroke-width="2" fill="none"/></svg>'],
   ["shoot", "Shoot", '<svg viewBox="0 0 22 14"><path d="M1 5.5 H14 M1 8.5 H14" stroke="currentColor" stroke-width="1.5"/><path d="M21 7 L13 2.5 L13 11.5z" fill="currentColor"/></svg>'],
+  ["dho", "Handoff", '<svg viewBox="0 0 22 14"><path d="M5 4.5 H17 M5 9.5 H17" stroke="currentColor" stroke-width="1.8" fill="none"/><path d="M8 13 L14 1" stroke="currentColor" stroke-width="1.8" fill="none"/></svg>'],
   ["del", "Erase", '<svg viewBox="0 0 22 14"><path d="M5 3 H17 M8 3 V1 H14 V3 M7 3 L8 13 H14 L15 3" stroke="currentColor" stroke-width="1.4" fill="none"/></svg>'],
 ];
 const LINE_HINT = (w) => `Click to start ${w} (on a player to attach it), click again at each change of direction (rounded if “Curved” is on), double-click to finish. Esc cancels.`;
@@ -10177,6 +10178,7 @@ const DRAW_HINTS = {
   o: "Click the court to place the next attacker (1 to 5).", x: "Click the court to place a defender.", ball: "Click the court to place the ball.",
   cut: LINE_HINT("the cut"), pass: LINE_HINT("the pass"), dribble: LINE_HINT("the dribble"),
   screen: LINE_HINT("the screen"), shoot: LINE_HINT("the shot (double line, one arrowhead)"),
+  dho: "Click between the two players to place a hand-to-hand handoff (a crossed-out equals sign). Drag it with Move; Erase removes it.",
   del: "Click a player or a line to erase it.",
 };
 const DRAW_LINE_TOOLS = ["cut", "pass", "dribble", "screen", "shoot"];
@@ -10280,6 +10282,10 @@ function drawItemSvg(it, pal) {
     const R = pal.big ? 21 : 12, FS = pal.big ? 27 : 13, RH = pal.big ? 28 : 18;
     return `<g>${it.h ? `<circle cx="${it.x}" cy="${it.y}" r="${RH}" fill="none" stroke="${pal.off}" stroke-width="1.8"/>` : ""}<circle cx="${it.x}" cy="${it.y}" r="${R}" fill="${pal.off}"/><text x="${it.x}" y="${drawF(it.y + FS * 0.36)}" text-anchor="middle" font-size="${FS}" font-weight="700" fill="${pal.offtxt}" font-family="Arial,Helvetica,sans-serif">${drawEsc(it.n)}</text></g>`;
   }
+  if (it.t === "dho") {
+    const k = pal.big ? 1.45 : 1, w = 13 * k, g = 5 * k, sl = 12 * k;
+    return `<g stroke="${pal.off}" stroke-linecap="round" fill="none"><path d="M${drawF(it.x - w)} ${drawF(it.y - g)} H${drawF(it.x + w)} M${drawF(it.x - w)} ${drawF(it.y + g)} H${drawF(it.x + w)}" stroke-width="${pal.big ? 4 : 3}"/><path d="M${drawF(it.x - sl * 0.55)} ${drawF(it.y + sl)} L${drawF(it.x + sl * 0.55)} ${drawF(it.y - sl)}" stroke-width="${pal.big ? 3.4 : 2.6}"/></g>`;
+  }
   if (it.t === "x") {
     const D = pal.big ? 14 : 9;
     return `<g stroke="${pal.def}" stroke-width="${pal.big ? 3.6 : 3}" stroke-linecap="round"><path d="M${it.x - D} ${it.y - D} L${it.x + D} ${it.y + D} M${it.x + D} ${it.y - D} L${it.x - D} ${it.y + D}"/></g>`;
@@ -10329,7 +10335,11 @@ function drawBuildPages(book, title, colsSetting, logoUrl) {
   gs.forEach(g => { start.push(page); page += Math.max(1, Math.ceil(g.rows.length / g.rpp)); });
 
   const pageStyle = { width: 900, height: 1273, background: "#fff", color: "#000", fontFamily: "Arial, Helvetica, sans-serif", position: "relative", boxSizing: "border-box", padding: "63px 63px 80px", overflow: "hidden" };
-  const num = (n) => <div style={{ position: "absolute", right: 45, bottom: 30, fontSize: 22 }}>{n}</div>;
+  // Signature du logiciel en bas à gauche de chaque page (le numéro de page reste en bas à droite).
+  const num = (n) => (<>
+    <div style={{ position: "absolute", left: 45, bottom: 32, fontSize: 13, letterSpacing: "0.08em", color: "#6B7280", fontFamily: "Arial, Helvetica, sans-serif" }}>Made with <b style={{ color: "#1A1D24" }}>HoopTrack</b></div>
+    <div style={{ position: "absolute", right: 45, bottom: 30, fontSize: 22 }}>{n}</div>
+  </>);
   const logo = logoUrl ? <img src={logoUrl} alt="" style={{ width: 84, height: 84, objectFit: "contain" }} /> : <div style={{ width: 84, height: 84 }} />;
   const pages = [];
 
@@ -10533,7 +10543,7 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
   function onDown(e) {
     const p = pt(e), tool = S.tool;
     try { svgRef.current.setPointerCapture(e.pointerId); } catch (err) { /* non bloquant */ }
-    if (tool === "o" || tool === "x" || tool === "ball") {
+    if (tool === "o" || tool === "x" || tool === "ball" || tool === "dho") {
       if (tool === "ball" && S.items.some(i => i.t === "ball")) { S.items = S.items.filter(i => i.t !== "ball"); S.frames[S.fi].items = S.items; } else snap();
       S.items.push({ id: S.nid++, t: tool, x: p.x, y: p.y, n: tool === "o" ? nextNum() : "" }); redraw(); return;
     }
@@ -10586,7 +10596,7 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
     const cur = S.frames[S.fi], nf = { items: [], lines: [], cap: "" };
     if (keep) {
       // étape suivante : mêmes joueurs, placés là où leurs cuts / dribbles les ont amenés, sans les flèches
-      nf.items = drawClone(cur.items).map(it => { cur.lines.forEach(l => { if (l.from === it.id && (l.kind === "cut" || l.kind === "dribble")) { const e = drawLast(l); it.x = e.x; it.y = e.y; } }); return it; });
+      nf.items = drawClone(cur.items).filter(it => it.t !== "dho").map(it => { cur.lines.forEach(l => { if (l.from === it.id && (l.kind === "cut" || l.kind === "dribble")) { const e = drawLast(l); it.x = e.x; it.y = e.y; } }); return it; });
     }
     S.frames.splice(S.fi + 1, 0, nf); loadFrame(S.fi + 1);
   }
