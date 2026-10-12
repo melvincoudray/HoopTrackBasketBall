@@ -1191,7 +1191,24 @@ async function applyTagAliasesToExistingData(list, scope = { matches: false, obs
   for (const [teamName, team] of Object.entries(allObserved)) {
     if (!team || !Array.isArray(team.plays)) continue;
     const r = applyTagAliasesToPlays(team.plays, map);
-    if (r.changedCount > 0) { nextObserved[teamName] = { ...team, plays: r.plays }; observations += r.changedCount; obsChanged = true; }
+    if (r.changedCount > 0) {
+      nextObserved[teamName] = { ...team, plays: r.plays }; observations += r.changedCount; obsChanged = true;
+      // Les joueurs taggés se "confirment" par équipe, sous leur nom exact : si l'ancienne
+      // orthographe était confirmée, la nouvelle l'est aussi — sinon les actions fusionnées ne
+      // seraient pas comptées dans la fiche du joueur tant qu'on ne recoche pas son nom.
+      try {
+        const tagKey = "scouting_observation_player_tags:" + teamName;
+        const tagMap = (await storeGet(tagKey)) || {};
+        let tagMapChanged = false;
+        const nextMap = { ...tagMap };
+        for (const [oldName, decision] of Object.entries(tagMap)) {
+          if (decision !== true) continue;
+          const target = resolveTagAlias(oldName, map);
+          if (target !== oldName && nextMap[target] !== true) { nextMap[target] = true; tagMapChanged = true; }
+        }
+        if (tagMapChanged) await storeSet(tagKey, nextMap);
+      } catch (e) { /* non bloquant */ }
+    }
   }
   if (obsChanged) await storeSet("scouting_observations", nextObserved);
   return { matches, observations };
