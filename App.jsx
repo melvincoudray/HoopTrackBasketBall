@@ -11041,13 +11041,13 @@ function rankStat(plays, label) {
   return { n: m.length, freq: (100 * m.length) / plays.length, ppp: pts / m.length };
 }
 
-function useAllObservations() {
+function useAllObservations(matchFilter) {
   const [state, setState] = useState({ loading: true, teams: {} });
   useEffect(() => {
     let alive = true;
     (async () => {
       const all = (await storeGet("scouting_observations")) || {};
-      const out = {};
+      let out = {};
       for (const [name, team] of Object.entries(all)) {
         const plays = observationIncludedPlays(team).filter(isOffense);
         let tagMap = {};
@@ -11055,10 +11055,28 @@ function useAllObservations() {
         const confirmed = new Set(Object.entries(tagMap).filter(([, v]) => v === true).map(([k]) => k));
         out[name] = { plays, confirmed };
       }
+      // Notre équipe : mêmes calculs, à partir de NOS matchs codés (filtre de saison / de matchs
+      // du site respecté). Les joueurs comptés sont ceux du roster.
+      try {
+        const idx = (await storeGet("match_index")) || [];
+        const rosterList = (await storeGet("roster")) || [];
+        const rosterNames = new Set();
+        rosterList.forEach(r => { if (r.name) rosterNames.add(r.name); if (r.first) rosterNames.add(r.first); });
+        const ownPlays = [];
+        for (const m of idx) {
+          if (matchFilter && !matchFilter.has(matchKey(m.date, m.opponent))) continue;
+          const d = await storeGet("match:" + m.id);
+          ((d && d.plays) || []).forEach(p => { if (isOffense(p)) ownPlays.push(p); });
+        }
+        if (ownPlays.length) {
+          const confirmed = new Set(ownPlays.map(p => p.player).filter(x => x && (rosterNames.size === 0 || rosterNames.has(x))));
+          out = { "Our team": { plays: ownPlays, confirmed, own: true }, ...out };
+        }
+      } catch (e) { /* non bloquant */ }
       if (alive) setState({ loading: false, teams: out });
     })();
     return () => { alive = false; };
-  }, []);
+  }, [matchFilter]);
   return state;
 }
 
@@ -11074,7 +11092,8 @@ function RankBars({ rows, cols }) {
         <div key={r.name + i} style={{ display: "grid", gridTemplateColumns: "26px minmax(90px,1.2fr) 2fr 62px 62px", gap: 10, alignItems: "center", padding: "8px 0", borderTop: `1px solid ${LINE}` }}>
           <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 12, color: "#5C6470" }}>{i + 1}</span>
           <span style={{ fontSize: 13.5, fontWeight: 600, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.name}>
-            {r.name}{r.sub && <span style={{ color: "#5C6470", fontWeight: 400, fontSize: 12 }}> · {r.sub}</span>}
+            <span style={r.own ? { color: TEAL } : undefined}>{r.name}</span>{r.sub && <span style={{ color: "#5C6470", fontWeight: 400, fontSize: 12 }}> · {r.sub}</span>}
+            {r.own && <span style={{ marginLeft: 6, fontSize: 9.5, fontWeight: 700, letterSpacing: "0.06em", padding: "1px 5px", borderRadius: 99, border: `1px solid ${TEAL}`, color: TEAL, verticalAlign: 1 }}>US</span>}
             {r.n < RANK_SAMPLE_WARN && <span title="Small sample" style={{ marginLeft: 6, fontSize: 10, color: AMBER }}>small sample</span>}
           </span>
           <span style={{ height: 10, background: PANEL2, borderRadius: 3, position: "relative" }}>
@@ -11092,8 +11111,8 @@ function RankPanel({ children, style }) {
   return <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 16, ...style }}>{children}</div>;
 }
 
-function ScoutingRankingsTab() {
-  const { loading, teams } = useAllObservations();
+function ScoutingRankingsTab({ matchFilter }) {
+  const { loading, teams } = useAllObservations(matchFilter);
   const cats = currentObservationTagCategories();
   const [view, setView] = useState("teams");
   const [group, setGroup] = useState("Playtype");
@@ -11114,7 +11133,7 @@ function ScoutingRankingsTab() {
   const pill = (on) => ({ padding: "7px 12px", border: "none", cursor: "pointer", fontSize: 12.5, fontWeight: 600, fontFamily: "inherit", background: on ? AMBER : PANEL2, color: on ? "#1B1305" : "#8B93A1" });
 
   if (loading) return <EmptyState text="Loading…" />;
-  if (names.length === 0) return <EmptyState text="No opponent team has been observed yet. Import coding files in the Observation tab first." />;
+  if (names.length === 0) return <EmptyState text="No team to compare yet. Import coding files in the Observation tab (opponents) or in Import Match (your own team)." />;
 
   const views = [["teams", "Teams"], ["heat", "Heatmap"], ["players", "Players"], ["results", "Results"]];
 
@@ -11124,8 +11143,9 @@ function ScoutingRankingsTab() {
     const most = [...teamRows].sort((a, b) => b.s.freq - a.s.freq)[0];
     const eligible = teamRows.filter(r => r.s.n >= RANK_SAMPLE_WARN);
     const best = [...(eligible.length ? eligible : teamRows)].sort((a, b) => b.s.ppp - a.s.ppp)[0];
+    const ownIdx = sorted.findIndex(r => teams[r.name].own);
     const rows = sorted.map(r => ({
-      name: r.name, n: r.s.n, v: metric === "freq" ? r.s.freq : r.s.ppp,
+      name: r.name, own: !!teams[r.name].own, n: r.s.n, v: metric === "freq" ? r.s.freq : r.s.ppp,
       a: metric === "freq" ? r.s.freq.toFixed(1) + "%" : r.s.ppp.toFixed(2),
       b: metric === "freq" ? r.s.ppp.toFixed(2) : r.s.freq.toFixed(1) + "%",
       tone: metric === "ppp" && r.s.n >= RANK_SAMPLE_WARN ? (r.s.ppp >= 1.1 ? TEAL : r.s.ppp < 0.9 ? RED : undefined) : undefined,
@@ -11152,6 +11172,7 @@ function ScoutingRankingsTab() {
                 <div style={{ fontSize: 12, color: "#8B93A1" }}>{best.s.ppp.toFixed(2)} points per action · {best.s.n} actions</div>
               </div>
             </div>
+            {ownIdx >= 0 && <div style={{ fontSize: 13, color: TEAL, marginBottom: 10 }}>Our team ranks <b>#{ownIdx + 1}</b> of {sorted.length} on {metric === "freq" ? "frequency" : "efficiency"} for {curLabel}.</div>}
             <RankBars rows={rows} cols={metric === "freq" ? ["Freq", "PPPP", "Team"] : ["PPPP", "Freq", "Team"]} />
           </>
         )}
@@ -11186,7 +11207,7 @@ function ScoutingRankingsTab() {
             <tbody>
               {names.map(n => (
                 <tr key={n} style={{ borderTop: `1px solid ${LINE}` }}>
-                  <td style={{ fontWeight: 600, fontSize: 13, padding: "6px 8px", position: "sticky", left: 0, background: PANEL }}>{n}</td>
+                  <td style={{ fontWeight: 600, fontSize: 13, padding: "6px 8px", position: "sticky", left: 0, background: PANEL, color: teams[n].own ? TEAL : PAPER }}>{n}</td>
                   {usedLabels.map(l => {
                     const s = matrix[n][l]; const k = s ? topOf[l].indexOf(n) : -1;
                     return (
@@ -11221,7 +11242,7 @@ function ScoutingRankingsTab() {
   }
   function renderPlayers() {
     const list = playersFor(curLabel).filter(r => r.n >= minPoss).sort((a, b) => b.ppp - a.ppp);
-    const rows = list.slice(0, 15).map(r => ({ name: r.player, sub: r.team, n: r.n, v: r.ppp, a: r.ppp.toFixed(2), b: String(r.n), tone: r.ppp >= 1.1 ? TEAL : r.ppp < 0.9 ? RED : undefined }));
+    const rows = list.slice(0, 15).map(r => ({ name: r.player, own: !!teams[r.team].own, sub: r.team, n: r.n, v: r.ppp, a: r.ppp.toFixed(2), b: String(r.n), tone: r.ppp >= 1.1 ? TEAL : r.ppp < 0.9 ? RED : undefined }));
     const bests = labels.map(l => { const c = playersFor(l).filter(r => r.n >= minPoss).sort((a, b) => b.ppp - a.ppp)[0]; return c ? { l, c } : null; }).filter(Boolean);
     const anyConfirmed = names.some(n => teams[n].confirmed.size > 0);
     return (
@@ -11254,8 +11275,8 @@ function ScoutingRankingsTab() {
                   {bests.length === 0 ? <tr><td colSpan={5} style={{ padding: 10, color: "#8B93A1", fontSize: 13 }}>Not enough actions yet.</td></tr> : bests.map(({ l, c }) => (
                     <tr key={l} style={{ borderTop: `1px solid ${LINE}` }}>
                       <td style={{ padding: "6px 8px", fontWeight: 600, fontSize: 13 }}>{l}</td>
-                      <td style={{ padding: "6px 8px", fontSize: 13 }}>{c.player}</td>
-                      <td style={{ padding: "6px 8px", fontSize: 13, color: "#8B93A1" }}>{c.team}</td>
+                      <td style={{ padding: "6px 8px", fontSize: 13, color: teams[c.team].own ? TEAL : PAPER }}>{c.player}</td>
+                      <td style={{ padding: "6px 8px", fontSize: 13, color: teams[c.team].own ? TEAL : "#8B93A1" }}>{c.team}</td>
                       <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "ui-monospace, monospace", fontSize: 12.5 }}>{c.n}</td>
                       <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "ui-monospace, monospace", fontSize: 12.5, color: TEAL }}>{c.ppp.toFixed(2)}</td>
                     </tr>
@@ -11299,7 +11320,7 @@ function ScoutingRankingsTab() {
             <tbody>
               {rows.map(r => (
                 <tr key={r.n} style={{ borderTop: `1px solid ${LINE}` }}>
-                  <td style={{ fontWeight: 600, fontSize: 13, padding: "6px 8px", position: "sticky", left: 0, background: PANEL }}>{r.n}</td>
+                  <td style={{ fontWeight: 600, fontSize: 13, padding: "6px 8px", position: "sticky", left: 0, background: PANEL, color: teams[r.n].own ? TEAL : PAPER }}>{r.n}</td>
                   <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "ui-monospace, monospace", fontSize: 12, color: "#8B93A1" }}>{r.actions}</td>
                   {defs.map(([k, , dir, fmt]) => {
                     const vals = rows.map(x => x[k]).filter(v => v !== null && v !== undefined);
@@ -11695,7 +11716,7 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
       {subtab === "comparaison" && (isCoach || v.comparison) && (scouting.loading ? <EmptyState text="Loading…" /> : <ScoutingComparison teams={allTeams} />)}
       {subtab === "rapport" && (isCoach || v.scoutingReport) && <ScoutingReportTab isCoach={isCoach} teamNames={Object.keys(scouting.teams)} scoutingTeams={scouting.teams} onSaveLogo={scouting.saveLogo} initialTeam={initialReportTeam} />}
       {subtab === "observation" && (isCoach || v.observation) && <ObservationTab isCoach={isCoach} />}
-      {subtab === "classement" && (isCoach || v.rankings) && <ScoutingRankingsTab />}
+      {subtab === "classement" && (isCoach || v.rankings) && <ScoutingRankingsTab matchFilter={matchFilter} />}
 
       {subtab === "gerer" && isCoach && (
         <div>
