@@ -10186,10 +10186,11 @@ const DRAW_OWN = "__own__"; // valeur de "club" pour notre propre équipe
 
 // Zone derrière la ligne de fond (pour dessiner une touche) : toujours visible dans l'éditeur,
 // et dans les miniatures / l'export seulement si le schéma s'en sert.
-const DRAW_TOP = 56;
+const DRAW_TOP = 64, DRAW_SIDE = 64;
+const drawOut = (q) => q.y < 4 || q.x < 4 || q.x > 496;
 function drawVB(fr, force) {
-  const used = force || (fr && ((fr.items || []).some(i => i.y < 4) || (fr.lines || []).some(l => drawPts(l).some(q => q.y < 4))));
-  return used ? `0 -${DRAW_TOP} 500 ${470 + DRAW_TOP}` : "0 0 500 470";
+  const used = force || (fr && ((fr.items || []).some(drawOut) || (fr.lines || []).some(l => drawPts(l).some(drawOut))));
+  return used ? `-${DRAW_SIDE} -${DRAW_TOP} ${500 + 2 * DRAW_SIDE} ${470 + DRAW_TOP}` : "0 0 500 470";
 }
 function drawF(n) { return Math.round(n * 10) / 10; }
 function drawEsc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
@@ -10197,10 +10198,14 @@ function drawClone(o) { return JSON.parse(JSON.stringify(o)); }
 
 // Terrain : panier en haut, ligne médiane en bas. 3 points = vrai demi-cercle (rayon 220)
 // raccordé en douceur aux lignes de coin.
-function drawCourtSvg(p) {
+function drawCourtSvg(p, margin) {
   const l = p.line;
-  return `<rect x="0" y="-60" width="500" height="530" fill="${p.court}"/>` +
-    `<rect x="1" y="1" width="498" height="469" fill="none" stroke="${l}" stroke-width="2"/>` +
+  // Export : le cadre épais est dessiné DANS le schéma (et non en bordure CSS, qui se rendait de façon
+  // inégale selon les côtés dans le PDF : trait plus épais en haut et à gauche).
+  const x0 = margin ? -DRAW_SIDE : 0, y0 = margin ? -DRAW_TOP : 0, w = margin ? 500 + 2 * DRAW_SIDE : 500, h = margin ? 470 + DRAW_TOP : 470, T = 7;
+  const frame = p.big ? `<rect x="${x0 + T / 2}" y="${y0 + T / 2}" width="${w - T}" height="${h - T}" fill="none" stroke="${l}" stroke-width="${T}"/>` : "";
+  const court = (p.big && !margin) ? "" : `<rect x="1" y="1" width="498" height="469" fill="none" stroke="${l}" stroke-width="2"/>`;
+  return `<rect x="-60" y="-60" width="620" height="530" fill="${p.court}"/>` + court +
     `<rect x="168" y="1" width="164" height="192" fill="none" stroke="${l}" stroke-width="1.5"/>` +
     `<path d="M190 193 A60 60 0 0 0 310 193" fill="none" stroke="${l}" stroke-width="1.5"/>` +
     `<path d="M190 193 A60 60 0 0 1 310 193" fill="none" stroke="${l}" stroke-width="1.2" stroke-dasharray="6 5"/>` +
@@ -10208,7 +10213,7 @@ function drawCourtSvg(p) {
     `<path d="M208 52 A42 42 0 0 0 292 52" fill="none" stroke="${l}" stroke-width="1.5"/>` +
     `<line x1="220" y1="40" x2="280" y2="40" stroke="${l}" stroke-width="2.4"/>` +
     `<circle cx="250" cy="52" r="8" fill="none" stroke="${l}" stroke-width="1.6"/>` +
-    `<path d="M190 470 A60 60 0 0 1 310 470" fill="none" stroke="${l}" stroke-width="1.5"/>`;
+    `<path d="M190 470 A60 60 0 0 1 310 470" fill="none" stroke="${l}" stroke-width="1.5"/>` + frame;
 }
 
 // Géométrie des lignes : suite de points ; chaque point intermédiaire est soit un angle franc, soit
@@ -10315,7 +10320,7 @@ function drawAdvance(items, lines) {
   if (hadRing && H) { out.forEach(i => { if (i.t === "o") delete i.h; }); H.h = true; }
   if (ball && H) {
     const o = off0 && Math.hypot(off0.x, off0.y) >= 6 && Math.hypot(off0.x, off0.y) <= 40 ? off0 : { x: 14, y: -14 };
-    ball.x = Math.max(8, Math.min(492, H.x + o.x)); ball.y = Math.max(-DRAW_TOP + 8, Math.min(462, H.y + o.y));
+    ball.x = Math.max(-DRAW_SIDE + 34, Math.min(500 + DRAW_SIDE - 34, H.x + o.x)); ball.y = Math.max(-DRAW_TOP + 34, Math.min(462, H.y + o.y));
   }
   return out;
 }
@@ -10346,7 +10351,7 @@ function drawFrameSvg(fr, pal, extra) {
       if (best) items = items.map(i => i === best ? { ...i, h: true } : i);
     }
   }
-  return drawCourtSvg(pal) + (fr.lines || []).map(l => drawLineSvg(l, pal)).join("") + items.map(it => drawItemSvg(it, pal)).join("") + (extra || "");
+  return drawCourtSvg(pal, pal.big && drawVB(fr) !== "0 0 500 470") + (fr.lines || []).map(l => drawLineSvg(l, pal)).join("") + items.map(it => drawItemSvg(it, pal)).join("") + (extra || "");
 }
 function DrawThumb({ frame, pal, style }) {
   return <svg viewBox={drawVB(frame)} style={{ width: "100%", height: "auto", display: "block", ...style }} dangerouslySetInnerHTML={{ __html: drawFrameSvg(frame, pal || DRAW_PAL_EDIT) }} />;
@@ -10436,7 +10441,7 @@ function drawBuildPages(book, title, colsSetting, logoUrl) {
                 {row.map((c, ci) => (
                   <div key={ci} style={{ minWidth: 0 }}>
                     <div style={{ textAlign: "center", fontSize: 15, lineHeight: 1.15, marginBottom: 3 }}>{c.p.name}<div style={{ fontSize: 11 }}>{c.p.group || "Plays"}</div></div>
-                    <DrawThumb frame={c.f} pal={DRAW_PAL_PRINT} style={{ border: "3px solid #000", boxSizing: "border-box" }} />
+                    <DrawThumb frame={c.f} pal={DRAW_PAL_PRINT} />
                     {c.f.cap ? <div style={{ fontSize: 12, marginTop: 3 }}>{c.f.cap}</div> : null}
                   </div>
                 ))}
@@ -10564,9 +10569,15 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
 
   function snap() { S.undo.push(JSON.stringify({ items: S.items, lines: S.lines, nid: S.nid })); if (S.undo.length > 40) S.undo.shift(); }
   function pt(e) {
-    const r = svgRef.current.getBoundingClientRect();
-    return { x: Math.max(8, Math.min(492, (e.clientX - r.left) / r.width * 500)), y: Math.max(-DRAW_TOP + 8, Math.min(462, -DRAW_TOP + (e.clientY - r.top) / r.height * (470 + DRAW_TOP))) };
+    // Conversion exacte écran → coordonnées du schéma (tient compte des marges laissées par le
+    // ratio hauteur/largeur de l'image : sans ça, le point se plaçait à côté du clic sur les bords).
+    const svg = svgRef.current, m = svg.getScreenCTM();
+    let x, y;
+    if (m) { const q = svg.createSVGPoint(); q.x = e.clientX; q.y = e.clientY; const r = q.matrixTransform(m.inverse()); x = r.x; y = r.y; }
+    else { const r = svg.getBoundingClientRect(); x = -DRAW_SIDE + (e.clientX - r.left) / r.width * (500 + 2 * DRAW_SIDE); y = -DRAW_TOP + (e.clientY - r.top) / r.height * (470 + DRAW_TOP); }
+    return { x: Math.max(-DRAW_SIDE + 34, Math.min(500 + DRAW_SIDE - 34, x)), y: Math.max(-DRAW_TOP + 34, Math.min(462, y)) };
   }
+
   const hitItem = (p, r) => { let best = null, bd = r || 18; S.items.forEach(it => { const d = Math.hypot(it.x - p.x, it.y - p.y); if (d <= bd) { bd = d; best = it; } }); return best; };
   function segDist(p, a, b) { const dx = b.x - a.x, dy = b.y - a.y, L = dx * dx + dy * dy || 1, t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / L)); return Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t)); }
   function lineDist(p, l) { const q = drawSamplePts(l); let m = 1e9; for (let i = 1; i < q.length; i++) m = Math.min(m, segDist(p, q[i - 1], q[i])); return m; }
