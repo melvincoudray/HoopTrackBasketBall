@@ -10277,10 +10277,45 @@ function drawLineSvg(l, pal) {
 }
 function drawNorm(l) { if (!l.pts) { l.pts = drawClone(drawPts(l)); delete l.a; delete l.b; delete l.m; } return l; }
 function drawLast(l) { const P = drawPts(l); return P[P.length - 1]; }
+
+// "Next step" : applique les flèches du schéma. Cut / dribble : le joueur va au bout de sa flèche.
+// Pass : le receveur (l'attaquant le plus proche du bout de la flèche) devient porteur du ballon ;
+// le ballon et le rond "porteur" le suivent, et le ballon accompagne aussi un dribble.
+function drawAdvance(items, lines) {
+  const out = drawClone(items).filter(it => it.t !== "dho");
+  const byId = id => out.find(i => i.id === id);
+  const orig = {}; out.forEach(i => { orig[i.id] = { x: i.x, y: i.y }; });
+  const att = out.filter(i => i.t === "o");
+  const ball = out.find(i => i.t === "ball");
+  const near = (p, cands, max) => { let b = null, bd = max; cands.forEach(c => { const d = Math.hypot(c.x - p.x, c.y - p.y); if (d < bd) { bd = d; b = c; } }); return b; };
+  // porteur de départ : l'attaquant entouré d'un rond, sinon le plus proche du ballon
+  let H = att.find(i => i.h) || (ball ? near(ball, att.map(a => ({ ...a, x: orig[a.id].x, y: orig[a.id].y })), 32) : null);
+  H = H ? byId(H.id) : null;
+  const hadRing = att.some(i => i.h);
+  const off0 = ball && H ? { x: ball.x - orig[H.id].x, y: ball.y - orig[H.id].y } : null;
+  const finals = {}; out.forEach(i => { finals[i.id] = { x: i.x, y: i.y }; });
+  lines.forEach(l => { if (l.from != null && (l.kind === "cut" || l.kind === "dribble") && finals[l.from]) { const e = drawLast(l); finals[l.from] = { x: e.x, y: e.y }; } });
+  lines.forEach(l => {
+    if (l.kind !== "pass") return;
+    const P = drawPts(l), passer = l.from != null ? byId(l.from) : near(P[0], att.map(a => ({ ...a, x: orig[a.id].x, y: orig[a.id].y })), 32);
+    if (!passer || (H && passer.id !== H.id)) return;
+    const end = P[P.length - 1], cands = [];
+    att.forEach(a => { if (a.id !== passer.id) { cands.push({ id: a.id, x: orig[a.id].x, y: orig[a.id].y }); cands.push({ id: a.id, x: finals[a.id].x, y: finals[a.id].y }); } });
+    const r = near(end, cands, 48);
+    if (r) H = byId(r.id);
+  });
+  out.forEach(i => { if (finals[i.id]) { i.x = finals[i.id].x; i.y = finals[i.id].y; } });
+  if (hadRing && H) { out.forEach(i => { if (i.t === "o") delete i.h; }); H.h = true; }
+  if (ball && H) {
+    const o = off0 && Math.hypot(off0.x, off0.y) >= 6 && Math.hypot(off0.x, off0.y) <= 40 ? off0 : { x: 14, y: -14 };
+    ball.x = Math.max(8, Math.min(492, H.x + o.x)); ball.y = Math.max(8, Math.min(462, H.y + o.y));
+  }
+  return out;
+}
 function drawItemSvg(it, pal) {
   if (it.t === "o") {
     const R = pal.big ? 21 : 12, FS = pal.big ? 27 : 13, RH = pal.big ? 28 : 18;
-    return `<g>${it.h ? `<circle cx="${it.x}" cy="${it.y}" r="${RH}" fill="none" stroke="${pal.off}" stroke-width="1.8"/>` : ""}<circle cx="${it.x}" cy="${it.y}" r="${R}" fill="${pal.off}"/><text x="${it.x}" y="${drawF(it.y + FS * 0.36)}" text-anchor="middle" font-size="${FS}" font-weight="700" fill="${pal.offtxt}" font-family="Arial,Helvetica,sans-serif">${drawEsc(it.n)}</text></g>`;
+    return `<g>${it.h ? `<circle cx="${it.x}" cy="${it.y}" r="${RH}" fill="none" stroke="${pal.off}" stroke-width="${pal.big ? 3 : 1.8}"/>` : ""}<circle cx="${it.x}" cy="${it.y}" r="${R}" fill="${pal.off}"/><text x="${it.x}" y="${drawF(it.y + FS * 0.36)}" text-anchor="middle" font-size="${FS}" font-weight="700" fill="${pal.offtxt}" font-family="Arial,Helvetica,sans-serif">${drawEsc(it.n)}</text></g>`;
   }
   if (it.t === "dho") {
     const k = pal.big ? 1.45 : 1, w = 13 * k, g = 5 * k, sl = 12 * k;
@@ -10293,7 +10328,18 @@ function drawItemSvg(it, pal) {
   return `<circle cx="${it.x}" cy="${it.y}" r="6.5" fill="${pal.ball}" stroke="${pal.court}" stroke-width="1.5"/>`;
 }
 function drawFrameSvg(fr, pal, extra) {
-  return drawCourtSvg(pal) + (fr.lines || []).map(l => drawLineSvg(l, pal)).join("") + (fr.items || []).map(it => drawItemSvg(it, pal)).join("") + (extra || "");
+  let items = fr.items || [];
+  // À l'export, le porteur du ballon est toujours entouré : celui qui a le rond, sinon l'attaquant
+  // le plus proche du ballon.
+  if (pal.big && !items.some(i => i.t === "o" && i.h)) {
+    const ball = items.find(i => i.t === "ball");
+    if (ball) {
+      let best = null, bd = 34;
+      items.forEach(i => { if (i.t === "o") { const d = Math.hypot(i.x - ball.x, i.y - ball.y); if (d < bd) { bd = d; best = i; } } });
+      if (best) items = items.map(i => i === best ? { ...i, h: true } : i);
+    }
+  }
+  return drawCourtSvg(pal) + (fr.lines || []).map(l => drawLineSvg(l, pal)).join("") + items.map(it => drawItemSvg(it, pal)).join("") + (extra || "");
 }
 function DrawThumb({ frame, pal, style }) {
   return <svg viewBox="0 0 500 470" style={{ width: "100%", height: "auto", display: "block", ...style }} dangerouslySetInnerHTML={{ __html: drawFrameSvg(frame, pal || DRAW_PAL_EDIT) }} />;
@@ -10595,8 +10641,8 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
     syncFrame();
     const cur = S.frames[S.fi], nf = { items: [], lines: [], cap: "" };
     if (keep) {
-      // étape suivante : mêmes joueurs, placés là où leurs cuts / dribbles les ont amenés, sans les flèches
-      nf.items = drawClone(cur.items).filter(it => it.t !== "dho").map(it => { cur.lines.forEach(l => { if (l.from === it.id && (l.kind === "cut" || l.kind === "dribble")) { const e = drawLast(l); it.x = e.x; it.y = e.y; } }); return it; });
+      // étape suivante : les flèches sont "jouées" (déplacements, passes → nouveau porteur du ballon), puis effacées
+      nf.items = drawAdvance(cur.items, cur.lines);
     }
     S.frames.splice(S.fi + 1, 0, nf); loadFrame(S.fi + 1);
   }
@@ -10736,6 +10782,25 @@ function DrawTab({ isCoach, team }) {
     const next = books.map((b, i) => i === bi ? { ...b, plays: b.plays.filter((_, k) => k !== pi) } : b);
     await saveBooks(next); setConfirmDel(null); setCur(null);
   }
+  // Ordre des plays : ← / → dans un groupe, ↑ / ↓ pour les groupes (l'export et le sommaire suivent cet ordre).
+  async function reorder(bi, newPlays) {
+    const curObj = cur && cur.b === bi ? books[bi].plays[cur.p] : null;
+    await saveBooks(books.map((b, i) => i === bi ? { ...b, plays: newPlays } : b));
+    if (curObj) { const k = newPlays.indexOf(curObj); setCur(k >= 0 ? { b: bi, p: k } : null); }
+  }
+  async function movePlay(bi, pi, dir) {
+    const plays = [...books[bi].plays], g = plays[pi].group || "Plays";
+    let j = pi + dir; while (j >= 0 && j < plays.length && (plays[j].group || "Plays") !== g) j += dir;
+    if (j < 0 || j >= plays.length) return;
+    [plays[pi], plays[j]] = [plays[j], plays[pi]];
+    await reorder(bi, plays);
+  }
+  async function moveGroup(bi, gi, dir) {
+    const gs = drawGroupsOf(books[bi]), j = gi + dir;
+    if (j < 0 || j >= gs.length) return;
+    [gs[gi], gs[j]] = [gs[j], gs[gi]];
+    await reorder(bi, gs.flatMap(g => g.plays.map(o => o.p)));
+  }
   async function setClub(bi, club) { await saveBooks(books.map((b, i) => i === bi ? { ...b, club } : b)); }
   async function renameBook(bi, name) { await saveBooks(books.map((b, i) => i === bi ? { ...b, name } : b)); }
 
@@ -10754,6 +10819,7 @@ function DrawTab({ isCoach, team }) {
     say(`${added.length} play${added.length > 1 ? "s" : ""} inserted in Scouting Report › Staff for ${t}.`);
   }
 
+  const arrowBtn = { width: 24, height: 22, padding: 0, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 5, color: PAPER, fontSize: 13, lineHeight: 1, cursor: "pointer", fontFamily: "inherit" };
   const smallBtn = { padding: "6px 11px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 7, color: PAPER, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" };
   const own = team?.logo || null;
 
@@ -10781,16 +10847,28 @@ function DrawTab({ isCoach, team }) {
                 : <button onClick={() => setConfirmDel("b" + bi)} style={{ ...smallBtn, color: "#8B93A1", background: "transparent" }}><Trash2 size={12} /></button>)}
             </div>
           </div>
-          {b.plays.length === 0 ? <div style={{ padding: 12, fontSize: 12.5, color: "#8B93A1" }}>No play yet.</div> : drawGroupsOf(b).map(g => (
+          {b.plays.length === 0 ? <div style={{ padding: 12, fontSize: 12.5, color: "#8B93A1" }}>No play yet.</div> : drawGroupsOf(b).map((g, gi, gAll) => (
             <div key={g.name}>
-              <div style={{ padding: "10px 10px 0", fontSize: 10.5, letterSpacing: "0.1em", textTransform: "uppercase", color: "#8B93A1" }}>{g.name} · {g.plays.length}</div>
+              <div style={{ padding: "10px 10px 0", fontSize: 10.5, letterSpacing: "0.1em", textTransform: "uppercase", color: "#8B93A1", display: "flex", alignItems: "center", gap: 8 }}>
+                <span>{g.name} · {g.plays.length}</span>
+                {isCoach && gAll.length > 1 && <span style={{ display: "inline-flex", gap: 4 }}>
+                  <button title="Move group up" aria-label="Move group up" disabled={gi === 0} onClick={() => moveGroup(bi, gi, -1)} style={{ ...arrowBtn, opacity: gi === 0 ? 0.3 : 1 }}>↑</button>
+                  <button title="Move group down" aria-label="Move group down" disabled={gi === gAll.length - 1} onClick={() => moveGroup(bi, gi, 1)} style={{ ...arrowBtn, opacity: gi === gAll.length - 1 ? 0.3 : 1 }}>↓</button>
+                </span>}
+              </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(112px, 1fr))", gap: 8, padding: 10 }}>
-                {g.plays.map(o => (
+                {g.plays.map((o, oi) => (
                   <div key={o.i} style={{ background: "#1D232C", border: `1px solid ${cur && cur.b === bi && cur.p === o.i ? AMBER : LINE}`, borderRadius: 6, padding: 4, display: "flex", flexDirection: "column", gap: 4, minWidth: 0 }}>
                     <button onClick={() => loadPlay(bi, o.i)} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", textAlign: "left", color: PAPER, fontFamily: "inherit", fontSize: 12, display: "flex", flexDirection: "column", gap: 4 }}>
                       <DrawThumb frame={o.p.frames[0]} />
                       <span style={{ padding: "0 2px" }}>{o.p.name}{o.p.frames.length > 1 && <span style={{ color: "#8B93A1", fontSize: 10.5 }}> · {o.p.frames.length} diagrams</span>}</span>
                     </button>
+                    {isCoach && g.plays.length > 1 && (
+                      <div style={{ display: "flex", gap: 4 }}>
+                        <button title="Move earlier" aria-label="Move earlier" disabled={oi === 0} onClick={() => movePlay(bi, o.i, -1)} style={{ ...arrowBtn, opacity: oi === 0 ? 0.3 : 1 }}>←</button>
+                        <button title="Move later" aria-label="Move later" disabled={oi === g.plays.length - 1} onClick={() => movePlay(bi, o.i, 1)} style={{ ...arrowBtn, opacity: oi === g.plays.length - 1 ? 0.3 : 1 }}>→</button>
+                      </div>
+                    )}
                     {isCoach && (confirmDel === `p${bi}-${o.i}`
                       ? <div style={{ display: "flex", gap: 8 }}><button onClick={() => deletePlay(bi, o.i)} style={{ fontSize: 11, color: RED, background: "none", border: "none", cursor: "pointer" }}>Confirm</button><button onClick={() => setConfirmDel(null)} style={{ fontSize: 11, color: "#8B93A1", background: "none", border: "none", cursor: "pointer" }}>Cancel</button></div>
                       : <button onClick={() => setConfirmDel(`p${bi}-${o.i}`)} style={{ fontSize: 11, color: "#5C6470", background: "none", border: "none", cursor: "pointer", textAlign: "left", padding: "0 2px" }}>Delete</button>)}
