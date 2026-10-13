@@ -10184,6 +10184,13 @@ const DRAW_HINTS = {
 const DRAW_LINE_TOOLS = ["cut", "pass", "dribble", "screen", "shoot"];
 const DRAW_OWN = "__own__"; // valeur de "club" pour notre propre équipe
 
+// Zone derrière la ligne de fond (pour dessiner une touche) : toujours visible dans l'éditeur,
+// et dans les miniatures / l'export seulement si le schéma s'en sert.
+const DRAW_TOP = 56;
+function drawVB(fr, force) {
+  const used = force || (fr && ((fr.items || []).some(i => i.y < 4) || (fr.lines || []).some(l => drawPts(l).some(q => q.y < 4))));
+  return used ? `0 -${DRAW_TOP} 500 ${470 + DRAW_TOP}` : "0 0 500 470";
+}
 function drawF(n) { return Math.round(n * 10) / 10; }
 function drawEsc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 function drawClone(o) { return JSON.parse(JSON.stringify(o)); }
@@ -10192,7 +10199,7 @@ function drawClone(o) { return JSON.parse(JSON.stringify(o)); }
 // raccordé en douceur aux lignes de coin.
 function drawCourtSvg(p) {
   const l = p.line;
-  return `<rect x="0" y="0" width="500" height="470" fill="${p.court}"/>` +
+  return `<rect x="0" y="-60" width="500" height="530" fill="${p.court}"/>` +
     `<rect x="1" y="1" width="498" height="469" fill="none" stroke="${l}" stroke-width="2"/>` +
     `<rect x="168" y="1" width="164" height="192" fill="none" stroke="${l}" stroke-width="1.5"/>` +
     `<path d="M190 193 A60 60 0 0 0 310 193" fill="none" stroke="${l}" stroke-width="1.5"/>` +
@@ -10308,7 +10315,7 @@ function drawAdvance(items, lines) {
   if (hadRing && H) { out.forEach(i => { if (i.t === "o") delete i.h; }); H.h = true; }
   if (ball && H) {
     const o = off0 && Math.hypot(off0.x, off0.y) >= 6 && Math.hypot(off0.x, off0.y) <= 40 ? off0 : { x: 14, y: -14 };
-    ball.x = Math.max(8, Math.min(492, H.x + o.x)); ball.y = Math.max(8, Math.min(462, H.y + o.y));
+    ball.x = Math.max(8, Math.min(492, H.x + o.x)); ball.y = Math.max(-DRAW_TOP + 8, Math.min(462, H.y + o.y));
   }
   return out;
 }
@@ -10342,7 +10349,7 @@ function drawFrameSvg(fr, pal, extra) {
   return drawCourtSvg(pal) + (fr.lines || []).map(l => drawLineSvg(l, pal)).join("") + items.map(it => drawItemSvg(it, pal)).join("") + (extra || "");
 }
 function DrawThumb({ frame, pal, style }) {
-  return <svg viewBox="0 0 500 470" style={{ width: "100%", height: "auto", display: "block", ...style }} dangerouslySetInnerHTML={{ __html: drawFrameSvg(frame, pal || DRAW_PAL_EDIT) }} />;
+  return <svg viewBox={drawVB(frame)} style={{ width: "100%", height: "auto", display: "block", ...style }} dangerouslySetInnerHTML={{ __html: drawFrameSvg(frame, pal || DRAW_PAL_EDIT) }} />;
 }
 function drawGroupsOf(book) {
   const g = [], idx = {};
@@ -10558,7 +10565,7 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
   function snap() { S.undo.push(JSON.stringify({ items: S.items, lines: S.lines, nid: S.nid })); if (S.undo.length > 40) S.undo.shift(); }
   function pt(e) {
     const r = svgRef.current.getBoundingClientRect();
-    return { x: Math.max(8, Math.min(492, (e.clientX - r.left) / r.width * 500)), y: Math.max(8, Math.min(462, (e.clientY - r.top) / r.height * 470)) };
+    return { x: Math.max(8, Math.min(492, (e.clientX - r.left) / r.width * 500)), y: Math.max(-DRAW_TOP + 8, Math.min(462, -DRAW_TOP + (e.clientY - r.top) / r.height * (470 + DRAW_TOP))) };
   }
   const hitItem = (p, r) => { let best = null, bd = r || 18; S.items.forEach(it => { const d = Math.hypot(it.x - p.x, it.y - p.y); if (d <= bd) { bd = d; best = it; } }); return best; };
   function segDist(p, a, b) { const dx = b.x - a.x, dy = b.y - a.y, L = dx * dx + dy * dy || 1, t = Math.max(0, Math.min(1, ((p.x - a.x) * dx + (p.y - a.y) * dy) / L)); return Math.hypot(p.x - (a.x + dx * t), p.y - (a.y + dy * t)); }
@@ -10704,7 +10711,7 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
         {S.frames.length > 1 && <button onClick={delFrame} style={{ ...smallBtn, color: "#8B93A1", background: "transparent" }}>Delete diagram</button>}
       </div>
       <div style={{ background: "#1D232C", border: `1px solid ${LINE}`, borderRadius: 8, padding: 6, touchAction: "none" }}>
-        <svg ref={svgRef} viewBox="0 0 500 470" style={{ display: "block", width: "100%", height: "auto", maxHeight: 560, cursor: "crosshair", userSelect: "none" }}
+        <svg ref={svgRef} viewBox={drawVB(null, true)} style={{ display: "block", width: "100%", height: "auto", maxHeight: 560, cursor: "crosshair", userSelect: "none" }}
           onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp} onDoubleClick={onDbl}
           dangerouslySetInnerHTML={{ __html: drawFrameSvg({ items: S.items, lines: S.lines }, DRAW_PAL_EDIT, extra) }} />
       </div>
@@ -10740,6 +10747,7 @@ function DrawTab({ isCoach, team }) {
   const [books, setBooks] = useState(null);
   const [loadKey, setLoadKey] = useState(0);
   const [initial, setInitial] = useState(null);
+  const [collapsed, setCollapsed] = useState({}); // playbooks repliés (id → true)
   const [cur, setCur] = useState(null); // { b, p } : play chargée dans l'éditeur
   const [exportIdx, setExportIdx] = useState(null);
   const [viewer, setViewer] = useState(null); // { b, p } : lecture seule (joueurs)
@@ -10838,7 +10846,10 @@ function DrawTab({ isCoach, team }) {
       {books.map((b, bi) => (
         <div key={b.id} style={{ border: `1px solid ${LINE}`, borderRadius: 10, overflow: "hidden" }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8, padding: "9px 10px", background: PANEL2, flexWrap: "wrap" }}>
-            <div style={{ fontWeight: 600, fontSize: 13.5 }}>{b.name} <span style={{ color: "#5C6470", fontWeight: 400, fontSize: 12 }}>· {b.plays.length} plays</span></div>
+            <button onClick={() => setCollapsed(c => ({ ...c, [b.id]: !c[b.id] }))} aria-expanded={!collapsed[b.id]} title={collapsed[b.id] ? "Expand" : "Collapse"} style={{ background: "none", border: "none", padding: 0, cursor: "pointer", color: PAPER, fontFamily: "inherit", fontWeight: 600, fontSize: 13.5, textAlign: "left", display: "inline-flex", alignItems: "center", gap: 8 }}>
+              <span style={{ color: "#8B93A1", fontSize: 11, width: 10 }}>{collapsed[b.id] ? "▸" : "▾"}</span>
+              <span>{b.name} <span style={{ color: "#5C6470", fontWeight: 400, fontSize: 12 }}>· {b.plays.length} plays</span></span>
+            </button>
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               <button onClick={() => setExportIdx(bi)} style={smallBtn}>Export</button>
               {isCoach && <button onClick={() => { setInsertCtx({ book: bi }); setInsertTeam(teamNames[0] || ""); }} style={smallBtn}>Insert in Staff</button>}
@@ -10847,7 +10858,7 @@ function DrawTab({ isCoach, team }) {
                 : <button onClick={() => setConfirmDel("b" + bi)} style={{ ...smallBtn, color: "#8B93A1", background: "transparent" }}><Trash2 size={12} /></button>)}
             </div>
           </div>
-          {b.plays.length === 0 ? <div style={{ padding: 12, fontSize: 12.5, color: "#8B93A1" }}>No play yet.</div> : drawGroupsOf(b).map((g, gi, gAll) => (
+          {collapsed[b.id] ? null : b.plays.length === 0 ? <div style={{ padding: 12, fontSize: 12.5, color: "#8B93A1" }}>No play yet.</div> : drawGroupsOf(b).map((g, gi, gAll) => (
             <div key={g.name}>
               <div style={{ padding: "10px 10px 0", fontSize: 10.5, letterSpacing: "0.1em", textTransform: "uppercase", color: "#8B93A1", display: "flex", alignItems: "center", gap: 8 }}>
                 <span>{g.name} · {g.plays.length}</span>
