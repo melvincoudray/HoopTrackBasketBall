@@ -10391,7 +10391,19 @@ function drawBuildPages(book, title, colsSetting, logoUrl) {
     lines.push({ t: "g", n: (gi + 1) + ".", l: g.name, gi });
     g.plays.forEach((o, pi) => lines.push({ t: "s", n: (gi + 1) + "." + (pi + 1), l: o.p.name, gi, o }));
   });
-  const perToc = 20, tocPages = Math.max(1, Math.ceil(lines.length / perToc));
+  // Sommaire : les lignes sont réparties selon la place réellement disponible (la 1re page porte le
+  // bandeau titre, qui peut faire 2 lignes) pour que la dernière ligne ne touche jamais le pied de page.
+  const titleLines = Math.max(1, Math.ceil(String(title).length * 62 * 0.56 / 500));
+  const firstHeader = 8 + 40 + Math.max(84, titleLines * 71) + 30 + 28 + 41 + 36, contHeader = 10 + 41 + 36;
+  const usable = 1272.79 - 63 - 90, LINE_H = 40, GROUP_GAP = 14;
+  const tocChunks = []; let cur = [], used = 0, cap = usable - firstHeader;
+  lines.forEach(x => {
+    const cost = LINE_H + (x.t === "g" && cur.length > 0 ? GROUP_GAP : 0);
+    if (used + cost > cap && cur.length) { tocChunks.push(cur); cur = []; used = 0; cap = usable - contHeader; }
+    used += LINE_H + (x.t === "g" && cur.length > 0 ? GROUP_GAP : 0); cur.push(x);
+  });
+  tocChunks.push(cur);
+  const tocPages = tocChunks.length;
   let page = tocPages + 1; const start = [];
   gs.forEach(g => { start.push(page); page += Math.max(1, Math.ceil(g.rows.length / g.rpp)); });
 
@@ -10405,7 +10417,7 @@ function drawBuildPages(book, title, colsSetting, logoUrl) {
   const pages = [];
 
   for (let tp = 0; tp < tocPages; tp++) {
-    const chunk = lines.slice(tp * perToc, tp * perToc + perToc);
+    const chunk = tocChunks[tp];
     pages.push(
       <div key={"toc" + tp} data-new-page="true" style={pageStyle}>
         {tp === 0 ? (
