@@ -191,7 +191,7 @@ async function tryExportPdf(elementId, filename, theme = "light", orientation = 
     const pdf = new jsPDF({ unit: "pt", format: "a4", orientation, compress: true });
     let pageTop = 0; // position (en pt, dans l'image totale) du haut de la page courante
     let firstPage = true;
-    while (pageTop < imgHeight - 0.5) {
+    while (pageTop < imgHeight - 2) { // tolérance de 2 pt : évite une page blanche finale due aux arrondis
       let pageBottom = Math.min(pageTop + pageHeight, imgHeight);
       // Si un élément protégé chevauche cette limite de page (commence avant, finit après),
       // on raccourcit la page pour s'arrêter juste avant lui — il passera entièrement sur la
@@ -208,7 +208,7 @@ async function tryExportPdf(elementId, filename, theme = "light", orientation = 
       // page ici, même s'il restait de la place — chaque joueur démarre ainsi toujours une
       // page fraîche, plutôt que de s'enchaîner à la suite du précédent.
       for (const r of newPageRanges) {
-        if (r.top > pageTop + 0.5 && r.top < pageBottom - 0.5) {
+        if (r.top > pageTop + 2 && r.top < pageBottom - 2) {
           pageBottom = r.top;
         }
       }
@@ -10186,11 +10186,14 @@ const DRAW_OWN = "__own__"; // valeur de "club" pour notre propre équipe
 
 // Zone derrière la ligne de fond (pour dessiner une touche) : toujours visible dans l'éditeur,
 // et dans les miniatures / l'export seulement si le schéma s'en sert.
-const DRAW_TOP = 64, DRAW_SIDE = 64;
-const drawOut = (q) => q.y < 4 || q.x < 4 || q.x > 496;
+const DRAW_TOP = 64, DRAW_SIDE = 64, DRAW_BOT = 64;
+// Un joueur (rond ≈ 21 de rayon à l'export, plus l'anneau du porteur) trop près d'un bord serait coupé
+// par le cadre : le schéma passe alors en version "avec marges".
+const drawItemOut = (i) => i.x < 32 || i.x > 468 || i.y < 32 || i.y > 438;
+const drawOut = (q) => q.y < 4 || q.x < 4 || q.x > 496 || q.y > 466;
 function drawVB(fr, force) {
-  const used = force || (fr && ((fr.items || []).some(drawOut) || (fr.lines || []).some(l => drawPts(l).some(drawOut))));
-  return used ? `-${DRAW_SIDE} -${DRAW_TOP} ${500 + 2 * DRAW_SIDE} ${470 + DRAW_TOP}` : "0 0 500 470";
+  const used = force || (fr && ((fr.items || []).some(drawItemOut) || (fr.lines || []).some(l => drawPts(l).some(drawOut))));
+  return used ? `-${DRAW_SIDE} -${DRAW_TOP} ${500 + 2 * DRAW_SIDE} ${470 + DRAW_TOP + DRAW_BOT}` : "0 0 500 470";
 }
 function drawF(n) { return Math.round(n * 10) / 10; }
 function drawEsc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
@@ -10202,10 +10205,10 @@ function drawCourtSvg(p, margin) {
   const l = p.line;
   // Export : le cadre épais est dessiné DANS le schéma (et non en bordure CSS, qui se rendait de façon
   // inégale selon les côtés dans le PDF : trait plus épais en haut et à gauche).
-  const x0 = margin ? -DRAW_SIDE : 0, y0 = margin ? -DRAW_TOP : 0, w = margin ? 500 + 2 * DRAW_SIDE : 500, h = margin ? 470 + DRAW_TOP : 470, T = 7;
+  const x0 = margin ? -DRAW_SIDE : 0, y0 = margin ? -DRAW_TOP : 0, w = margin ? 500 + 2 * DRAW_SIDE : 500, h = margin ? 470 + DRAW_TOP + DRAW_BOT : 470, T = 7;
   const frame = p.big ? `<rect x="${x0 + T / 2}" y="${y0 + T / 2}" width="${w - T}" height="${h - T}" fill="none" stroke="${l}" stroke-width="${T}"/>` : "";
   const court = (p.big && !margin) ? "" : `<rect x="1" y="1" width="498" height="469" fill="none" stroke="${l}" stroke-width="2"/>`;
-  return `<rect x="-60" y="-60" width="620" height="530" fill="${p.court}"/>` + court +
+  return `<rect x="-80" y="-80" width="660" height="640" fill="${p.court}"/>` + court +
     `<rect x="168" y="1" width="164" height="192" fill="none" stroke="${l}" stroke-width="1.5"/>` +
     `<path d="M190 193 A60 60 0 0 0 310 193" fill="none" stroke="${l}" stroke-width="1.5"/>` +
     `<path d="M190 193 A60 60 0 0 1 310 193" fill="none" stroke="${l}" stroke-width="1.2" stroke-dasharray="6 5"/>` +
@@ -10320,7 +10323,7 @@ function drawAdvance(items, lines) {
   if (hadRing && H) { out.forEach(i => { if (i.t === "o") delete i.h; }); H.h = true; }
   if (ball && H) {
     const o = off0 && Math.hypot(off0.x, off0.y) >= 6 && Math.hypot(off0.x, off0.y) <= 40 ? off0 : { x: 14, y: -14 };
-    ball.x = Math.max(-DRAW_SIDE + 34, Math.min(500 + DRAW_SIDE - 34, H.x + o.x)); ball.y = Math.max(-DRAW_TOP + 34, Math.min(462, H.y + o.y));
+    ball.x = Math.max(-DRAW_SIDE + 34, Math.min(500 + DRAW_SIDE - 34, H.x + o.x)); ball.y = Math.max(-DRAW_TOP + 34, Math.min(470 + DRAW_BOT - 34, H.y + o.y));
   }
   return out;
 }
@@ -10368,7 +10371,7 @@ function drawGroupsOf(book) {
 function drawNewBook(name) { return { id: uid(), name, club: DRAW_OWN, plays: [] }; }
 
 // ---------------------------------------------------------------------------
-// Pages d'export (aperçu + PDF) — chaque page fait 900 x 1273 px (format A4), marquée
+// Pages d'export (aperçu + PDF) — chaque page fait 900 x 1272.79 px (format A4), marquée
 // data-new-page pour que tryExportPdf coupe exactement entre les pages.
 // ---------------------------------------------------------------------------
 
@@ -10392,7 +10395,7 @@ function drawBuildPages(book, title, colsSetting, logoUrl) {
   let page = tocPages + 1; const start = [];
   gs.forEach(g => { start.push(page); page += Math.max(1, Math.ceil(g.rows.length / g.rpp)); });
 
-  const pageStyle = { width: 900, height: 1273, background: "#fff", color: "#000", fontFamily: "Arial, Helvetica, sans-serif", position: "relative", boxSizing: "border-box", padding: "63px 63px 80px", overflow: "hidden" };
+  const pageStyle = { width: 900, height: 1272.79, background: "#fff", color: "#000", fontFamily: "Arial, Helvetica, sans-serif", position: "relative", boxSizing: "border-box", padding: "63px 63px 80px", overflow: "hidden" };
   // Signature du logiciel en bas à gauche de chaque page (le numéro de page reste en bas à droite).
   const num = (n) => (<>
     <div style={{ position: "absolute", left: 45, bottom: 32, fontSize: 13, letterSpacing: "0.08em", color: "#6B7280", fontFamily: "Arial, Helvetica, sans-serif" }}>Made with <b style={{ color: "#1A1D24" }}>HoopTrack</b></div>
@@ -10515,7 +10518,7 @@ function DrawExportPanel({ book, teamLogo, scoutingTeams, onSetClub, onClose }) 
         <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
           {pages.map((pg, i) => (
             <div key={i} style={{ width: 270, height: 382, border: `1px solid ${LINE}`, borderRadius: 4, overflow: "hidden", position: "relative", flex: "none" }}>
-              <div style={{ transform: "scale(0.3)", transformOrigin: "top left", width: 900, height: 1273, pointerEvents: "none" }}>{React.cloneElement(pg, { key: undefined })}</div>
+              <div style={{ transform: "scale(0.3)", transformOrigin: "top left", width: 900, height: 1272.79, pointerEvents: "none" }}>{React.cloneElement(pg, { key: undefined })}</div>
             </div>
           ))}
         </div>
@@ -10574,8 +10577,8 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
     const svg = svgRef.current, m = svg.getScreenCTM();
     let x, y;
     if (m) { const q = svg.createSVGPoint(); q.x = e.clientX; q.y = e.clientY; const r = q.matrixTransform(m.inverse()); x = r.x; y = r.y; }
-    else { const r = svg.getBoundingClientRect(); x = -DRAW_SIDE + (e.clientX - r.left) / r.width * (500 + 2 * DRAW_SIDE); y = -DRAW_TOP + (e.clientY - r.top) / r.height * (470 + DRAW_TOP); }
-    return { x: Math.max(-DRAW_SIDE + 34, Math.min(500 + DRAW_SIDE - 34, x)), y: Math.max(-DRAW_TOP + 34, Math.min(462, y)) };
+    else { const r = svg.getBoundingClientRect(); x = -DRAW_SIDE + (e.clientX - r.left) / r.width * (500 + 2 * DRAW_SIDE); y = -DRAW_TOP + (e.clientY - r.top) / r.height * (470 + DRAW_TOP + DRAW_BOT); }
+    return { x: Math.max(-DRAW_SIDE + 34, Math.min(500 + DRAW_SIDE - 34, x)), y: Math.max(-DRAW_TOP + 34, Math.min(470 + DRAW_BOT - 34, y)) };
   }
 
   const hitItem = (p, r) => { let best = null, bd = r || 18; S.items.forEach(it => { const d = Math.hypot(it.x - p.x, it.y - p.y); if (d <= bd) { bd = d; best = it; } }); return best; };
@@ -10829,7 +10832,7 @@ function DrawTab({ isCoach, team }) {
     const key = "draw_staff:" + t;
     const existing = (await storeGet(key)) || [];
     const plays = insertCtx.book !== undefined ? books[insertCtx.book].plays : [insertCtx.play];
-    const added = plays.map(p => ({ id: uid(), name: p.name, group: p.group || "Plays", frames: drawClone(p.frames), note: "" }));
+    const added = plays.map(p => ({ id: uid(), name: p.name, group: p.group || "Plays", frames: drawClone(p.frames), note: "", ...(insertCtx.book !== undefined ? { playbook: books[insertCtx.book].name } : {}) }));
     await storeSet(key, [...existing, ...added]);
     // Un playbook entier envoyé à une équipe adverse prend automatiquement son logo, tant que
     // son club n'a jamais été choisi explicitement.
@@ -10955,16 +10958,77 @@ function DrawTab({ isCoach, team }) {
 }
 
 // Plays envoyées vers l'onglet Staff d'une équipe adverse (voir DrawTab › Insert in Staff).
+// Mode visionnage : les plays d'une équipe (Scouting Report › Staff) présentés comme le PDF du playbook,
+// pages lisibles en grand, avec téléchargement du PDF.
+function DrawPdfViewer({ title: title0, plays, teamName, logoUrl, onClose }) {
+  const [zoom, setZoom] = useState(1);
+  const [vw, setVw] = useState(typeof window !== "undefined" ? window.innerWidth : 900);
+  const [busy, setBusy] = useState(false);
+  const [report, setReport] = useState(null);
+  const [msg, setMsg] = useState("");
+  useEffect(() => {
+    const on = () => setVw(window.innerWidth);
+    window.addEventListener("resize", on);
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    document.addEventListener("keydown", onKey);
+    return () => { window.removeEventListener("resize", on); document.removeEventListener("keydown", onKey); };
+  }, []);
+  const book = useMemo(() => ({ id: "staff-" + teamName, name: title0, plays, club: teamName }), [plays, title0, teamName]);
+  const pages = useMemo(() => drawBuildPages(book, title0, "auto", logoUrl), [book, title0, logoUrl]);
+  const filename = `playbook_${String(title0).replace(/[^\w\-]+/g, "_")}_${todayLocal()}.pdf`;
+  const fit = Math.min(1, (vw - 40) / 900), sc = fit * zoom;
+  async function doExport() {
+    setBusy(true); setMsg("");
+    try {
+      const ok = await tryExportPdf("draw-print-content", filename, "light", "portrait", 1.4, 0.8);
+      if (!ok) {
+        const r = buildReportHtml("draw-print-content", filename.replace(/\.pdf$/, ".html"), "light");
+        if (r) { tryDownload(r.full, r.filename); setReport(r); }
+        else setMsg("Export failed — try again after the page has fully loaded.");
+      }
+    } finally { setBusy(false); }
+  }
+  const zb = { width: 32, height: 32, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 7, color: PAPER, fontSize: 16, cursor: "pointer", fontFamily: "inherit" };
+  return (
+    <div role="dialog" aria-label="Playbook viewer" style={{ position: "fixed", inset: 0, zIndex: 300, background: "rgba(8,10,14,0.94)", overflow: "auto" }}>
+      <div style={{ position: "sticky", top: 0, zIndex: 2, background: "#0B0D11", borderBottom: `1px solid ${LINE}`, padding: "10px 16px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ fontWeight: 700, fontSize: 15, flex: "1 1 160px", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{title0} <span style={{ color: "#8B93A1", fontWeight: 400, fontSize: 12.5 }}>· {pages.length} pages</span></div>
+        <button onClick={() => setZoom(z => Math.max(0.5, Math.round((z - 0.15) * 100) / 100))} aria-label="Zoom out" style={zb}>−</button>
+        <span style={{ fontSize: 12, color: "#8B93A1", minWidth: 38, textAlign: "center" }}>{Math.round(sc * 100)}%</span>
+        <button onClick={() => setZoom(z => Math.min(1.6, Math.round((z + 0.15) * 100) / 100))} aria-label="Zoom in" style={zb}>+</button>
+        <button onClick={doExport} disabled={busy} style={{ ...btnPrimary, flex: "none", padding: "8px 16px", fontSize: 13, opacity: busy ? 0.6 : 1 }}>{busy ? "Export…" : "Download PDF"}</button>
+        <button onClick={onClose} style={{ ...btnSecondary, padding: "8px 14px", fontSize: 13 }}>Close</button>
+      </div>
+      {msg && <div style={{ fontSize: 12.5, color: RED, padding: "8px 16px" }}>{msg}</div>}
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 16, padding: "18px 12px 40px" }}>
+        {pages.map((pg, i) => (
+          <div key={i} style={{ width: 900 * sc, height: 1272.79 * sc, flex: "none", background: "#fff", boxShadow: "0 4px 24px rgba(0,0,0,0.5)", overflow: "hidden", position: "relative" }}>
+            <div style={{ transform: `scale(${sc})`, transformOrigin: "top left", width: 900, height: 1272.79 }}>{React.cloneElement(pg, { key: undefined })}</div>
+          </div>
+        ))}
+      </div>
+      <div className="print-only" id="draw-print-content" style={{ width: 900 }}>{pages}</div>
+      <ExportModal report={report} onClose={() => setReport(null)} />
+    </div>
+  );
+}
+
 function StaffDrawPlays({ teamName, isCoach }) {
   const [plays, setPlays] = useState(null);
   const [confirmId, setConfirmId] = useState(null);
+  const [viewing, setViewing] = useState(false);
+  const scouting = useScoutingTeams();
   const key = "draw_staff:" + teamName;
   useEffect(() => { (async () => setPlays((await storeGet(key)) || []))(); }, [teamName]);
   if (plays === null || plays.length === 0) return null;
   async function persist(next) { setPlays(next); await storeSet(key, next); }
   return (
     <div style={{ marginBottom: 28 }}>
-      <SectionTitle eyebrow="Draw" title="Plays shared by the staff" />
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <SectionTitle eyebrow="Draw" title="Plays shared by the staff" />
+        <button onClick={() => setViewing(true)} style={{ ...btnSecondary, padding: "8px 14px", fontSize: 12.5, color: AMBER, borderColor: AMBER }}>View as PDF</button>
+      </div>
+      {viewing && <DrawPdfViewer title={(() => { const n = [...new Set(plays.map(p => p.playbook).filter(Boolean))]; return n.length === 1 && plays.every(p => p.playbook) ? n[0] : `Playbook ${teamName}`; })()} plays={plays} teamName={teamName} logoUrl={(scouting.teams?.[teamName] || scouting.teams?.[Object.keys(scouting.teams || {}).find(k => k.trim().toLowerCase() === String(teamName).trim().toLowerCase())] || {}).logo || null} onClose={() => setViewing(false)} />}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 12 }}>
         {plays.map(p => (
           <div key={p.id} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 10, display: "flex", flexDirection: "column", gap: 8, minWidth: 0 }}>
