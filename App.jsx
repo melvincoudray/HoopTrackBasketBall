@@ -3097,7 +3097,12 @@ function computeWeightedTeamPercentages(perMatch) {
 
   const sumOreb = sum("oreb"), sumMissedFG = sumMissed2 + sumMissed3;
   const orebOpportunities = sumMissedFG + 0.44 * sumMissedFT;
-  const orebPct = (has("oreb") && (has("missed2") || has("missed3")) && has("missedFT") && orebOpportunities > 0) ? (100 * sumOreb) / orebOpportunities : null;
+  // % Reb OFF précis (demandé par l'utilisateur) : Reb off ÷ (Reb off + Reb def de l'ADVERSAIRE), sur les matchs où le
+  // box score de l'adversaire est connu (synchro FFBB) ; sinon l'ancienne estimation à partir des tirs manqués.
+  const withOpp = perMatch.filter(m => m.oreb !== null && m.oreb !== undefined && m.oppDreb !== null && m.oppDreb !== undefined);
+  const sumOrebOpp = withOpp.reduce((a, m) => a + m.oreb, 0), sumOppDreb = withOpp.reduce((a, m) => a + m.oppDreb, 0);
+  const orebPctPrecise = (withOpp.length && sumOrebOpp + sumOppDreb > 0) ? (100 * sumOrebOpp) / (sumOrebOpp + sumOppDreb) : null;
+  const orebPct = orebPctPrecise ?? ((has("oreb") && (has("missed2") || has("missed3")) && has("missedFT") && orebOpportunities > 0) ? (100 * sumOreb) / orebOpportunities : null);
 
   const sumAst = sum("ast");
   const astOpportunities = sumFgm + 0.44 * sumMadeFT;
@@ -3215,6 +3220,11 @@ function useTeamAdvancedStats(filterKeys) {
       const ftm = s(columns.ftm) ?? madeFT;
       const fta = s(columns.fta) ?? ((madeFT !== null || missedFT !== null) ? (madeFT || 0) + (missedFT || 0) : null);
       const oreb = s(columns.oreb);
+      // Stats de l'ADVERSAIRE (ligne de totaux importée par la synchro FFBB) : rebonds offensifs encaissés, etc.
+      const so = (col) => (col && m.opponentRow && m.opponentRow.stats && m.opponentRow.stats[col] !== undefined) ? Number(m.opponentRow.stats[col]) : null;
+      const oppOreb = so(columns.oreb);
+      const oppRebTot = so(columns.reb);
+      const oppDreb = so(columns.rebDef) ?? ((oppRebTot !== null && oppOreb !== null) ? oppRebTot - oppOreb : null);
       const reb = s(columns.reb); // rebonds totaux (non séparés off/def) — informatif
       const tov = s(columns.tov);
       const ast = s(columns.ast);
@@ -3261,12 +3271,13 @@ function useTeamAdvancedStats(filterKeys) {
       // manqués) — n'a besoin que des propres stats de l'équipe, pas de celles de l'adversaire.
       const missedFG = (missed2 !== null || missed3 !== null) ? (missed2 || 0) + (missed3 || 0) : null;
       const orebOpportunities = (missedFG !== null && missedFT !== null) ? missedFG + 0.44 * missedFT : null;
-      const orebPct = (oreb !== null && orebOpportunities) ? (100 * oreb) / orebOpportunities : null;
+      const orebPct = (oreb !== null && oppDreb !== null && oreb + oppDreb > 0) ? (100 * oreb) / (oreb + oppDreb)
+        : ((oreb !== null && orebOpportunities) ? (100 * oreb) / orebOpportunities : null);
       // % Passes décisives : passes décisives ÷ (tirs marqués + 0.44 × lancers francs marqués).
       const astOpportunities = (fgm !== null && madeFT !== null) ? fgm + 0.44 * madeFT : null;
       const astPct = (ast !== null && astOpportunities) ? (100 * ast) / astOpportunities : null;
       return {
-        date: m.date, opponent: m.opponent, opponentScore: m.opponentScore, pts, poss, approxPoss, efg, tovPct, oreb, dreb, reb, ftRate, ortg, drtg,
+        date: m.date, opponent: m.opponent, opponentScore: m.opponentScore, pts, poss, approxPoss, efg, tovPct, oreb, dreb, reb, oppOreb, oppDreb, ftRate, ortg, drtg,
         fga, fta, tov, made2, missed2, made3, missed3, madeFT, missedFT, ast, pct2, pct3, pctFT, orebPct, astPct, fgm, tpm, blk, stl, fouls,
         rebDef, foulsDrawn, eff, plusMinus,
       };
@@ -3958,6 +3969,27 @@ export default function App() {
 
   useEffect(() => { if (team) bootstrap(); }, [team]);
 
+  // Synchro FFBB des box scores : à l'ouverture puis toutes les heures tant que l'appli reste ouverte (coach seulement).
+  const ffbbBoxDeps = useRef({});
+  ffbbBoxDeps.current = { roster, currentSeason };
+  async function runFfbbBoxSync(force) {
+    const { roster: r, currentSeason: season } = ffbbBoxDeps.current;
+    if (!r || !r.length) return null;
+    if (!force) { const last = Number(await storeGet("ffbb_box_last_sync")) || 0; if (Date.now() - last < 3600000) return null; }
+    const out = await syncFfbbBoxScores(r, season);
+    if (out.changed) setBoxScoreIndex(out.idx);
+    await storeSet("ffbb_box_last_sync", Date.now());
+    return out;
+  }
+  useEffect(() => {
+    if (!team || loading || !session || session.role !== "coach" || !roster.length) return;
+    let alive = true;
+    const tick = () => { if (alive) runFfbbBoxSync(false).catch(() => { /* silencieux : la synchro auto ne doit jamais gêner */ }); };
+    tick();
+    const t = setInterval(tick, 3600000);
+    return () => { alive = false; clearInterval(t); };
+  }, [team, loading, session?.role, roster.length > 0]);
+
   // Badges : recalculés au changement d'équipe, de roster, de box scores ou d'onglet (les séances
   // et objectifs peuvent avoir changé entre-temps).
   useEffect(() => {
@@ -4380,6 +4412,8 @@ export default function App() {
           <BoxScoreTab
             roster={roster}
             index={boxScoreIndex}
+            onSyncFfbb={() => runFfbbBoxSync(true)}
+            onCorrect={async (id, corrections, opts) => { const out = await saveBoxCorrections(id, corrections, opts); setBoxScoreIndex(out.idx); return out.record; }}
             onImported={async (parsed, meta) => {
               const id = uid();
               const record = { id, date: meta.date, opponent: meta.opponent, season: currentSeason, matchType: meta.matchType || "", opponentScore: meta.opponentScore ?? null, teamRow: parsed.teamRow || null, rows: parsed.rows };
@@ -7623,7 +7657,138 @@ const tdStyle = { padding: "9px 14px", borderBottom: `1px solid ${LINE}`, whiteS
 // Import des stats complètes de match (box score) — nouvel onglet
 // ---------------------------------------------------------------------------
 
-function BoxScoreTab({ roster, index, onImported, onDelete, onEditBoxScore }) {
+function BoxCorrectionsPanel({ matchId, onCorrect }) {
+  const [rec, setRec] = useState(null);
+  const [mode, setMode] = useState("move");
+  const [statKey, setStatKey] = useState("made3");
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [n, setN] = useState(1);
+  const [sign, setSign] = useState(-1);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  useEffect(() => { storeGet("boxscore:" + matchId).then(setRec); }, [matchId]);
+  if (!rec) return <div style={{ fontSize: 12.5, color: "#8B93A1" }}>Loading…</div>;
+  const rawRows = rec.rawRows || rec.rows;
+  const rawTeam = rec.rawRows ? rec.rawTeamRow : rec.teamRow;
+  const L = boxCorrLabels(rec.rows, rec.teamRow);
+  const players = rec.rows.map(r => r.player);
+  const curVal = (name) => { const r = rec.rows.find(x => x.player === name); return r ? Number(r.stats[L[statKey]] ?? 0) : 0; };
+  const rawVal = (name) => { const r = rawRows.find(x => x.player === name); return r ? Number(r.stats[L[statKey]] ?? 0) : null; };
+  const corrections = rec.corrections || [];
+  const statLabel = (k) => (BOX_CORR_STATS.find(s => s.key === k) || {}).label || k;
+  const describe = (c) => c.kind === "move"
+    ? `${c.n || 1} × ${statLabel(c.key)} moved from ${c.from} to ${c.to}`
+    : `${c.delta > 0 ? "+" : ""}${c.delta} ${statLabel(c.key)} — ${c.player}`;
+
+  async function commit(next, opts) {
+    setBusy(true); setErr("");
+    try { setRec(await onCorrect(matchId, next, opts)); } catch (e) { setErr(e.message || "Error."); }
+    setBusy(false);
+  }
+  async function add() {
+    setErr("");
+    const count = Math.max(1, Math.floor(Number(n) || 1));
+    let c;
+    if (mode === "move") {
+      if (!from || !to || from === to) { setErr("Pick two different players."); return; }
+      c = { id: uid(), kind: "move", key: statKey, from, to, n: count, expFrom: rawVal(from), expTo: rawVal(to), at: Date.now() };
+    } else {
+      if (!from) { setErr("Pick a player."); return; }
+      c = { id: uid(), kind: "adjust", key: statKey, player: from, delta: sign * count, expVal: rawVal(from), at: Date.now() };
+    }
+    const test = applyBoxCorrections(rawRows, rawTeam, [...corrections, c]);
+    if (test.status[c.id] !== "ok") { setErr("Not possible: the player doesn't have enough of that stat."); return; }
+    await commit([...corrections, c]);
+  }
+  const sel = { ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "auto", minWidth: 150 };
+  return (
+    <div style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, padding: 14, display: "flex", flexDirection: "column", gap: 12 }}>
+      <div style={{ fontSize: 12.5, color: "#8B93A1", lineHeight: 1.6 }}>
+        Fix this match only. FFBB numbers are kept untouched underneath: your corrections are re-applied after every FFBB sync, and skipped if the FFBB changes those exact numbers.
+        Eval is recalculated; +/- is left untouched.
+      </div>
+      {rec.correctionsReview && (
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", padding: 10, border: `1px solid ${AMBER}`, borderRadius: 8, color: AMBER, fontSize: 12.5 }}>
+          <AlertTriangle size={14} /> The FFBB changed this match (or a correction no longer applies) — check the corrections below.
+          <button disabled={busy} onClick={() => commit(corrections, { review: false })} style={{ background: "none", border: `1px solid ${AMBER}`, borderRadius: 6, color: AMBER, fontSize: 11.5, padding: "3px 10px", cursor: "pointer", fontFamily: "inherit" }}>Mark as checked</button>
+        </div>
+      )}
+      {corrections.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          {corrections.map(c => (
+            <div key={c.id} style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", fontSize: 13 }}>
+              <span>
+                {describe(c)}
+                {(rec.correctionStatus || {})[c.id] === "conflict" && <span style={{ color: AMBER, marginLeft: 8, fontSize: 11.5 }}>skipped — the FFBB numbers changed</span>}
+              </span>
+              <button disabled={busy} onClick={() => commit(corrections.filter(x => x.id !== c.id))} style={{ background: "none", border: "none", color: RED, cursor: "pointer", fontSize: 11.5, fontFamily: "inherit" }}>Undo</button>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "flex-end" }}>
+        <div>
+          <label style={labelStyle}>Type</label>
+          <select value={mode} onChange={e => setMode(e.target.value)} style={sel}>
+            <option value="move">Move a stat to another player</option>
+            <option value="adjust">Add / remove a stat</option>
+          </select>
+        </div>
+        <div>
+          <label style={labelStyle}>Stat</label>
+          <select value={statKey} onChange={e => setStatKey(e.target.value)} style={sel}>
+            {BOX_CORR_STATS.map(s => <option key={s.key} value={s.key}>{s.label}</option>)}
+          </select>
+        </div>
+        {mode === "adjust" && (
+          <div>
+            <label style={labelStyle}>Action</label>
+            <select value={sign} onChange={e => setSign(Number(e.target.value))} style={sel}>
+              <option value={-1}>Remove</option>
+              <option value={1}>Add</option>
+            </select>
+          </div>
+        )}
+        <div>
+          <label style={labelStyle}>{mode === "move" ? "From (wrongly credited)" : "Player"}</label>
+          <select value={from} onChange={e => setFrom(e.target.value)} style={sel}>
+            <option value="">—</option>
+            {players.map(p => <option key={p} value={p}>{p} ({curVal(p)})</option>)}
+          </select>
+        </div>
+        {mode === "move" && (
+          <div>
+            <label style={labelStyle}>To (right player)</label>
+            <select value={to} onChange={e => setTo(e.target.value)} style={sel}>
+              <option value="">—</option>
+              {players.map(p => <option key={p} value={p}>{p} ({curVal(p)})</option>)}
+            </select>
+          </div>
+        )}
+        <div>
+          <label style={labelStyle}>Qty</label>
+          <input type="number" min={1} value={n} onChange={e => setN(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 70 }} />
+        </div>
+        <button disabled={busy} onClick={add} style={{ padding: "9px 16px", background: AMBER, border: "none", borderRadius: 8, color: "#1a1200", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 13 }}>Apply</button>
+      </div>
+      {err && <div style={{ color: RED, fontSize: 12.5 }}>{err}</div>}
+    </div>
+  );
+}
+
+function BoxScoreTab({ roster, index, onImported, onDelete, onEditBoxScore, onSyncFfbb, onCorrect }) {
+  const [corrId, setCorrId] = useState(null);
+  const [ffbbMsg, setFfbbMsg] = useState("");
+  const [ffbbBusy, setFfbbBusy] = useState(false);
+  async function syncFfbbNow() {
+    setFfbbBusy(true); setFfbbMsg("");
+    try {
+      const r = await onSyncFfbb();
+      setFfbbMsg(r ? `${r.total} FFBB match sheet(s) read — ${r.added} added, ${r.updated} updated.` + (r.unmatched.length ? ` Not in your roster: ${r.unmatched.join(", ")}.` : "") : "Nothing to sync (roster empty).");
+    } catch (e) { setFfbbMsg(e.message || "FFBB sync failed."); }
+    setFfbbBusy(false);
+  }
   const [preview, setPreview] = useState(null);
   const [fileErr, setFileErr] = useState("");
   const [date, setDate] = useState(todayLocal());
@@ -7703,6 +7868,17 @@ function BoxScoreTab({ roster, index, onImported, onDelete, onEditBoxScore }) {
   return (
     <div>
       <SectionTitle eyebrow="03 — Official Stats" title="Full match stats" />
+      {onSyncFfbb && (
+        <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 18, display: "flex", gap: 14, alignItems: "center", flexWrap: "wrap" }}>
+          <button onClick={syncFfbbNow} disabled={ffbbBusy} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${AMBER}`, borderRadius: 8, color: AMBER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", opacity: ffbbBusy ? 0.6 : 1 }}>
+            <RefreshCw size={14} /> {ffbbBusy ? "Reading FFBB match sheets…" : "Sync box scores (FFBB)"}
+          </button>
+          <div style={{ fontSize: 12.5, color: "#8B93A1", lineHeight: 1.5, flex: 1, minWidth: 220 }}>
+            Reads every played match from nm1.ffbb.com, creates the match and its box score (or replaces the one already imported), and refreshes automatically every hour.
+            {ffbbMsg && <div style={{ color: PAPER, marginTop: 6 }}>{ffbbMsg}</div>}
+          </div>
+        </div>
+      )}
       <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 22, marginBottom: 24 }}>
         <p style={{ color: "#8B93A1", fontSize: 13.5, lineHeight: 1.6, margin: "0 0 16px" }}>
           Drop the full match stats Excel file here (box score: points, rebounds, assists, minutes…).
@@ -7771,7 +7947,7 @@ function BoxScoreTab({ roster, index, onImported, onDelete, onEditBoxScore }) {
       {index.length === 0 ? <EmptyState text="No box score imported yet." /> : (
         <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
           {index.slice().reverse().map(m => (
-            <div key={m.id} style={{ ...btnRow, cursor: "default", flexDirection: editingId === m.id ? "column" : "row", alignItems: editingId === m.id ? "stretch" : "center" }}>
+            <div key={m.id} style={{ ...btnRow, cursor: "default", flexWrap: "wrap", flexDirection: editingId === m.id ? "column" : "row", alignItems: editingId === m.id ? "stretch" : "center" }}>
               {editingId === m.id ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: "4px 0" }}>
                   <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -7802,12 +7978,16 @@ function BoxScoreTab({ roster, index, onImported, onDelete, onEditBoxScore }) {
                   ) : (
                     <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
                       <button onClick={() => startEdit(m)} style={{ background: "none", border: "none", color: AMBER, cursor: "pointer", fontSize: 11.5, fontFamily: "inherit" }}>Edit</button>
+                      <button onClick={() => setCorrId(corrId === m.id ? null : m.id)} style={{ background: "none", border: "none", color: m.correctionsReview ? AMBER : TEAL, cursor: "pointer", fontSize: 11.5, fontFamily: "inherit" }}>
+                        Fix stats{m.corrCount ? ` (${m.corrCount})` : ""}{m.correctionsReview ? " ⚠" : ""}
+                      </button>
                       <button onClick={() => openFile(m.id)} title="Open the original file" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Download size={15} /></button>
                       <button onClick={() => setConfirmDeleteId(m.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
                     </div>
                   )}
                 </>
               )}
+              {corrId === m.id && <div style={{ flexBasis: "100%", width: "100%", marginTop: 8 }}><BoxCorrectionsPanel matchId={m.id} onCorrect={onCorrect} /></div>}
             </div>
           ))}
         </div>
@@ -9285,7 +9465,7 @@ function TeamAdvancedStats({ advanced, isCoach }) {
     return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : null;
   };
   const weighted = computeWeightedTeamPercentages(advanced.perMatch);
-  const poss = avg("poss"), oreb = avg("oreb"), reb = avg("reb");
+  const poss = avg("poss"), oreb = avg("oreb"), reb = avg("reb"), oppOreb = avg("oppOreb");
   const { pct2, pct3, pctFT, efg, tovPct, orebPct, astPct, ortg, drtg, ftRate } = weighted;
   const dreb = avg("dreb"), ast = avg("ast"), pts = avg("pts"), ptse = advanced.perMatch.some(m => m.opponentScore !== null && m.opponentScore !== undefined)
     ? advanced.perMatch.map(m => m.opponentScore).filter(v => v !== null && v !== undefined).reduce((s, v, _, arr) => s + v / arr.length, 0) : null;
@@ -9305,7 +9485,7 @@ function TeamAdvancedStats({ advanced, isCoach }) {
   const attFT = (madeFT !== null || missedFT !== null) ? (madeFT || 0) + (missedFT || 0) : null;
   const customStatsObj = Object.fromEntries(Object.entries({
     ORTG: ortg, DRTG: drtg, "Net rating": net, Possessions: poss, "FT Rate": ftRate,
-    "Off. rebounds": oreb, "Def. rebounds": dreb, Rebounds: reb, Assists: ast, Points: pts,
+    "Off. rebounds": oreb, "Opp. off. rebounds": oppOreb, "Def. rebounds": dreb, Rebounds: reb, Assists: ast, Points: pts,
     "Opponent points": ptse, "% 2pts": pct2, "% 3pts": pct3, "% FT": pctFT, eFG: efg,
     "TOV%": tovPct, "OREB%": orebPct, "AST%": astPct,
   }).filter(([, v]) => v !== null && v !== undefined));
@@ -9352,7 +9532,7 @@ function TeamAdvancedStats({ advanced, isCoach }) {
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 26 }}>
         <StatPill label="eFG%" value={efg !== null ? efg.toFixed(1) + "%" : "–"} />
         <StatPill label="TOV%" value={tovPct !== null ? tovPct.toFixed(1) + "%" : "–"} tone="red" />
-        <StatPill label="OREB%" value={orebPct !== null ? orebPct.toFixed(1) + "%" : "–"} sub="off. rebounds ÷ (missed shots + 0.44 × missed FT)" />
+        <StatPill label="OREB%" value={orebPct !== null ? orebPct.toFixed(1) + "%" : "–"} sub={advanced.perMatch.some(m => m.oppDreb !== null && m.oppDreb !== undefined) ? "off. rebounds ÷ (off. rebounds + opponent's def. rebounds)" : "off. rebounds ÷ (missed shots + 0.44 × missed FT)"} />
         <StatPill label="FTA/FGA" value={ftRate !== null ? ftRate.toFixed(2) : "–"} />
       </div>
       <div style={{ fontSize: 11.5, color: "#5C6470", marginBottom: 26 }}>
@@ -9372,6 +9552,7 @@ function TeamAdvancedStats({ advanced, isCoach }) {
         <StatPill label="% 3pts" value={pct3 !== null ? pct3.toFixed(1) + "%" : "–"} />
         <StatPill label="% FT" value={pctFT !== null ? pctFT.toFixed(1) + "%" : "–"} />
         <StatPill label="Off. rebounds / game" value={oreb !== null ? oreb.toFixed(1) : "–"} />
+        <StatPill label="Opp. off. rebounds / game" value={oppOreb !== null ? oppOreb.toFixed(1) : "–"} sub={oppOreb === null ? "needs the opponent's box score (FFBB sync)" : "offensive rebounds allowed"} tone="red" />
         <StatPill label="Def. rebounds / game" value={rebDef !== null ? rebDef.toFixed(1) : "–"} sub={rebDefDirect === null ? (dreb === null ? "requires off. rebounds + total" : "derived (total - off.)") : undefined} />
         <StatPill label="Tot. rebounds / game" value={reb !== null ? reb.toFixed(1) : "–"} />
         <StatPill label="Assists / game" value={ast !== null ? ast.toFixed(1) : "–"} sub={ast === null ? "column not detected" : undefined} />
@@ -13122,6 +13303,224 @@ async function applyFfbbLogos(names, saveLogo) {
     try { await saveLogo(name, await ffbbSvgToPng(t.logo)); added++; } catch { /* logo illisible : ignoré */ }
   }
   return added;
+}
+
+// ---------------------------------------------------------------------------
+// Synchro FFBB des box scores (match par match) : fonction Netlify ffbb-nm1-matches.
+// Chaque feuille de match nm1.ffbb.com devient un box score de l'appli. Un match déjà importé (même
+// adversaire, date à ±3 jours) est REMPLACÉ ; un match déjà codifié (.dnk) donne sa date et son nom
+// d'adversaire, pour que le box score et le codage soient liés. Les noms de colonnes réutilisent ceux
+// des box scores déjà présents (sinon des noms par défaut reconnus par l'appli).
+// ---------------------------------------------------------------------------
+const FFBB_BOX_DEFAULT_LABELS = {
+  min: "Min", pts: "Pts", made2: "2Pts Réussi", missed2: "2Pts Manqué", made3: "3Pts Réussi", missed3: "3Pts Manqué",
+  madeFT: "LF Réussi", missedFT: "LF Manqué", oreb: "Reb Off", rebDef: "Reb Def", reb: "Reb Tot.", ast: "Pad", stl: "In",
+  tov: "Bp", blk: "Ct", fouls: "Fte", foulsDrawn: "FD", plusMinus: "+/-", eff: "Eval",
+};
+async function ffbbBoxLabelMap() {
+  const cached = await storeGet("ffbb_box_labels");
+  if (cached && cached.min) return cached;
+  const labels = new Set();
+  const idx = (await storeGet("boxscore_index")) || [];
+  for (const m of idx) {
+    const rec = await storeGet("boxscore:" + m.id);
+    (rec?.rows || []).forEach(r => Object.keys(r.stats || {}).forEach(l => labels.add(l)));
+  }
+  const all = Array.from(labels), used = new Set(), map = {};
+  for (const k of Object.keys(FFBB_BOX_DEFAULT_LABELS)) {
+    let lab = all.length ? findStatCol(all, STAT_PATTERNS[k === "min" ? "minutes" : k] || [], k === "min" ? "minutes" : k) : undefined;
+    if (!lab || used.has(lab)) lab = FFBB_BOX_DEFAULT_LABELS[k];
+    used.add(lab); map[k] = lab;
+  }
+  await storeSet("ffbb_box_labels", map);
+  return map;
+}
+function ffbbLabeledStats(s, L) {
+  const o = {};
+  const put = (k, v) => { if (v !== null && v !== undefined) o[L[k]] = v; };
+  put("min", s.min); put("pts", s.pts);
+  put("made2", s.r2); put("missed2", s.t2 - s.r2); put("made3", s.r3); put("missed3", s.t3 - s.r3);
+  put("madeFT", s.lfr); put("missedFT", s.lft - s.lfr);
+  put("oreb", s.ro); put("rebDef", s.rd); put("reb", s.rt); put("ast", s.pd); put("stl", s.in); put("tov", s.bp);
+  put("blk", s.ct); put("fouls", s.fte); put("foulsDrawn", s.fpr); put("plusMinus", s.pm); put("eff", s.eva);
+  return o;
+}
+function ffbbRosterMatch(roster, fullName) {
+  const toks = String(fullName).split(/\s+/).filter(Boolean).map(normTag);
+  const joined = toks.join("");
+  let best = null, bestScore = 0;
+  for (const p of roster) {
+    const nameToks = String(p.name || "").split(/\s+/).filter(Boolean).map(normTag);
+    const first = normTag(p.first || "");
+    let score = 0;
+    if (nameToks.length && nameToks.join("") === joined) score = 100;
+    else if (nameToks.length && nameToks.every(t => toks.includes(t))) score = 50 + nameToks.join("").length;
+    else if (first && toks.includes(first)) score = 10;
+    if (score > bestScore) { best = p; bestScore = score; }
+  }
+  return best;
+}
+function ffbbSameOpponent(a, b) {
+  const x = normTag(a || ""), y = normTag(b || "");
+  if (!x || !y) return false;
+  return x === y || (x.length >= 4 && y.includes(x)) || (y.length >= 4 && x.includes(y));
+}
+function ffbbDayDiff(d1, d2) { return Math.abs((Date.parse(d1) - Date.parse(d2)) / 86400000); }
+
+// Retourne { total, added, updated, unmatched:[noms], changed, idx }.
+async function syncFfbbBoxScores(roster, season) {
+  const team = (await storeGet("ffbb_box_team")) || "Vitré";
+  const q = "team=" + encodeURIComponent(team);
+  const res = await fetch("/.netlify/functions/ffbb-nm1-matches?" + q);
+  const list = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(list.error || "FFBB matches unavailable (" + res.status + ").");
+  const L = await ffbbBoxLabelMap();
+  // Lecture des feuilles (3 en parallèle) ; un match sans feuille publiée est simplement ignoré.
+  const fetched = [];
+  const queue = [...(list.matches || [])];
+  await Promise.all([0, 1, 2].map(async () => {
+    while (queue.length) {
+      const m = queue.shift();
+      try {
+        const r = await fetch("/.netlify/functions/ffbb-nm1-matches?" + q + "&match=" + encodeURIComponent(m.id + "-" + m.slug));
+        if (!r.ok) continue;
+        const d = await r.json();
+        if (d && d.date && d.ours && d.opp) fetched.push({ ffbbId: m.id, d });
+      } catch { /* feuille indisponible : au prochain passage */ }
+    }
+  }));
+  fetched.sort((a, b) => a.d.date.localeCompare(b.d.date));
+  let idx = (await storeGet("boxscore_index")) || [];
+  const midx = (await storeGet("match_index")) || [];
+  let added = 0, updated = 0;
+  const unmatched = new Set();
+  for (const { ffbbId, d } of fetched) {
+    const rows = [];
+    for (const p of d.ours.players) {
+      const s = p.stats;
+      if (!(s.min > 0 || s.pts > 0 || s.ro > 0 || s.rd > 0 || s.pd > 0 || s.bp > 0 || s.t2 + s.t3 + s.lft > 0)) continue; // n'a pas joué
+      const rp = ffbbRosterMatch(roster, p.name);
+      if (!rp) { unmatched.add(p.name); continue; }
+      rows.push({ player: rp.name, playerFull: rp.name, stats: ffbbLabeledStats(s, L) });
+    }
+    if (!rows.length) continue;
+    const fields = {
+      opponentScore: d.opp.total ? d.opp.total.pts : null,
+      teamRow: d.ours.total ? { label: d.ours.name, stats: ffbbLabeledStats(d.ours.total, L) } : null,
+      opponentRow: d.opp.total ? { label: d.opp.name, stats: ffbbLabeledStats(d.opp.total, L) } : null,
+      rows, ffbbId,
+    };
+    let entry = idx.find(x => x.ffbbId === ffbbId)
+      || idx.find(x => !x.ffbbId && ffbbDayDiff(x.date, d.date) <= 3 && ffbbSameOpponent(x.opponent, d.opp.name));
+    if (entry) {
+      const old = (await storeGet("boxscore:" + entry.id)) || {};
+      // Données FFBB brutes précédentes (sans corrections) pour détecter un vrai changement côté FFBB.
+      const oldRaw = old.rawRows || old.rows, oldRawTeam = old.rawRows ? old.rawTeamRow : old.teamRow;
+      let rec = { ...old, id: entry.id, date: entry.date, opponent: entry.opponent, season: old.season || entry.season || season, matchType: old.matchType ?? entry.matchType ?? "", ...fields };
+      if ((old.corrections || []).length) {
+        // Les corrections manuelles de ce match sont rejouées sur les nouvelles données FFBB.
+        const out = applyBoxCorrections(fields.rows, fields.teamRow, old.corrections);
+        const ffbbChanged = JSON.stringify([oldRaw, oldRawTeam]) !== JSON.stringify([fields.rows, fields.teamRow]);
+        rec = { ...rec, rawRows: fields.rows, rawTeamRow: fields.teamRow, rows: out.rows, teamRow: out.teamRow, corrections: old.corrections, correctionStatus: out.status,
+          correctionsReview: !!old.correctionsReview || (ffbbChanged && true) || Object.values(out.status).includes("conflict") };
+      }
+      const same = JSON.stringify([oldRaw, oldRawTeam, old.opponentRow, old.opponentScore, old.ffbbId]) === JSON.stringify([fields.rows, fields.teamRow, fields.opponentRow, fields.opponentScore, ffbbId]);
+      if (!same) {
+        await storeSet("boxscore:" + entry.id, rec);
+        idx = idx.map(x => x.id === entry.id ? { ...x, ffbbId, opponentScore: fields.opponentScore, matchedCount: rows.length, ...((old.corrections || []).length ? { corrCount: old.corrections.length, correctionsReview: !!rec.correctionsReview } : {}) } : x);
+        updated++;
+      }
+    } else {
+      const co = midx.find(x => ffbbDayDiff(x.date, d.date) <= 3 && ffbbSameOpponent(x.opponent, d.opp.name));
+      const id = uid();
+      const date = co ? co.date : d.date, opponent = co ? co.opponent : d.opp.name, matchType = co ? (co.matchType || "Season Game") : "Season Game";
+      await storeSet("boxscore:" + id, { id, date, opponent, season, matchType, ...fields });
+      idx = [...idx, { id, date, opponent, season, matchType, matchedCount: rows.length, ffbbId, opponentScore: fields.opponentScore }];
+      added++;
+    }
+  }
+  idx = [...idx].sort((a, b) => a.date.localeCompare(b.date));
+  if (added || updated) await storeSet("boxscore_index", idx);
+  return { total: fetched.length, added, updated, unmatched: Array.from(unmatched), changed: added + updated > 0, idx };
+}
+
+// ---------------------------------------------------------------------------
+// Corrections manuelles par match (ex. un 3 points attribué au mauvais joueur par le statisticien).
+// Les données FFBB brutes restent dans rawRows/rawTeamRow ; rows/teamRow (lus partout dans l'appli)
+// sont recalculés = brut + corrections. Chaque correction mémorise la valeur brute attendue : si la FFBB
+// modifie ensuite ces chiffres (par ex. elle corrige elle-même), la correction n'est PAS rejouée
+// (statut "conflict") et le match est signalé à vérifier. Tout est stocké dans le box score du match.
+// ---------------------------------------------------------------------------
+const BOX_CORR_STATS = [
+  { key: "made3", label: "3-pointer made", pts: 3, ev: 3 }, { key: "missed3", label: "3-pointer missed", ev: -1 },
+  { key: "made2", label: "2-pointer made", pts: 2, ev: 2 }, { key: "missed2", label: "2-pointer missed", ev: -1 },
+  { key: "madeFT", label: "Free throw made", pts: 1, ev: 1 }, { key: "missedFT", label: "Free throw missed", ev: -1 },
+  { key: "oreb", label: "Offensive rebound", reb: true, ev: 1 }, { key: "rebDef", label: "Defensive rebound", reb: true, ev: 1 },
+  { key: "ast", label: "Assist", ev: 1 }, { key: "stl", label: "Steal", ev: 1 }, { key: "tov", label: "Turnover", ev: -1 },
+  { key: "blk", label: "Block", ev: 1 }, { key: "fouls", label: "Foul committed", ev: 0 }, { key: "foulsDrawn", label: "Foul drawn", ev: 0 },
+];
+function boxCorrLabels(rows, teamRow) {
+  const all = Array.from(new Set([...(rows || []).flatMap(r => Object.keys(r.stats || {})), ...Object.keys((teamRow && teamRow.stats) || {})]));
+  const out = {};
+  [...BOX_CORR_STATS.map(s => s.key), "pts", "reb", "eff"].forEach(k => {
+    out[k] = findStatCol(all, STAT_PATTERNS[k] || [], k) || FFBB_BOX_DEFAULT_LABELS[k];
+  });
+  return out;
+}
+function applyBoxCorrections(rawRows, rawTeamRow, corrections) {
+  const rows = JSON.parse(JSON.stringify(rawRows || []));
+  const team = rawTeamRow ? JSON.parse(JSON.stringify(rawTeamRow)) : null;
+  const L = boxCorrLabels(rows, team);
+  const status = {};
+  const get = (obj, key) => Number(obj.stats[L[key]] ?? 0);
+  const bump = (obj, key, d, create) => {
+    const lab = L[key];
+    if (obj.stats[lab] === undefined && !create) return; // colonne absente de ce fichier : on n'en invente pas
+    obj.stats[lab] = Number(obj.stats[lab] ?? 0) + d;
+  };
+  const rawVal = (name, key) => { const r = (rawRows || []).find(x => x.player === name); return r ? Number(r.stats[L[key]] ?? 0) : null; };
+  for (const c of corrections || []) {
+    const def = BOX_CORR_STATS.find(s => s.key === c.key);
+    const effects = (obj, d, isTeam) => {
+      bump(obj, c.key, d, !isTeam);
+      if (def.pts) bump(obj, "pts", d * def.pts, false);
+      if (def.reb) bump(obj, "reb", d, false);
+      // Évaluation FFBB (vérifiée sur une feuille réelle) = pts + reb + passes + interceptions + contres − balles perdues − tirs manqués
+      // (2pts, 3pts, LF) ; fautes et fautes provoquées n'y comptent pas. Le +/- n'est jamais modifié.
+      if (def.ev) bump(obj, "eff", d * def.ev, false);
+    };
+    if (!def) { status[c.id] = "conflict"; continue; }
+    if (c.kind === "move") {
+      const rf = rows.find(r => r.player === c.from), rt = rows.find(r => r.player === c.to);
+      const n = c.n || 1;
+      if (!rf || !rt || rawVal(c.from, c.key) !== c.expFrom || rawVal(c.to, c.key) !== c.expTo || get(rf, c.key) < n) { status[c.id] = "conflict"; continue; }
+      effects(rf, -n, false); effects(rt, n, false); status[c.id] = "ok";
+    } else {
+      const rp = rows.find(r => r.player === c.player);
+      if (!rp || rawVal(c.player, c.key) !== c.expVal || get(rp, c.key) + c.delta < 0) { status[c.id] = "conflict"; continue; }
+      effects(rp, c.delta, false); if (team) effects(team, c.delta, true); status[c.id] = "ok";
+    }
+  }
+  return { rows, teamRow: team, status };
+}
+async function saveBoxCorrections(id, corrections, opts = {}) {
+  const rec = await storeGet("boxscore:" + id);
+  if (!rec) throw new Error("Box score not found.");
+  const rawRows = rec.rawRows || rec.rows;
+  const rawTeam = rec.rawRows ? rec.rawTeamRow : rec.teamRow;
+  let next;
+  if (!corrections.length) {
+    next = { ...rec, rows: rawRows, teamRow: rawTeam ?? null, corrections: [], correctionStatus: {}, correctionsReview: false };
+    delete next.rawRows; delete next.rawTeamRow;
+  } else {
+    const out = applyBoxCorrections(rawRows, rawTeam, corrections);
+    next = { ...rec, rawRows, rawTeamRow: rawTeam ?? null, rows: out.rows, teamRow: out.teamRow, corrections, correctionStatus: out.status };
+  }
+  if (opts.review === false) next.correctionsReview = false;
+  await storeSet("boxscore:" + id, next);
+  const idx = ((await storeGet("boxscore_index")) || []).map(x => x.id === id ? { ...x, corrCount: (next.corrections || []).length, correctionsReview: !!next.correctionsReview } : x);
+  await storeSet("boxscore_index", idx);
+  return { record: next, idx };
 }
 
 function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, visibility }) {
