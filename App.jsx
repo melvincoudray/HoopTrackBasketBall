@@ -263,9 +263,10 @@ async function exportScoutingPdf(containerId, filename, title) {
           c.setAttribute("viewBox", `${-pad} ${-pad} ${T} ${T}`); c.removeAttribute("style");
           const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(c)], { type: "image/svg+xml;charset=utf-8" }));
           const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
-          const k = 2; const cv = document.createElement("canvas"); cv.width = T * k; cv.height = T * k;
-          cv.getContext("2d").drawImage(img, 0, 0, T * k, T * k); URL.revokeObjectURL(url);
-          roseImgs[idx] = { w, pad, data: cv.toDataURL("image/png") };
+          const k = Math.min(2, 1800 / T); const cv = document.createElement("canvas"); cv.width = Math.round(T * k); cv.height = Math.round(T * k);
+          cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height); URL.revokeObjectURL(url);
+          const data = cv.toDataURL("image/png");
+          if (data.length > 2000) roseImgs[idx] = { w, pad, data }; // sinon (canvas refusé par le navigateur) : on garde la roue SVG d'origine
         } catch { /* on garde le SVG d'origine */ }
       }
       const canvas = await html2canvas(card, { backgroundColor: "#ffffff", scale: Math.min(2, 1400 / cssW), useCORS: true, logging: false,
