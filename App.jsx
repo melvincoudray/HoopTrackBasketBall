@@ -3,7 +3,7 @@ import * as XLSX from "xlsx";
 import initSqlJs from "sql.js";
 import { FFmpeg } from "@ffmpeg/ffmpeg";
 import { toBlobURL } from "@ffmpeg/util";
-import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon, Calendar, Star, Bell, BellOff, Pencil } from "lucide-react";
+import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon, Calendar, Star, Bell, BellOff, Pencil, RefreshCw } from "lucide-react";
 import {
   PieChart, Pie, Cell, ComposedChart, Bar as RBar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
   RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar,
@@ -3655,6 +3655,193 @@ function Bar({ pct, tone = "amber" }) {
 // App
 // ---------------------------------------------------------------------------
 
+const HB_DEFS = "\n<linearGradient id=\"hb-bronze\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#E0A06A\"/><stop offset=\"1\" stop-color=\"#8A4F25\"/></linearGradient>\n<linearGradient id=\"hb-silver\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#F2F4F7\"/><stop offset=\"1\" stop-color=\"#8E98A6\"/></linearGradient>\n<linearGradient id=\"hb-gold\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFE08A\"/><stop offset=\"1\" stop-color=\"#D08A12\"/></linearGradient>\n<linearGradient id=\"hb-plat\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#C9F3EC\"/><stop offset=\"1\" stop-color=\"#3FA796\"/></linearGradient>\n<linearGradient id=\"hb-dia\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#C7B6FF\"/><stop offset=\"1\" stop-color=\"#5B3FD1\"/></linearGradient>\n<linearGradient id=\"hb-fire\" x1=\"0\" y1=\"1\" x2=\"0\" y2=\"0\"><stop offset=\"0\" stop-color=\"#E5685B\"/><stop offset=\"1\" stop-color=\"#FFC24D\"/></linearGradient>\n<linearGradient id=\"hb-teal\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#8FE3D3\"/><stop offset=\"1\" stop-color=\"#2C8F7E\"/></linearGradient>\n<linearGradient id=\"hb-blue\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#9CC8FF\"/><stop offset=\"1\" stop-color=\"#2F6FCF\"/></linearGradient>\n<linearGradient id=\"hb-amber\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFD27A\"/><stop offset=\"1\" stop-color=\"#E08A00\"/></linearGradient>\n<linearGradient id=\"hb-rose\" x1=\"0\" y1=\"0\" x2=\"1\" y2=\"1\"><stop offset=\"0\" stop-color=\"#FFB3AA\"/><stop offset=\"1\" stop-color=\"#D14B3F\"/></linearGradient>\n\n";
+const HB_SVG = {"s50": "<svg viewBox=\"0 0 100 100\"><path d=\"M50 6 90 28V72L50 94 10 72V28Z\" fill=\"url(#hb-bronze)\" stroke=\"#5B3216\" stroke-width=\"3\"/><path d=\"M50 14 83 32V68L50 86 17 68V32Z\" fill=\"none\" stroke=\"#FFE3C4\" stroke-opacity=\".55\" stroke-width=\"2\"/><text x=\"50\" y=\"57\" text-anchor=\"middle\" font-size=\"30\" font-weight=\"800\" fill=\"#3A1D08\" font-family=\"Arial\">50</text><text x=\"50\" y=\"74\" text-anchor=\"middle\" font-size=\"8.5\" font-weight=\"700\" fill=\"#3A1D08\" letter-spacing=\"0.8\" font-family=\"Arial\">SESSIONS</text></svg>", "s100": "<svg viewBox=\"0 0 100 100\"><path d=\"M50 6 90 28V72L50 94 10 72V28Z\" fill=\"url(#hb-silver)\" stroke=\"#5A6370\" stroke-width=\"3\"/><path d=\"M50 14 83 32V68L50 86 17 68V32Z\" fill=\"none\" stroke=\"#fff\" stroke-opacity=\".7\" stroke-width=\"2\"/><text x=\"50\" y=\"57\" text-anchor=\"middle\" font-size=\"27\" font-weight=\"800\" fill=\"#2A313B\" font-family=\"Arial\">100</text><text x=\"50\" y=\"74\" text-anchor=\"middle\" font-size=\"8.5\" font-weight=\"700\" fill=\"#2A313B\" letter-spacing=\"0.8\" font-family=\"Arial\">SESSIONS</text></svg>", "s150": "<svg viewBox=\"0 0 100 100\"><path d=\"M50 6 90 28V72L50 94 10 72V28Z\" fill=\"url(#hb-gold)\" stroke=\"#8A5A06\" stroke-width=\"3\"/><path d=\"M50 14 83 32V68L50 86 17 68V32Z\" fill=\"none\" stroke=\"#FFF6D6\" stroke-opacity=\".8\" stroke-width=\"2\"/><text x=\"50\" y=\"57\" text-anchor=\"middle\" font-size=\"27\" font-weight=\"800\" fill=\"#4A2F00\" font-family=\"Arial\">150</text><text x=\"50\" y=\"74\" text-anchor=\"middle\" font-size=\"9.5\" font-weight=\"700\" fill=\"#4A2F00\" letter-spacing=\"1.5\" font-family=\"Arial\">SESSIONS</text></svg>", "s200": "<svg viewBox=\"0 0 100 100\"><path d=\"M50 6 90 28V72L50 94 10 72V28Z\" fill=\"url(#hb-plat)\" stroke=\"#1F6B5C\" stroke-width=\"3\"/><path d=\"M50 14 83 32V68L50 86 17 68V32Z\" fill=\"none\" stroke=\"#fff\" stroke-opacity=\".8\" stroke-width=\"2\"/><text x=\"50\" y=\"57\" text-anchor=\"middle\" font-size=\"27\" font-weight=\"800\" fill=\"#0E3B33\" font-family=\"Arial\">200</text><text x=\"50\" y=\"74\" text-anchor=\"middle\" font-size=\"9.5\" font-weight=\"700\" fill=\"#0E3B33\" letter-spacing=\"1.5\" font-family=\"Arial\">SESSIONS</text></svg>", "s300": "<svg viewBox=\"0 0 100 100\"><path d=\"M50 6 90 28V72L50 94 10 72V28Z\" fill=\"url(#hb-dia)\" stroke=\"#2A1A7A\" stroke-width=\"3\"/><path d=\"M50 14 83 32V68L50 86 17 68V32Z\" fill=\"none\" stroke=\"#E6DEFF\" stroke-opacity=\".8\" stroke-width=\"2\"/><path d=\"M50 20 56 27H44Z\" fill=\"#fff\" opacity=\".9\"/><text x=\"50\" y=\"57\" text-anchor=\"middle\" font-size=\"27\" font-weight=\"800\" fill=\"#fff\" font-family=\"Arial\">300</text><text x=\"50\" y=\"74\" text-anchor=\"middle\" font-size=\"9.5\" font-weight=\"700\" fill=\"#fff\" letter-spacing=\"1.5\" font-family=\"Arial\">SESSIONS</text></svg>", "perfect": "<svg viewBox=\"0 0 100 100\"><g transform=\"translate(50 42) scale(.74) translate(-50 -50)\"><circle cx=\"50\" cy=\"50\" r=\"44\" fill=\"url(#hb-teal)\" stroke=\"#16594D\" stroke-width=\"3\"/><circle cx=\"50\" cy=\"50\" r=\"30\" fill=\"none\" stroke=\"#0E3B33\" stroke-width=\"4\"/><circle cx=\"50\" cy=\"50\" r=\"18\" fill=\"none\" stroke=\"#0E3B33\" stroke-width=\"4\"/><circle cx=\"50\" cy=\"50\" r=\"6\" fill=\"#0E3B33\"/><path d=\"M50 50 82 18M82 18H70M82 18V30\" stroke=\"#fff\" stroke-width=\"4\" fill=\"none\" stroke-linecap=\"round\" stroke-linejoin=\"round\"/></g><rect x=\"4\" y=\"75\" width=\"92\" height=\"20\" rx=\"10\" fill=\"#10141A\" stroke=\"#2C8F7E\" stroke-width=\"2.5\"/><text x=\"50\" y=\"89\" text-anchor=\"middle\" font-size=\"11\" font-weight=\"800\" fill=\"#fff\" letter-spacing=\".4\" font-family=\"Arial\">100% GAME</text></svg>", "streak": "<svg viewBox=\"0 0 100 100\"><g transform=\"translate(50 42) scale(.74) translate(-50 -50)\"><circle cx=\"50\" cy=\"50\" r=\"44\" fill=\"#2A1A14\" stroke=\"#E5685B\" stroke-width=\"3\"/><path d=\"M50 14C58 28 74 34 74 54 74 70 63 82 50 82 37 82 26 71 26 56 26 46 31 40 36 34 37 42 41 46 45 46 42 34 44 22 50 14Z\" fill=\"url(#hb-fire)\"/><path d=\"M50 48C54 56 61 59 61 67 61 74 56 78 50 78 44 78 39 74 39 68 39 62 44 58 46 54 48 56 49 56 50 48Z\" fill=\"#FFE9A8\"/><circle cx=\"78\" cy=\"24\" r=\"16\" fill=\"#FFC24D\" stroke=\"#7A3A00\" stroke-width=\"3\"/><text x=\"78\" y=\"31\" text-anchor=\"middle\" font-size=\"20\" font-weight=\"900\" fill=\"#3A1D00\" font-family=\"Arial\">__N__</text></g><rect x=\"4\" y=\"75\" width=\"92\" height=\"20\" rx=\"10\" fill=\"#10141A\" stroke=\"#E5685B\" stroke-width=\"2.5\"/><text x=\"50\" y=\"89\" text-anchor=\"middle\" font-size=\"10.5\" font-weight=\"800\" fill=\"#fff\" letter-spacing=\".4\" font-family=\"Arial\">80%+ STREAK</text></svg>", "plusminus": "<svg viewBox=\"0 0 100 100\"><g transform=\"translate(50 42) scale(.74) translate(-50 -50)\"><circle cx=\"50\" cy=\"50\" r=\"44\" fill=\"url(#hb-blue)\" stroke=\"#173F80\" stroke-width=\"3\"/><path d=\"M26 34H50M38 22V46\" stroke=\"#fff\" stroke-width=\"6\" stroke-linecap=\"round\"/><path d=\"M54 66H78\" stroke=\"#fff\" stroke-width=\"6\" stroke-linecap=\"round\"/><path d=\"M30 78 70 22\" stroke=\"#0E2B5A\" stroke-width=\"4\" stroke-linecap=\"round\" opacity=\".55\"/></g><rect x=\"4\" y=\"75\" width=\"92\" height=\"20\" rx=\"10\" fill=\"#10141A\" stroke=\"#4A86E0\" stroke-width=\"2.5\"/><text x=\"50\" y=\"89\" text-anchor=\"middle\" font-size=\"11\" font-weight=\"800\" fill=\"#fff\" letter-spacing=\".4\" font-family=\"Arial\">BEST +/-</text></svg>", "scorer": "<svg viewBox=\"0 0 100 100\"><g transform=\"translate(50 42) scale(.74) translate(-50 -50)\"><circle cx=\"50\" cy=\"50\" r=\"44\" fill=\"url(#hb-amber)\" stroke=\"#8A4F00\" stroke-width=\"3\"/><path d=\"M30 46L38 76H62L70 46\" fill=\"#FFF3D0\" fill-opacity=\".35\" stroke=\"#fff\" stroke-width=\"2.5\" stroke-linejoin=\"round\"/><path d=\"M34 58H66M36 67H64M42 46L46 76M58 46L54 76M50 46V76\" stroke=\"#fff\" stroke-width=\"1.8\" fill=\"none\" opacity=\".9\"/><circle cx=\"50\" cy=\"34\" r=\"12\" fill=\"#fff\" stroke=\"#3A2200\" stroke-width=\"2.5\"/><path d=\"M38 34H62M50 22V46\" stroke=\"#3A2200\" stroke-width=\"1.8\"/><ellipse cx=\"50\" cy=\"46\" rx=\"21\" ry=\"5\" fill=\"none\" stroke=\"#C2281B\" stroke-width=\"5\"/><path d=\"M20 20l3 6M80 20l-3 6M50 12v5\" stroke=\"#fff\" stroke-width=\"3.5\" stroke-linecap=\"round\"/></g><rect x=\"4\" y=\"75\" width=\"92\" height=\"20\" rx=\"10\" fill=\"#10141A\" stroke=\"#E08A00\" stroke-width=\"2.5\"/><text x=\"50\" y=\"89\" text-anchor=\"middle\" font-size=\"10.5\" font-weight=\"800\" fill=\"#fff\" letter-spacing=\".4\" font-family=\"Arial\">TOP SCORER</text></svg>", "passer": "<svg viewBox=\"0 0 100 100\"><g transform=\"translate(50 42) scale(.74) translate(-50 -50)\"><circle cx=\"50\" cy=\"50\" r=\"44\" fill=\"url(#hb-rose)\" stroke=\"#7A2018\" stroke-width=\"3\"/><path d=\"M16 38H40M12 50H36M16 62H40\" stroke=\"#fff\" stroke-width=\"5\" stroke-linecap=\"round\"/><circle cx=\"66\" cy=\"50\" r=\"15\" fill=\"#fff\" stroke=\"#5A130C\" stroke-width=\"2.5\"/><path d=\"M51 50H81M66 35V65\" stroke=\"#5A130C\" stroke-width=\"1.8\"/><path d=\"M46 26C60 18 76 22 82 34M82 34L74 33M82 34L81 25\" stroke=\"#fff\" stroke-width=\"4\" fill=\"none\" stroke-linecap=\"round\" stroke-linejoin=\"round\" opacity=\".95\"/></g><rect x=\"4\" y=\"75\" width=\"92\" height=\"20\" rx=\"10\" fill=\"#10141A\" stroke=\"#D14B3F\" stroke-width=\"2.5\"/><text x=\"50\" y=\"89\" text-anchor=\"middle\" font-size=\"10.5\" font-weight=\"800\" fill=\"#fff\" letter-spacing=\".4\" font-family=\"Arial\">TOP PASSER</text></svg>", "rebounder": "<svg viewBox=\"0 0 100 100\"><g transform=\"translate(50 42) scale(.74) translate(-50 -50)\"><circle cx=\"50\" cy=\"50\" r=\"44\" fill=\"url(#hb-teal)\" stroke=\"#16594D\" stroke-width=\"3\"/><circle cx=\"50\" cy=\"24\" r=\"14\" fill=\"#FF9A3C\" stroke=\"#0E3B33\" stroke-width=\"3\"/><path d=\"M36 24H64M50 10V38M40 14C46 21 46 27 40 34M60 14C54 21 54 27 60 34\" stroke=\"#0E3B33\" stroke-width=\"2\" fill=\"none\"/><path d=\"M18 42H82L58 66V84Q58 88 54 88H46Q42 88 42 84V66Z\" fill=\"#fff\" stroke=\"#0E3B33\" stroke-width=\"3\" stroke-linejoin=\"round\"/><ellipse cx=\"50\" cy=\"42\" rx=\"32\" ry=\"5\" fill=\"#CFF3EC\" stroke=\"#0E3B33\" stroke-width=\"3\"/><path d=\"M26 50L46 70\" stroke=\"#8FE3D3\" stroke-width=\"3\" stroke-linecap=\"round\"/></g><rect x=\"4\" y=\"75\" width=\"92\" height=\"20\" rx=\"10\" fill=\"#10141A\" stroke=\"#2C8F7E\" stroke-width=\"2.5\"/><text x=\"50\" y=\"89\" text-anchor=\"middle\" font-size=\"10\" font-weight=\"800\" fill=\"#fff\" letter-spacing=\".4\" font-family=\"Arial\">TOP REBOUND</text></svg>"};
+
+// ---------------------------------------------------------------------------
+// Badges — séances d'entraînement, objectifs de match, meilleurs de l'équipe
+// ---------------------------------------------------------------------------
+// Demandé par l'utilisateur : des badges à côté du nom du joueur.
+//  • Séances : 50 / 100 / 150 / 200 / 300 entrées dans l'onglet Training du joueur (même règle
+//    de comptage que "Sessions completed" : Coll Off + Coll Def le même jour = 1 séance). On
+//    n'affiche que le palier le plus haut atteint.
+//  • Match parfait : le DERNIER match du joueur (saison + playoffs) avec 100 % des objectifs.
+//  • Série à 80 %+ : nombre de derniers matchs d'affilée avec au moins 80 % des objectifs (≥ 2).
+//  • Meilleur +/-, scoreur, passeur, rebondeur : meilleure moyenne par match de l'équipe, sur
+//    tous les matchs de saison et de playoffs.
+// TOUS les objectifs comptent : stats de box score, de coding et de Rebound Contest évaluées match par
+// match ; un objectif en saisie manuelle (une seule valeur actuelle) n'est évalué que sur le dernier match.
+const BADGE_TIERS = [300, 200, 150, 100, 50];
+const BADGE_MATCH_TYPES = ["Season Game", "Play-Off Game"];
+const BADGE_MIN_GAMES = 3; // minimum de matchs joués pour pouvoir prétendre à un titre d'équipe
+
+function badgeSessionCount(entries) {
+  const byDate = {};
+  for (const e of entries || []) { if (!byDate[e.date]) byDate[e.date] = []; byDate[e.date].push(e); }
+  let sum = 0;
+  for (const list of Object.values(byDate)) {
+    const collOff = list.filter(e => e.thematique === "Coll Off").length;
+    const collDef = list.filter(e => e.thematique === "Coll Def").length;
+    const others = list.filter(e => e.thematique !== "Coll Off" && e.thematique !== "Coll Def").length;
+    sum += Math.max(collOff, collDef) + others;
+  }
+  return sum;
+}
+
+async function loadBadgeData(roster) {
+  const names = roster.map(p => p.name);
+  const idx = ((await storeGet("boxscore_index")) || []).filter(m => BADGE_MATCH_TYPES.includes(m.matchType));
+  idx.sort((a, b) => a.date.localeCompare(b.date));
+  const cidx = ((await storeGet("match_index")) || []).filter(m => BADGE_MATCH_TYPES.includes(m.matchType));
+  const games = {}; names.forEach(n => { games[n] = []; });
+  for (const m of idx) {
+    const data = await storeGet("boxscore:" + m.id);
+    if (!data || !data.rows) continue;
+    const teamStats = data.teamRow ? data.teamRow.stats : sumRowStats(data.rows);
+    const teamPossessions = computeTeamPossessionsFromStats(teamStats);
+    const playerRows = data.rows.filter(r => r !== data.teamRow);
+    for (const name of names) {
+      const row = data.rows.find(r => r.player === name);
+      if (!row) continue;
+      const labels = Object.keys(row.stats);
+      const minutesCol = findStatCol(labels, STAT_PATTERNS.minutes);
+      const totalMin = minutesCol ? sumStat(playerRows, minutesCol) : null;
+      games[name].push({ key: matchKey(m.date, m.opponent), date: m.date, stats: { ...row.stats, ...derivedMatchStats(row.stats, teamPossessions, totalMin ? totalMin / 5 : null) } });
+    }
+  }
+  // Stats de coding (fréquence, PPPP, % ouvert…) calculées match par match pour chaque joueur,
+  // avec les mêmes clés que celles proposées dans le formulaire d'objectif.
+  const codingByKey = {}; names.forEach(n => { codingByKey[n] = {}; });
+  for (const m of cidx) {
+    const data = await storeGet("match:" + m.id);
+    if (!data || !data.plays) continue;
+    for (const n of names) {
+      const mine = data.plays.filter(p => p.player === n);
+      if (!mine.length) continue;
+      codingByKey[n][matchKey(m.date, m.opponent)] = { date: m.date, stats: buildCodingStatOptions(mine.filter(isOffense), mine.filter(isDefense)) };
+    }
+  }
+  // Rebound Contest : séances rattachées au match par la date, mêmes calculs que dans la fiche
+  // joueur (clés "% <catégorie>" et "% Rebound Contest (total)").
+  const rcIdx = (await storeGet("rebound_contest_index")) || [];
+  const rcCats = ((await storeGet("rebound_contest_categories")) || []);
+  const rcCategories = rcCats.length ? rcCats : DEFAULT_REBOUND_CONTEST_CATEGORIES;
+  const rcSessions = [];
+  for (const s of rcIdx) { const rec = await storeGet("rebound_contest:" + s.id); if (rec) rcSessions.push(rec); }
+  const rcStatsFor = (name, date) => {
+    const events = rcSessions.filter(s => s.date === date).flatMap(s => s.events || []);
+    if (!events.length) return {};
+    const st = computeReboundContestStats(events, [name], rcCategories)[name];
+    if (!st) return {};
+    const o = {};
+    rcCategories.forEach(cat => { const c = st[cat.key]; if (c && c.possible > 0) o[`% ${cat.label}`] = Math.round(c.pct); });
+    if (st.total?.possible > 0) o["% Rebound Contest (total)"] = Math.round(st.total.pct);
+    return o;
+  };
+  const out = {}; names.forEach(n => { out[n] = []; });
+
+  // Titres d'équipe : meilleure moyenne par match.
+  const val = (g, key) => {
+    const labels = Object.keys(g.stats);
+    if (key === "reb") {
+      const c = findStatCol(labels, STAT_PATTERNS.reb, "reb");
+      if (c !== undefined) return g.stats[c];
+      const o = findStatCol(labels, STAT_PATTERNS.oreb, "oreb"), d = findStatCol(labels, STAT_PATTERNS.rebDef, "rebDef");
+      return o !== undefined && d !== undefined ? (g.stats[o] || 0) + (g.stats[d] || 0) : undefined;
+    }
+    const c = findStatCol(labels, STAT_PATTERNS[key], key) ?? (key === "plusMinus" ? labels.find(l => l.trim() === "+/-") : undefined);
+    return c !== undefined ? g.stats[c] : undefined;
+  };
+  const maxGames = Math.max(0, ...names.map(n => games[n].length));
+  const minGames = Math.min(BADGE_MIN_GAMES, maxGames);
+  [["plusMinus", "plusminus"], ["pts", "scorer"], ["ast", "passer"], ["reb", "rebounder"]].forEach(([stat, type]) => {
+    let best = null, bestNames = [];
+    for (const n of names) {
+      if (games[n].length < minGames || games[n].length === 0) continue;
+      const vs = games[n].map(g => val(g, stat)).filter(v => typeof v === "number" && !isNaN(v));
+      if (!vs.length) continue;
+      const avg = vs.reduce((s, v) => s + v, 0) / vs.length;
+      if (best === null || avg > best + 1e-9) { best = avg; bestNames = [n]; }
+      else if (Math.abs(avg - best) <= 1e-9) bestNames.push(n);
+    }
+    if (best !== null && best > 0) bestNames.forEach(n => out[n].push({ type, detail: (type === "plusminus" ? (best > 0 ? "+" : "") : "") + best.toFixed(1) + (type === "plusminus" ? " +/- per game" : type === "scorer" ? " pts per game" : type === "passer" ? " assists per game" : " rebounds per game") }));
+  });
+
+  // Objectifs match par match + séances.
+  for (const n of names) {
+    const objectives = ((await storeGet("objectives:" + n)) || []).filter(o => o.targetValue !== undefined && o.targetValue !== null);
+    // Un même match peut exister en box score ET en coding : on fusionne les deux jeux de stats.
+    const evalMap = {};
+    games[n].forEach(g => { evalMap[g.key] = { date: g.date, stats: { ...g.stats } }; });
+    Object.entries(codingByKey[n]).forEach(([k, c]) => { const e = evalMap[k] || (evalMap[k] = { date: c.date, stats: {} }); Object.assign(e.stats, c.stats); });
+    Object.values(evalMap).forEach(e => { Object.assign(e.stats, rcStatsFor(n, e.date)); });
+    const evalGames = Object.values(evalMap).sort((a, b) => a.date.localeCompare(b.date));
+    const pcts = evalGames.map((g, gi) => {
+      let ok = 0, tot = 0;
+      for (const o of objectives) {
+        if (o.startDate && g.date < o.startDate) continue;
+        // Objectif en saisie manuelle : une seule valeur "actuelle", donc évalué uniquement sur le dernier match.
+        const v = o.linkedStat ? g.stats[o.linkedStat] : (gi === evalGames.length - 1 ? o.manualCurrent : undefined);
+        if (typeof v !== "number" || isNaN(v)) continue;
+        tot++;
+        if (o.direction === "down" ? v <= o.targetValue : v >= o.targetValue) ok++;
+      }
+      return tot ? ok / tot : null;
+    });
+    if (pcts.length && pcts[pcts.length - 1] === 1) out[n].push({ type: "perfect", detail: "100 % of goals achieved in the last game" });
+    let streak = 0;
+    for (let i = pcts.length - 1; i >= 0; i--) { if (pcts[i] !== null && pcts[i] >= 0.8) streak++; else break; }
+    if (streak >= 2) out[n].push({ type: "streak", n: streak, detail: streak + " games in a row with 80 %+ of goals" });
+    const total = badgeSessionCount((await storeGet("training:" + n)) || []);
+    const tier = BADGE_TIERS.find(t => total >= t);
+    if (tier) out[n].push({ type: "s" + tier, detail: total + " training sessions logged" });
+  }
+  return out;
+}
+
+// Petit magasin global (pas de Context : évite de toucher à l'arbre de rendu de App).
+let BADGES_STORE = {};
+const BADGES_LISTENERS = new Set();
+function setBadgesStore(b) { BADGES_STORE = b || {}; BADGES_LISTENERS.forEach(f => f()); }
+
+const BADGE_LABELS = {
+  s50: "50 sessions", s100: "100 sessions", s150: "150 sessions", s200: "200 sessions", s300: "300 sessions",
+  perfect: "Perfect game", streak: "80 %+ streak", plusminus: "Best +/-", scorer: "Top scorer", passer: "Top passer", rebounder: "Top rebounder",
+};
+const BADGE_ORDER = ["s300", "s200", "s150", "s100", "s50", "streak", "perfect", "scorer", "passer", "rebounder", "plusminus"];
+
+function BadgeDefs() {
+  return <svg width="0" height="0" style={{ position: "absolute" }} aria-hidden="true" dangerouslySetInnerHTML={{ __html: "<defs>" + HB_DEFS + "</defs>" }} />;
+}
+function BadgeIcon({ badge, size }) {
+  const svg = HB_SVG[badge.type].replace("__N__", String(badge.n || "")).replace("<svg ", `<svg width="${size}" height="${size}" `);
+  return <span title={BADGE_LABELS[badge.type] + " — " + badge.detail} style={{ display: "inline-flex", flexShrink: 0, lineHeight: 0 }} dangerouslySetInnerHTML={{ __html: svg }} />;
+}
+// Badges d'un joueur à côté de son nom. `max` limite le nombre affiché (le reste devient "+N") ;
+// `expandable` : un clic déplie la liste avec le détail de chaque badge.
+function PlayerBadges({ name, size = 40, max = 3, expandable = false }) {
+  const [, force] = useState(0);
+  const [open, setOpen] = useState(false);
+  useEffect(() => { const f = () => force(x => x + 1); BADGES_LISTENERS.add(f); return () => { BADGES_LISTENERS.delete(f); }; }, []);
+  const list = (BADGES_STORE[name] || []).slice().sort((a, b) => BADGE_ORDER.indexOf(a.type) - BADGE_ORDER.indexOf(b.type));
+  if (!list.length) return null;
+  const shown = open ? list : list.slice(0, max);
+  return (
+    <span style={{ display: "inline-flex", flexDirection: "column", gap: 6, verticalAlign: "middle" }}>
+      <span onClick={expandable ? (e) => { e.stopPropagation(); setOpen(o => !o); } : undefined}
+        style={{ display: "inline-flex", alignItems: "center", gap: 4, cursor: expandable ? "pointer" : "inherit", flexWrap: "wrap" }}>
+        {shown.map(b => <BadgeIcon key={b.type} badge={b} size={size} />)}
+        {!open && list.length > max && <span style={{ fontSize: 11, color: "#8B93A1", fontWeight: 700 }}>+{list.length - max}</span>}
+      </span>
+      {expandable && open && (
+        <span style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 12, color: "#8B93A1", fontWeight: 400 }}>
+          {list.map(b => <span key={b.type}><b style={{ color: "#D8DCE2" }}>{BADGE_LABELS[b.type]}</b> — {b.detail}</span>)}
+        </span>
+      )}
+    </span>
+  );
+}
+
 export default function App() {
   const [loading, setLoading] = useState(true);
   const [team, setTeam] = useState(null); // {id, name, logo, ...} — équipe active
@@ -3689,6 +3876,15 @@ export default function App() {
   }, []);
 
   useEffect(() => { if (team) bootstrap(); }, [team]);
+
+  // Badges : recalculés au changement d'équipe, de roster, de box scores ou d'onglet (les séances
+  // et objectifs peuvent avoir changé entre-temps).
+  useEffect(() => {
+    if (!team || !roster.length) return;
+    let alive = true;
+    loadBadgeData(roster).then(b => { if (alive) setBadgesStore(b); }).catch(() => {});
+    return () => { alive = false; };
+  }, [team, roster, boxScoreIndex, tab]);
 
   // Demandé par l'utilisateur : savoir si un utilisateur est actuellement en ligne. Pas de
   // connexion permanente en temps réel dans cette app — on envoie donc un signal "toujours là"
@@ -3948,6 +4144,7 @@ export default function App() {
 
   return (
     <div style={{ minHeight: "100vh", width: "100%", overflowX: "hidden", background: INK, color: PAPER, fontFamily: "'Inter', -apple-system, Segoe UI, sans-serif" }}>
+      <BadgeDefs />
       <style>{`
         html, body { overflow-x: hidden; max-width: 100%; background: ${INK}; margin: 0; padding: 0; height: 100%; }
         #root { background: ${INK}; min-height: 100vh; min-height: 100dvh; }
@@ -5064,7 +5261,10 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 24, flexWrap: "wrap" }}>
         <div>
           <div style={{ fontFamily: "ui-monospace, monospace", color: AMBER, fontSize: 12, letterSpacing: "0.1em", marginBottom: 4 }}>WELCOME</div>
-          <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>{session.name}</h1>
+          <div style={{ display: "flex", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+            <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>{session.name}</h1>
+            {playerName && <PlayerBadges name={playerName} size={46} max={4} expandable />}
+          </div>
         </div>
 
         <div style={{ maxWidth: 280, width: "100%", flexShrink: 0 }}>
@@ -6776,7 +6976,7 @@ function PlayersList({ roster, allPlays, onSelect, isCoach, onlyOwn, matchFilter
               <button onClick={() => onSelect(p.name)} style={{ display: "flex", alignItems: "center", gap: 14, background: "none", border: "none", cursor: "pointer", padding: 0, flex: 1, textAlign: "left", fontFamily: "inherit", color: "inherit" }}>
                 <PlayerAvatar playerName={p.name} size={34} />
                 <div>
-                  <div style={{ fontWeight: 600, fontSize: 14.5 }}>{p.name}</div>
+                  <div style={{ fontWeight: 600, fontSize: 14.5, display: "flex", alignItems: "center", gap: 8 }}>{p.name}<PlayerBadges name={p.name} size={38} max={3} /></div>
                   <div style={{ fontSize: 12, color: "#5C6470" }}>{p.position ? p.position + " · " : ""}{p.boxGames} box score{p.boxGames !== 1 ? "s" : ""} · {p.codedGames} match{p.codedGames !== 1 ? "s" : ""} coded</div>
                 </div>
               </button>
@@ -7084,7 +7284,10 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
         <div style={{ display: "flex", alignItems: "center", gap: 16 }}>
           <PlayerAvatar playerName={playerName} size={72} editable={isCoach} />
           <div>
-            <h2 style={{ fontSize: 26, fontWeight: 800, margin: 0, letterSpacing: "-0.01em" }}>{playerName}</h2>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+              <h2 style={{ fontSize: 26, fontWeight: 800, margin: 0, letterSpacing: "-0.01em" }}>{playerName}</h2>
+              <PlayerBadges name={playerName} size={46} max={4} expandable />
+            </div>
             {isCoach ? (
               editingPosition ? (
                 <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 4 }}>
@@ -10293,33 +10496,39 @@ function drawLineSvg(l, pal) {
 function drawNorm(l) { if (!l.pts) { l.pts = drawClone(drawPts(l)); delete l.a; delete l.b; delete l.m; } return l; }
 function drawLast(l) { const P = drawPts(l); return P[P.length - 1]; }
 
-// "Next step" : applique les flèches du schéma. Cut / dribble : le joueur va au bout de sa flèche.
+// "Next step" : applique les flèches du schéma, dans l'ordre où elles ont été dessinées.
+// Cut / dribble / écran : le joueur va au bout de sa flèche. Si une 2e flèche part du bout de la 1re
+// (ex. poser un écran puis repartir), on la rattache au même joueur et il finit au bout de la dernière.
 // Pass : le receveur (l'attaquant le plus proche du bout de la flèche) devient porteur du ballon ;
 // le ballon et le rond "porteur" le suivent, et le ballon accompagne aussi un dribble.
 function drawAdvance(items, lines) {
   const out = drawClone(items).filter(it => it.t !== "dho");
   const byId = id => out.find(i => i.id === id);
-  const orig = {}; out.forEach(i => { orig[i.id] = { x: i.x, y: i.y }; });
+  const orig = {}, cur = {}; out.forEach(i => { orig[i.id] = { x: i.x, y: i.y }; cur[i.id] = { x: i.x, y: i.y }; });
   const att = out.filter(i => i.t === "o");
+  const people = out.filter(i => i.t === "o" || i.t === "x");
   const ball = out.find(i => i.t === "ball");
   const near = (p, cands, max) => { let b = null, bd = max; cands.forEach(c => { const d = Math.hypot(c.x - p.x, c.y - p.y); if (d < bd) { bd = d; b = c; } }); return b; };
+  const at = (list, pos) => list.map(a => ({ id: a.id, x: pos[a.id].x, y: pos[a.id].y }));
   // porteur de départ : l'attaquant entouré d'un rond, sinon le plus proche du ballon
-  let H = att.find(i => i.h) || (ball ? near(ball, att.map(a => ({ ...a, x: orig[a.id].x, y: orig[a.id].y })), 32) : null);
-  H = H ? byId(H.id) : null;
+  let H = att.find(i => i.h) || (ball ? (() => { const n = near(ball, at(att, orig), 32); return n ? byId(n.id) : null; })() : null);
   const hadRing = att.some(i => i.h);
   const off0 = ball && H ? { x: ball.x - orig[H.id].x, y: ball.y - orig[H.id].y } : null;
-  const finals = {}; out.forEach(i => { finals[i.id] = { x: i.x, y: i.y }; });
-  lines.forEach(l => { if (l.from != null && (l.kind === "cut" || l.kind === "dribble") && finals[l.from]) { const e = drawLast(l); finals[l.from] = { x: e.x, y: e.y }; } });
-  lines.forEach(l => {
-    if (l.kind !== "pass") return;
-    const P = drawPts(l), passer = l.from != null ? byId(l.from) : near(P[0], att.map(a => ({ ...a, x: orig[a.id].x, y: orig[a.id].y })), 32);
-    if (!passer || (H && passer.id !== H.id)) return;
-    const end = P[P.length - 1], cands = [];
-    att.forEach(a => { if (a.id !== passer.id) { cands.push({ id: a.id, x: orig[a.id].x, y: orig[a.id].y }); cands.push({ id: a.id, x: finals[a.id].x, y: finals[a.id].y }); } });
-    const r = near(end, cands, 48);
-    if (r) H = byId(r.id);
+  (lines || []).forEach(l => {
+    const P = drawPts(l), end = P[P.length - 1];
+    if (l.kind === "cut" || l.kind === "dribble" || l.kind === "screen") {
+      const m = l.from != null && byId(l.from) ? byId(l.from) : (() => { const n = near(P[0], at(people, cur), 30); return n ? byId(n.id) : null; })();
+      if (m) cur[m.id] = { x: end.x, y: end.y };
+    } else if (l.kind === "pass") {
+      const passer = l.from != null ? byId(l.from) : (() => { const n = near(P[0], at(att, cur), 32); return n ? byId(n.id) : null; })();
+      if (!passer || (H && passer.id !== H.id)) return;
+      const cands = [];
+      att.forEach(a => { if (a.id !== passer.id) { cands.push({ id: a.id, x: orig[a.id].x, y: orig[a.id].y }); cands.push({ id: a.id, x: cur[a.id].x, y: cur[a.id].y }); } });
+      const r = near(end, cands, 48);
+      if (r) H = byId(r.id);
+    }
   });
-  out.forEach(i => { if (finals[i.id]) { i.x = finals[i.id].x; i.y = finals[i.id].y; } });
+  out.forEach(i => { if (cur[i.id] && i.t !== "ball") { i.x = cur[i.id].x; i.y = cur[i.id].y; } });
   if (hadRing && H) { out.forEach(i => { if (i.t === "o") delete i.h; }); H.h = true; }
   if (ball && H) {
     const o = off0 && Math.hypot(off0.x, off0.y) >= 6 && Math.hypot(off0.x, off0.y) <= 40 ? off0 : { x: 14, y: -14 };
@@ -10327,6 +10536,7 @@ function drawAdvance(items, lines) {
   }
   return out;
 }
+
 function drawItemSvg(it, pal) {
   if (it.t === "o") {
     const R = pal.big ? 21 : 12, FS = pal.big ? 27 : 13, RH = pal.big ? 28 : 18;
@@ -12564,6 +12774,21 @@ function ScoutingTeamRow({ name, team, onSaveLogo, onDelete, onSaveStats }) {
   );
 }
 
+// Synchro FFBB NM1 : la fonction Netlify lit le tableau officiel (nm1.ffbb.com) ; on le
+// convertit en classeur en mémoire pour réutiliser exactement l'import "Classic" (mêmes stats calculées).
+async function fetchNm1ClassicTeams() {
+  const res = await fetch("/.netlify/functions/ffbb-nm1-stats");
+  if (!res.ok) throw new Error("FFBB table unavailable (" + res.status + ").");
+  const data = await res.json();
+  if (!data || !Array.isArray(data.rows) || !data.rows.length) throw new Error("FFBB table is empty.");
+  const rows = data.rows.map(r => r.map(c => { const n = typeof c === "string" ? Number(c.replace(/\s/g, "").replace(",", ".")) : c; return c !== "" && c !== null && !isNaN(n) ? n : c; }));
+  const ws = XLSX.utils.aoa_to_sheet([data.headers, ...rows]);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "NM1");
+  const buf = XLSX.write(wb, { type: "array", bookType: "xlsx" });
+  return parseClassicScoutingFile(buf).teams;
+}
+
 function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, visibility }) {
   const scouting = useScoutingTeams();
   const advanced = useTeamAdvancedStats(matchFilter);
@@ -12577,6 +12802,7 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
   const fileOffRef = useRef();
   const fileDefRef = useRef();
   const fileClassicRef = useRef();
+  const [syncMsg, setSyncMsg] = useState("");
 
   // "Our team" est injectée automatiquement à partir des box scores déjà importés,
   // en plus des équipes de scouting enregistrées manuellement/via fichier/photo.
@@ -12617,6 +12843,39 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
     } catch (err) { setFileErr(err.message || "File format not recognized — tell me how it's structured and I'll add detection for it."); }
     e.target.value = "";
   }
+
+  async function syncNm1() {
+    setFileErr(""); setSyncMsg("Syncing…");
+    try {
+      const teams = await fetchNm1ClassicTeams();
+      startPending(teams, "excel-classic");
+      setSyncMsg("");
+    } catch (err) { setSyncMsg(""); setFileErr(err.message || "FFBB sync failed."); }
+  }
+
+  // Mise à jour automatique (au plus 1 fois par heure) des équipes DÉJÀ présentes dans le scouting,
+  // quand le coach ouvre l'onglet. Fusion identique à l'import "Classic" (les "Points allowed" saisis sont conservés).
+  useEffect(() => {
+    if (!isCoach || scouting.loading) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const last = Number(await storeGet("ffbb_last_sync")) || 0;
+        if (Date.now() - last < 3600000) return;
+        const teams = await fetchNm1ClassicTeams();
+        if (cancelled) return;
+        const byNorm = {};
+        Object.keys(scouting.teams).forEach(n => { byNorm[normTag(n)] = n; });
+        for (const t of teams) {
+          const existingName = byNorm[normTag(t.name)];
+          if (!existingName) continue;
+          await scouting.saveTeam(existingName, { ...scouting.teams[existingName].stats, ...t.stats }, "excel");
+        }
+        await storeSet("ffbb_last_sync", Date.now());
+      } catch (e) { /* silencieux : la synchro auto ne doit jamais gêner */ }
+    })();
+    return () => { cancelled = true; };
+  }, [isCoach, scouting.loading]);
 
   async function confirmPending() {
     setBusy(true);
@@ -12669,6 +12928,9 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
               <Upload size={14} /> Import file — Classic
             </button>
             <input ref={fileClassicRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleClassicFile} style={{ display: "none" }} />
+            <button onClick={syncNm1} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${AMBER}`, borderRadius: 8, color: AMBER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+              <RefreshCw size={14} /> {syncMsg || "Sync NM1 (FFBB)"}
+            </button>
             <button onClick={() => setShowManual(s => !s)} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
               <Plus size={14} /> Manual entry
             </button>
