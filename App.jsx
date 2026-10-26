@@ -250,7 +250,34 @@ async function exportScoutingPdf(containerId, filename, title) {
     const shots = [];
     for (const card of cards) {
       const cssW = card.getBoundingClientRect().width || 1;
-      const canvas = await html2canvas(card, { backgroundColor: "#ffffff", scale: Math.min(2, 1400 / cssW), useCORS: true, logging: false });
+      // html2canvas coupe ce qui dépasse du SVG (libellés à droite). On pré-rend donc chaque roue en PNG avec une
+      // marge, puis on la pose dans le clone en absolu autour d'un conteneur de la taille d'origine : la roue ne bouge pas.
+      const roseImgs = {};
+      const roseSvgs = [...card.querySelectorAll("svg[data-rose]")];
+      for (const [idx, sv] of roseSvgs.entries()) {
+        sv.setAttribute("data-rose-i", String(idx));
+        try {
+          const w = parseFloat(sv.getAttribute("width")); const pad = Math.round(w * 0.3); const T = w + 2 * pad;
+          const c = sv.cloneNode(true);
+          c.setAttribute("xmlns", "http://www.w3.org/2000/svg"); c.setAttribute("width", T); c.setAttribute("height", T);
+          c.setAttribute("viewBox", `${-pad} ${-pad} ${T} ${T}`); c.removeAttribute("style");
+          const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(c)], { type: "image/svg+xml;charset=utf-8" }));
+          const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
+          const k = 2; const cv = document.createElement("canvas"); cv.width = T * k; cv.height = T * k;
+          cv.getContext("2d").drawImage(img, 0, 0, T * k, T * k); URL.revokeObjectURL(url);
+          roseImgs[idx] = { w, pad, data: cv.toDataURL("image/png") };
+        } catch { /* on garde le SVG d'origine */ }
+      }
+      const canvas = await html2canvas(card, { backgroundColor: "#ffffff", scale: Math.min(2, 1400 / cssW), useCORS: true, logging: false,
+        onclone: (doc) => {
+          doc.querySelectorAll("svg[data-rose-i]").forEach((sv) => {
+            const r = roseImgs[sv.getAttribute("data-rose-i")]; if (!r) return;
+            const box = doc.createElement("div"); box.style.cssText = `position:relative;flex-shrink:0;width:${r.w}px;height:${r.w}px`;
+            const im = doc.createElement("img"); im.src = r.data;
+            im.style.cssText = `position:absolute;left:${-r.pad}px;top:${-r.pad}px;width:${r.w + 2 * r.pad}px;height:${r.w + 2 * r.pad}px;max-width:none`;
+            box.appendChild(im); sv.replaceWith(box);
+          });
+        } });
       shots.push({ img: canvas.toDataURL("image/jpeg", 0.82), ratio: canvas.height / canvas.width });
     }
     // 2 fiches par page, TOUTES à la même largeur : celle qui permet à la fiche la plus haute de
@@ -9669,14 +9696,9 @@ function RoseChart({ ratings, categories = SKILL_CATEGORIES, size = 420, emphasi
     return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
   }
 
-  // Les libellés dépassent du carré size×size (surtout à droite/gauche). Dans l'appli, overflow:visible
-  // suffit, mais l'export PDF (html2canvas) ignore ce réglage et COUPE tout ce qui sort du cadre du
-  // SVG. Le SVG est donc agrandi d'une marge de chaque côté (viewBox décalée), placé en absolu dans un
-  // conteneur de la taille d'origine : rendu identique à l'écran, mais plus rien n'est coupé.
-  const pad = Math.round(size * 0.3);
+  // Les libellés dépassent du carré size×size ; overflow:visible suffit à l'écran (l'export PDF agrandit le SVG dans onclone).
   return (
-    <div style={{ position: "relative", width: size, height: size }}>
-    <svg width={size + 2 * pad} height={size + 2 * pad} viewBox={`${-pad} ${-pad} ${size + 2 * pad} ${size + 2 * pad}`} style={{ position: "absolute", left: -pad, top: -pad, overflow: "visible" }}>
+    <svg data-rose="1" width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ overflow: "visible" }}>
       <circle cx={cx} cy={cy} r={maxR} fill="#0C0F14" />
       {categories.map((cat, i) => (
         <path key={cat} d={wedgePath(i, ratings[cat] || 1)} fill={ratingColor(ratings[cat] || 1)} stroke="#0C0F14" strokeWidth={2} />
@@ -9699,7 +9721,6 @@ function RoseChart({ ratings, categories = SKILL_CATEGORIES, size = 420, emphasi
         );
       })}
     </svg>
-    </div>
   );
 }
 
