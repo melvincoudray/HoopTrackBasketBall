@@ -1,6 +1,7 @@
 // Fonction Netlify — lit l'effectif d'une équipe sur le site officiel de la NM1
 // (page "Composition de l'équipe") : nom, numéro, taille, poste, date de naissance et photo.
 // Appel : /.netlify/functions/ffbb-nm1-roster?team=<nom de l'équipe tel qu'il apparaît dans le tableau NM1>
+// Les moyennes de saison de chaque joueur (fiche joueur) sont jointes à l'effectif.
 // Les photos sont récupérées ici (serveur à serveur) et renvoyées en data-URL, car le navigateur
 // ne peut généralement pas les lire directement (CORS). Aucune dépendance externe.
 
@@ -56,6 +57,34 @@ export function parseRoster(html) {
   return out;
 }
 
+// Moyennes de la saison régulière d'un joueur (page fiche joueur) pour l'équipe et la saison données.
+// Retourne { mj, min, pts, reb, ast, r2, t2, r3, t3, lfr, lft, ro, rd, stl, tov, blk, eff } ou null.
+export function parsePlayerSeason(html, teamName, seasonLabel) {
+  const part = html.split(/Moyennes(?:<\/span>)?\s+en saison r[ée]guli[èe]re/i)[1];
+  if (!part) return null;
+  const tbl = (part.match(/<table[\s\S]*?<\/table>/i) || [])[0];
+  if (!tbl) return null;
+  const num = v => { const n = parseFloat(String(v).replace(",", ".")); return isNaN(n) ? null : n; };
+  const pair = v => { const [a, b] = String(v).split("-"); return [num(a), num(b)]; };
+  for (const tr of tbl.split(/<tr[\s>]/i).slice(1)) {
+    const cells = [...tr.matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(m => decodeEntities(m[1].replace(/<[^>]+>/g, " ")).replace(/\s+/g, " ").trim());
+    if (cells.length < 19) continue;
+    if (cells[0] !== seasonLabel || norm(cells[1]) !== norm(teamName) || !/^FRA-3$/i.test(cells[2])) continue;
+    const [r2, t2] = pair(cells[8]), [r3, t3] = pair(cells[9]), [lfr, lft] = pair(cells[11]);
+    return { mj: num(cells[3]), min: num(cells[4]), pts: num(cells[5]), reb: num(cells[6]), ast: num(cells[7]),
+      r2, t2, r3, t3, lfr, lft, ro: num(cells[13]), rd: num(cells[14]), stl: num(cells[15]), tov: num(cells[16]), blk: num(cells[17]), eff: num(cells[18]) };
+  }
+  return null;
+}
+
+async function getPlayerStats(ffbbId, teamName, seasonLabel) {
+  try {
+    const r = await fetch(ROOT + "/saison-reguliere/joueur/" + ffbbId, { headers: UA });
+    if (!r.ok) return null;
+    return parsePlayerSeason(await r.text(), teamName, seasonLabel);
+  } catch { return null; }
+}
+
 async function getPhoto(url) {
   if (!/^https:\/\/www\.proballers\.com\//.test(url || "")) return null;
   try {
@@ -84,7 +113,12 @@ export const handler = async (event) => {
     const tres = await fetch(link.href.startsWith("http") ? link.href : ROOT + link.href, { headers: UA });
     if (!tres.ok) return { statusCode: 502, body: JSON.stringify({ error: "NM1 team page answered " + tres.status }) };
     const players = parseRoster(await tres.text());
-    await Promise.all(players.map(async p => { p.photo = await getPhoto(p.photoUrl); delete p.photoUrl; }));
+    const yy = Number(season);
+    const seasonLabel = String(yy % 100).padStart(2, "0") + "-" + String((yy + 1) % 100).padStart(2, "0");
+    await Promise.all(players.map(async p => {
+      const [photo, stats] = await Promise.all([getPhoto(p.photoUrl), getPlayerStats(p.ffbbId, link.name, seasonLabel)]);
+      p.photo = photo; p.stats = stats; delete p.photoUrl;
+    }));
     return {
       statusCode: 200,
       headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=300, s-maxage=1800" },
