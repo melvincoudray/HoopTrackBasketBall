@@ -231,6 +231,44 @@ async function tryExportPdf(elementId, filename, theme = "light", orientation = 
   }
 }
 
+// Export PDF du Scouting individuel : chaque fiche est capturée séparément (au lieu d'une seule
+// énorme image de toute la page, qui échouait selon l'appareil/navigateur et faisait retomber sur
+// le HTML — dont la mise en page n'est pas celle de l'appli) puis placée à 2 par page A4. Renvoie
+// { ok: true } ou { ok: false, error } pour que le message d'échec soit affiché au lieu d'être muet.
+async function exportScoutingPdf(containerId, filename, title) {
+  const root = document.getElementById(containerId);
+  if (!root) return { ok: false, error: "Content not found." };
+  try {
+    const [{ jsPDF }, { default: html2canvas }] = await Promise.all([import("jspdf"), import("html2canvas")]);
+    if (document.fonts && document.fonts.ready) { try { await document.fonts.ready; } catch { /* ignoré */ } }
+    const cards = Array.from(root.querySelectorAll('[data-no-split="true"]'));
+    if (!cards.length) return { ok: false, error: "No player card found." };
+    const pdf = new jsPDF({ unit: "pt", format: "a4", orientation: "portrait", compress: true });
+    const pageW = 595.28, pageH = 841.89, margin = 24, gap = 14;
+    const usableW = pageW - 2 * margin;
+    let y = margin, onPage = 0;
+    pdf.setFontSize(13); pdf.setTextColor(26, 29, 36);
+    pdf.text(title, margin, y + 10); y += 28;
+    for (const card of cards) {
+      const canvas = await html2canvas(card, { backgroundColor: "#ffffff", scale: 1.6, useCORS: true, logging: false });
+      const img = canvas.toDataURL("image/jpeg", 0.82);
+      let w = usableW, h = (canvas.height * w) / canvas.width;
+      // 2 fiches par page, toutes de la même taille maximale (la place du titre est réservée
+      // sur chaque page) : une fiche un peu trop haute est réduite pour que la paire tienne.
+      const maxH = (pageH - 2 * margin - 28 - gap) / 2;
+      if (h > maxH) { w = (w * maxH) / h; h = maxH; }
+      if (onPage >= 2) { pdf.addPage(); y = margin; onPage = 0; }
+      pdf.addImage(img, "JPEG", margin + (usableW - w) / 2, y, w, h);
+      y += h + gap; onPage++;
+    }
+    pdf.save(filename.replace(/\.html$/, ".pdf"));
+    return { ok: true };
+  } catch (e) {
+    console.warn("[pdf] scouting export failed:", e);
+    return { ok: false, error: (e && e.message) || String(e) };
+  }
+}
+
 function ExportModal({ report, onClose }) {
   if (!report) return null;
   return (
@@ -10272,6 +10310,7 @@ function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, t
   return (
     <div data-no-split="true" style={{
       position: "relative",
+      color: PAPER, // l'export place la fiche dans un conteneur à texte sombre : sans ça "Close Out :" devenait illisible
       background: bgPhoto
         ? `linear-gradient(rgba(22,27,34,${darkness}), rgba(22,27,34,${darkness})), url(${bgPhoto})`
         : PANEL,
@@ -11410,6 +11449,7 @@ function ScoutingStaffPanel({ teamName, isCoach }) {
 function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, initialTeam }) {
   const [selectedTeam, setSelectedTeam] = useState(initialTeam || "");
   const [exportReport, setExportReport] = useState(null);
+  const [exportMsg, setExportMsg] = useState("");
   const report = useScoutingReport(selectedTeam || null);
   const [subtab, setSubtab] = useState("collectif");
   const [editing, setEditing] = useState(null); // null | "new" | player object
@@ -11575,16 +11615,19 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
                   {report.players.length > 0 && (
                     <button onClick={async () => {
                       const filename = `scouting_${selectedTeam}_${todayLocal()}.html`;
-                      const pdfOk = await tryExportPdf("scouting-print-content", filename, "light");
-                      if (pdfOk) return;
+                      setExportMsg("Generating PDF…");
+                      const res = await exportScoutingPdf("scouting-print-content", filename, `Scouting individuel — ${selectedTeam}`);
+                      if (res.ok) { setExportMsg(""); return; }
+                      setExportMsg("PDF failed (" + res.error + ") — HTML file downloaded instead.");
                       const r = buildReportHtml("scouting-print-content", filename, "light");
                       if (!r) { alert("Content not found — try again after the page has fully loaded."); return; }
                       tryDownload(r.full, r.filename);
                       setExportReport(r);
                     }} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
-                      <Download size={14} /> Export ({report.players.length} player{report.players.length !== 1 ? "s" : ""}) — HTML → PDF
+                      <Download size={14} /> Export ({report.players.length} player{report.players.length !== 1 ? "s" : ""}) — PDF
                     </button>
                   )}
+                  {exportMsg && <span style={{ fontSize: 12, color: exportMsg.startsWith("PDF failed") ? RED : "#8B93A1", maxWidth: 260 }}>{exportMsg}</span>}
                   {/* Logo de l'équipe scoutée, en haut à droite, à la même taille que les onglets Collective/Individual. */}
                   {isCoach && (
                     <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 11, color: "#8B93A1" }}>
@@ -12050,40 +12093,51 @@ async function loadFfbbStatsForPlayer(observedTeamName, player, canSave) {
 // Blocs "Box Score" d'un joueur adverse, à partir des moyennes de saison lues sur le site FFBB NM1
 // (enregistrées dans sa fiche par "Sync roster (FFBB)"). Mêmes encadrés, même ordre que le Box
 // Score de nos joueurs ; ceux que la FFBB ne fournit pas (+/-, fautes, usage…) sont omis.
-function FfbbBoxScoreTiles({ stats, loading, error }) {
+function FfbbBoxScoreTiles({ stats, loading, error, teammates }) {
   if (loading) return <EmptyState text="Loading FFBB stats…" />;
   if (!stats) return <EmptyState text={error || "No FFBB stats for this player yet."} />;
   const f1 = v => (v === null || v === undefined ? "–" : Number(v).toFixed(1));
-  const pct = (m, a) => (a > 0 ? (100 * m / a).toFixed(1) + "%" : "–");
-  const sub = "average / game";
-  const tiles = [
-    ["Time", stats.min == null ? "–" : f1(stats.min) + " min", "teal"],
-    ["Pts", f1(stats.pts), "amber"],
-    ["Reb Def", f1(stats.rd), "teal"],
-    ["Reb Off", f1(stats.ro), "teal"],
-    ["Reb Tot", f1(stats.reb), "teal"],
-    ["Assists", f1(stats.ast), "teal"],
-    ["Steals", f1(stats.stl), "teal"],
-    ["Blocks", f1(stats.blk), "teal"],
-    ["2Pts Made", f1(stats.r2), "teal"],
-    ["2Pts Attempted", f1(stats.t2), "teal"],
-    ["% 2Pts", pct(stats.r2, stats.t2), "teal"],
-    ["3Pts Made", f1(stats.r3), "teal"],
-    ["3Pts Attempted", f1(stats.t3), "teal"],
-    ["% 3Pts", pct(stats.r3, stats.t3), "teal"],
-    ["FT Made", f1(stats.lfr), "teal"],
-    ["FT Attempted", f1(stats.lft), "teal"],
-    ["% FT", pct(stats.lfr, stats.lft), "teal"],
-    ["Eff", f1(stats.eff), "amber"],
-    ["Theoretical Possessions", f1(stats.theoPoss), "teal"],
-    ["% Usage", stats.usage == null ? "–" : f1(stats.usage) + "%", "teal"],
+  const pctOf = (m, a) => (a > 0 ? (100 * m / a) : null);
+  const pct = v => (v === null || v === undefined ? "–" : v.toFixed(1) + "%");
+  // [libellé, valeur numérique (pour le classement), affichage, couleur]
+  const defs = [
+    ["Time", s => s.min, v => (v == null ? "–" : f1(v) + " min"), "teal"],
+    ["Pts", s => s.pts, f1, "amber"],
+    ["Reb Def", s => s.rd, f1, "teal"],
+    ["Reb Off", s => s.ro, f1, "teal"],
+    ["Reb Tot", s => s.reb, f1, "teal"],
+    ["Assists", s => s.ast, f1, "teal"],
+    ["Steals", s => s.stl, f1, "teal"],
+    ["Blocks", s => s.blk, f1, "teal"],
+    ["2Pts Made", s => s.r2, f1, "teal"],
+    ["2Pts Attempted", s => s.t2, f1, "teal"],
+    ["% 2Pts", s => pctOf(s.r2, s.t2), pct, "teal"],
+    ["3Pts Made", s => s.r3, f1, "teal"],
+    ["3Pts Attempted", s => s.t3, f1, "teal"],
+    ["% 3Pts", s => pctOf(s.r3, s.t3), pct, "teal"],
+    ["FT Made", s => s.lfr, f1, "teal"],
+    ["FT Attempted", s => s.lft, f1, "teal"],
+    ["% FT", s => pctOf(s.lfr, s.lft), pct, "teal"],
+    ["Eff", s => s.eff, f1, "amber"],
+    ["Theoretical Possessions", s => s.theoPoss, f1, "teal"],
+    ["% Usage", s => s.usage, pct, "teal"],
+    ["Games played", s => s.mj, v => (v == null ? "–" : String(v)), "amber"],
   ];
+  // Classement dans l'équipe (même format que le Box Score de nos joueurs : "#N of M team"),
+  // parmi les joueurs de l'équipe qui ont des stats FFBB ; ex-aequo = même rang.
+  const pool = (teammates || []).filter(Boolean);
+  const rankSub = get => {
+    const mine = get(stats);
+    if (mine === null || mine === undefined) return "average / game";
+    const vals = pool.map(get).filter(v => v !== null && v !== undefined);
+    if (vals.length < 2) return "average / game";
+    return `#${1 + vals.filter(v => v > mine + 1e-9).length} of ${vals.length} team`;
+  };
   return (
     <div style={{ marginBottom: 26 }}>
       <SectionTitle eyebrow="Source: FFBB NM1 — season average" title="Box Score" />
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-        {tiles.map(([label, value, tone]) => <StatPill key={label} label={label} value={value} sub={sub} tone={tone} />)}
-        <StatPill label="Games played" value={stats.mj == null ? "–" : String(stats.mj)} sub="FFBB regular season" tone="amber" />
+        {defs.map(([label, get, show, tone]) => <StatPill key={label} label={label} value={show(get(stats))} sub={rankSub(get)} tone={tone} />)}
       </div>
     </div>
   );
@@ -12187,7 +12241,7 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
                 <div style={{ fontSize: 17, fontWeight: 800, color: PAPER }}>{[openPlayer.firstName, openPlayer.lastName].filter(Boolean).join(" ")}{openPlayer.jersey ? ` #${openPlayer.jersey}` : ""}</div>
                 <button onClick={() => setOpenPlayer(null)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer" }}><X size={20} /></button>
               </div>
-              {(() => { const live = ffbbLive[openPlayer.id]; const stats = (live && typeof live === "object" ? live : null) || openPlayer.ffbbStats; return <FfbbBoxScoreTiles stats={stats} loading={!stats && (live === "loading" || live === undefined)} error={typeof live === "string" && live.startsWith("error:") ? live.slice(6) : ""} />; })()}
+              {(() => { const live = ffbbLive[openPlayer.id]; const stats = (live && typeof live === "object" ? live : null) || openPlayer.ffbbStats; return <FfbbBoxScoreTiles teammates={[...players.filter(p => p.id !== openPlayer.id).map(p => p.ffbbStats), stats]} stats={stats} loading={!stats && (live === "loading" || live === undefined)} error={typeof live === "string" && live.startsWith("error:") ? live.slice(6) : ""} />; })()}
               {playerOff.length + playerDef.length > 0
                 ? <OffenseDefenseBreakdown off={playerOff} def={playerDef} categories={categories} enableClipExport clipGrouping={clipGrouping} />
                 : <EmptyState text="No tagged action for this player in the observation yet." />}
