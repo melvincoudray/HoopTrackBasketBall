@@ -2914,9 +2914,9 @@ function sumRowStats(rows) {
   return out;
 }
 
-// Estimation standard des possessions d'ÉQUIPE (Dean Oliver) à partir d'un objet de stats
-// brutes quelconque (ligne de totaux d'équipe, ou somme des joueurs) : FGA - OREB + TOV +
-// 0.44*FTA. Réutilisée à la fois pour les stats avancées d'équipe et pour le %usage individuel.
+// Possessions d'ÉQUIPE servant de base au %usage individuel, à partir d'un objet de stats
+// brutes quelconque (ligne de totaux d'équipe, ou somme des joueurs) : FGA + TOV + 0.44*FTA
+// (nombre d'attaques — les rebonds offensifs ne sont pas soustraits).
 function computeTeamPossessionsFromStats(statsObj) {
   if (!statsObj) return null;
   const labels = Object.keys(statsObj);
@@ -2929,7 +2929,9 @@ function computeTeamPossessionsFromStats(statsObj) {
   const tov = get(STAT_PATTERNS.tov);
   const oreb = get(STAT_PATTERNS.oreb);
   if (fga === undefined || fta === undefined || tov === undefined) return null;
-  return fga - (oreb || 0) + tov + 0.44 * fta;
+  // Demandé par l'utilisateur : pour le %usage (seul usage de cette fonction), les rebonds
+  // offensifs ne sont PAS soustraits — la base est le nombre d'attaques : FGA + TOV + 0.44 FTA.
+  return fga + tov + 0.44 * fta;
 }
 
 // À partir des colonnes brutes d'UN match (ex. "2pts", "3pts Missed"…), calcule les
@@ -11446,12 +11448,12 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
       // d'après le tableau des stats de l'équipe), match de 40 min ; possessions terminées du joueur =
       // tirs tentés + pertes de balle + 0.44 LF tentés ; Usage = terminées / théoriques sur le terrain.
       const ts = scoutingTeams?.[selectedTeam]?.stats;
-      const teamPoss = ts && ts.t2 != null && ts.t3 != null && ts.lft != null && ts.bp != null ? (ts.t2 + ts.t3) - (ts.ro || 0) + ts.bp + 0.44 * ts.lft : null;
+      const teamPoss = ts && ts.t2 != null && ts.t3 != null && ts.lft != null && ts.bp != null ? (ts.t2 + ts.t3) + ts.bp + 0.44 * ts.lft : null;
       const withAdvanced = st => {
         if (!st || !teamPoss || !(st.min > 0) || st.tov == null || st.t2 == null || st.t3 == null || st.lft == null) return st;
         const ended = st.t2 + st.t3 + st.tov + 0.44 * st.lft;
         const theo = (st.min / 40) * teamPoss;
-        return theo > 0 ? { ...st, theoPoss: theo, usage: (100 * ended) / theo } : st;
+        return theo > 0 ? { ...st, theoPoss: theo, usage: (100 * ended) / theo, advV: 2 } : st;
       };
       let added = 0, photos = 0;
       for (const fp of data.players || []) {
@@ -12014,12 +12016,12 @@ async function loadFfbbStatsForPlayer(observedTeamName, player, canSave) {
   if (!("stats" in fp)) throw new Error("The Netlify function ffbb-nm1-roster.js is out of date — replace it with the latest version on GitHub.");
   if (!fp.stats) throw new Error("The FFBB has no stats for this player yet this season.");
   const ts = ((await storeGet("scouting:" + match)) || {}).stats;
-  const teamPoss = ts && ts.t2 != null && ts.t3 != null && ts.lft != null && ts.bp != null ? (ts.t2 + ts.t3) - (ts.ro || 0) + ts.bp + 0.44 * ts.lft : null;
+  const teamPoss = ts && ts.t2 != null && ts.t3 != null && ts.lft != null && ts.bp != null ? (ts.t2 + ts.t3) + ts.bp + 0.44 * ts.lft : null;
   let st = fp.stats;
   if (teamPoss && st.min > 0 && st.tov != null && st.t2 != null && st.t3 != null && st.lft != null) {
     const ended = st.t2 + st.t3 + st.tov + 0.44 * st.lft;
     const theo = (st.min / 40) * teamPoss;
-    if (theo > 0) st = { ...st, theoPoss: theo, usage: (100 * ended) / theo };
+    if (theo > 0) st = { ...st, theoPoss: theo, usage: (100 * ended) / theo, advV: 2 };
   }
   if (canSave) await storeSet("scouting_player:" + match + ":" + player.id, { ...player, ffbbId: fp.ffbbId, ffbbStats: st });
   return st;
@@ -12079,7 +12081,7 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
   // Stats FFBB chargées à l'ouverture si la fiche n'en a pas encore : { [idJoueur]: stats | "loading" | "error:..." }
   const [ffbbLive, setFfbbLive] = useState({});
   useEffect(() => {
-    if (!openPlayer || openPlayer.ffbbStats || ffbbLive[openPlayer.id] !== undefined) return;
+    if (!openPlayer || openPlayer.ffbbStats?.advV === 2 || ffbbLive[openPlayer.id] !== undefined) return;
     const pid = openPlayer.id;
     setFfbbLive(m => ({ ...m, [pid]: "loading" }));
     loadFfbbStatsForPlayer(teamName, openPlayer, isCoach)
@@ -12165,7 +12167,7 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
                 <div style={{ fontSize: 17, fontWeight: 800, color: PAPER }}>{[openPlayer.firstName, openPlayer.lastName].filter(Boolean).join(" ")}{openPlayer.jersey ? ` #${openPlayer.jersey}` : ""}</div>
                 <button onClick={() => setOpenPlayer(null)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer" }}><X size={20} /></button>
               </div>
-              {(() => { const live = ffbbLive[openPlayer.id]; const stats = openPlayer.ffbbStats || (live && typeof live === "object" ? live : null); return <FfbbBoxScoreTiles stats={stats} loading={!stats && (live === "loading" || live === undefined)} error={typeof live === "string" && live.startsWith("error:") ? live.slice(6) : ""} />; })()}
+              {(() => { const live = ffbbLive[openPlayer.id]; const stats = (live && typeof live === "object" ? live : null) || openPlayer.ffbbStats; return <FfbbBoxScoreTiles stats={stats} loading={!stats && (live === "loading" || live === undefined)} error={typeof live === "string" && live.startsWith("error:") ? live.slice(6) : ""} />; })()}
               {playerOff.length + playerDef.length > 0
                 ? <OffenseDefenseBreakdown off={playerOff} def={playerDef} categories={categories} enableClipExport clipGrouping={clipGrouping} />
                 : <EmptyState text="No tagged action for this player in the observation yet." />}
