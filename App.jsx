@@ -10025,7 +10025,7 @@ function ScoutingPlayerForm({ initial, onSave, onCancel, busy }) {
 
       <div style={{ display: "flex", gap: 8 }}>
         <button onClick={onCancel} style={btnSecondary}>Cancel</button>
-        <button disabled={busy} onClick={() => onSave({ id: initial?.id, firstName, lastName, jersey, position, plan, closeOut, height, handedness, ratings, highlights, photo })}
+        <button disabled={busy} onClick={() => onSave({ ...initial, id: initial?.id, firstName, lastName, jersey, position, plan, closeOut, height, handedness, ratings, highlights, photo })}
           style={{ ...btnPrimary, width: "auto", padding: "10px 20px" }}>{busy ? "…" : "Save"}</button>
       </div>
     </div>
@@ -11282,6 +11282,7 @@ function ScoutingStaffPanel({ teamName, isCoach }) {
   const [obsKey, setObsKey] = useState(null); // nom exact sous lequel l'équipe est enregistrée dans Observation
   const [confirmRemoveFileId, setConfirmRemoveFileId] = useState(null);
   const fileRef = useRef();
+  const staffPlayers = useObservationScoutingPlayers(teamName);
 
   useEffect(() => { load(); }, [teamName]);
   async function load() {
@@ -11377,6 +11378,9 @@ function ScoutingStaffPanel({ teamName, isCoach }) {
       <StaffDrawPlays teamName={teamName} isCoach={isCoach} />
 
       <SectionTitle eyebrow="Observation" title="Stats & charts for this team" />
+      {(!observation || (observation.plays || []).length === 0) && (
+        <ObservationPlayerStrip players={staffPlayers} off={[]} def={[]} isCoach={isCoach} categories={currentObservationTagCategories()} clipGrouping={undefined} teamName={teamName} />
+      )}
       {!observation || (observation.plays || []).length === 0 ? (
         <EmptyState text="This team hasn't been observed yet (Observation tab) — its stats and charts will appear here automatically once it has." />
       ) : (
@@ -11438,6 +11442,18 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "FFBB roster unavailable (" + res.status + ").");
       const key = s => String(s).split(/\s+/).filter(Boolean).map(normTag).sort().join("|");
+      // Possessions théoriques et % Usage : même méthode que le Box Score de nos joueurs, calculées
+      // ici car la FFBB ne les donne pas. Possessions d'équipe par match (FGA - OREB + TOV + 0.44 FTA,
+      // d'après le tableau des stats de l'équipe), match de 40 min ; possessions terminées du joueur =
+      // tirs tentés + pertes de balle + 0.44 LF tentés ; Usage = terminées / théoriques sur le terrain.
+      const ts = scoutingTeams?.[selectedTeam]?.stats;
+      const teamPoss = ts && ts.t2 != null && ts.t3 != null && ts.lft != null && ts.bp != null ? (ts.t2 + ts.t3) - (ts.ro || 0) + ts.bp + 0.44 * ts.lft : null;
+      const withAdvanced = st => {
+        if (!st || !teamPoss || !(st.min > 0) || st.tov == null || st.t2 == null || st.t3 == null || st.lft == null) return st;
+        const ended = st.t2 + st.t3 + st.tov + 0.44 * st.lft;
+        const theo = (st.min / 40) * teamPoss;
+        return theo > 0 ? { ...st, theoPoss: theo, usage: (100 * ended) / theo } : st;
+      };
       const byKey = {};
       report.players.forEach(p => { byKey[key((p.firstName || "") + " " + (p.lastName || ""))] = p; });
       let added = 0, photos = 0;
@@ -11448,13 +11464,16 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
         }
         const existing = byKey[key(fp.name)];
         if (existing) {
-          if (photo) { await report.savePlayer({ ...existing, photo }); photos++; }
+          // Seules la photo (si la FFBB en a une) et les stats FFBB changent ; le reste de la fiche est intact.
+          await report.savePlayer({ ...existing, ...(photo ? { photo } : {}), ffbbId: fp.ffbbId, ffbbStats: withAdvanced(fp.stats) || existing.ffbbStats || null });
+          if (photo) photos++;
         } else {
           const parts = fp.name.split(/\s+/);
           await report.savePlayer({
             firstName: parts[0] || "", lastName: parts.slice(1).join(" "), jersey: fp.jersey || "", position: fp.position || "",
             plan: "", closeOut: "medium", height: fp.height || "", handedness: "",
             ratings: Object.fromEntries(SKILL_CATEGORIES.map(c => [c, 3])), highlights: [], photo,
+            ffbbId: fp.ffbbId, ffbbStats: withAdvanced(fp.stats) || null,
           });
           added++;
         }
@@ -11960,6 +11979,47 @@ function useObservationPlayerTagMap(teamName) {
   return { map, setTag };
 }
 
+// Blocs "Box Score" d'un joueur adverse, à partir des moyennes de saison lues sur le site FFBB NM1
+// (enregistrées dans sa fiche par "Sync roster (FFBB)"). Mêmes encadrés, même ordre que le Box
+// Score de nos joueurs ; ceux que la FFBB ne fournit pas (+/-, fautes, usage…) sont omis.
+function FfbbBoxScoreTiles({ stats }) {
+  if (!stats) return <EmptyState text="No FFBB stats for this player yet (no game played, or not synced) — use 'Sync roster (FFBB)' in Scouting Report → Individual." />;
+  const f1 = v => (v === null || v === undefined ? "–" : Number(v).toFixed(1));
+  const pct = (m, a) => (a > 0 ? (100 * m / a).toFixed(1) + "%" : "–");
+  const sub = "average / game";
+  const tiles = [
+    ["Time", stats.min == null ? "–" : f1(stats.min) + " min", "teal"],
+    ["Pts", f1(stats.pts), "amber"],
+    ["Reb Def", f1(stats.rd), "teal"],
+    ["Reb Off", f1(stats.ro), "teal"],
+    ["Reb Tot", f1(stats.reb), "teal"],
+    ["Assists", f1(stats.ast), "teal"],
+    ["Steals", f1(stats.stl), "teal"],
+    ["Blocks", f1(stats.blk), "teal"],
+    ["2Pts Made", f1(stats.r2), "teal"],
+    ["2Pts Attempted", f1(stats.t2), "teal"],
+    ["% 2Pts", pct(stats.r2, stats.t2), "teal"],
+    ["3Pts Made", f1(stats.r3), "teal"],
+    ["3Pts Attempted", f1(stats.t3), "teal"],
+    ["% 3Pts", pct(stats.r3, stats.t3), "teal"],
+    ["FT Made", f1(stats.lfr), "teal"],
+    ["FT Attempted", f1(stats.lft), "teal"],
+    ["% FT", pct(stats.lfr, stats.lft), "teal"],
+    ["Eff", f1(stats.eff), "amber"],
+    ["Theoretical Possessions", f1(stats.theoPoss), "teal"],
+    ["% Usage", stats.usage == null ? "–" : f1(stats.usage) + "%", "teal"],
+  ];
+  return (
+    <div style={{ marginBottom: 26 }}>
+      <SectionTitle eyebrow="Source: FFBB NM1 — season average" title="Box Score" />
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+        {tiles.map(([label, value, tone]) => <StatPill key={label} label={label} value={value} sub={sub} tone={tone} />)}
+        <StatPill label="Games played" value={stats.mj == null ? "–" : String(stats.mj)} sub="FFBB regular season" tone="amber" />
+      </div>
+    </div>
+  );
+}
+
 // Rangée de petits encadrés joueurs (photo + nom), affichée juste au-dessus de "Offense — how
 // the ball is played" dans l'onglet Observation. Seules les fiches dont le nom/numéro correspond
 // à au moins un tag "Player" CONFIRMÉ comme appartenant à cette équipe (voir ci-dessus) sont
@@ -11979,9 +12039,9 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
   const undecidedCount = allTags.filter(t => !(t in tagMap)).length;
   const confirmedTags = useMemo(() => new Set(allTags.filter(t => tagMap[t] === true)), [allTags, tagMap]);
   const confirmedNorm = useMemo(() => new Set([...confirmedTags].map(normTag)), [confirmedTags]);
-  const matched = players.filter(p => scoutingPlayerNameCandidates(p).some(c => confirmedNorm.has(c)));
+  const matched = players.filter(p => p.ffbbStats || scoutingPlayerNameCandidates(p).some(c => confirmedNorm.has(c)));
 
-  if (!allTags.length) return null;
+  if (!allTags.length && !matched.length) return null;
   if (!isCoach && !matched.length) return null;
 
   function playsFor(player) {
@@ -11991,9 +12051,9 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
 
   return (
     <div style={{ marginBottom: 26 }}>
-      <SectionTitle eyebrow="From Scouting Report — Individual" title="Players tagged in this observation" />
+      <SectionTitle eyebrow="From Scouting Report — Individual" title="Players" />
 
-      {isCoach && (
+      {isCoach && allTags.length > 0 && (
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
             <div style={{ fontSize: 12.5, color: "#D8DCE2" }}>
@@ -12048,7 +12108,10 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
                 <div style={{ fontSize: 17, fontWeight: 800, color: PAPER }}>{[openPlayer.firstName, openPlayer.lastName].filter(Boolean).join(" ")}{openPlayer.jersey ? ` #${openPlayer.jersey}` : ""}</div>
                 <button onClick={() => setOpenPlayer(null)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer" }}><X size={20} /></button>
               </div>
-              <OffenseDefenseBreakdown off={playerOff} def={playerDef} categories={categories} enableClipExport clipGrouping={clipGrouping} />
+              <FfbbBoxScoreTiles stats={openPlayer.ffbbStats} />
+              {playerOff.length + playerDef.length > 0
+                ? <OffenseDefenseBreakdown off={playerOff} def={playerDef} categories={categories} enableClipExport clipGrouping={clipGrouping} />
+                : <EmptyState text="No tagged action for this player in the observation yet." />}
             </div>
           </div>
         );
