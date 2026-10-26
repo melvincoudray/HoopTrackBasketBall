@@ -9669,8 +9669,14 @@ function RoseChart({ ratings, categories = SKILL_CATEGORIES, size = 420, emphasi
     return { x: cx + r * Math.cos(a), y: cy + r * Math.sin(a) };
   }
 
+  // Les libellés dépassent du carré size×size (surtout à droite/gauche). Dans l'appli, overflow:visible
+  // suffit, mais l'export PDF (html2canvas) ignore ce réglage et COUPE tout ce qui sort du cadre du
+  // SVG. Le SVG est donc agrandi d'une marge de chaque côté (viewBox décalée), placé en absolu dans un
+  // conteneur de la taille d'origine : rendu identique à l'écran, mais plus rien n'est coupé.
+  const pad = Math.round(size * 0.3);
   return (
-    <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ overflow: "visible" }}>
+    <div style={{ position: "relative", width: size, height: size }}>
+    <svg width={size + 2 * pad} height={size + 2 * pad} viewBox={`${-pad} ${-pad} ${size + 2 * pad} ${size + 2 * pad}`} style={{ position: "absolute", left: -pad, top: -pad, overflow: "visible" }}>
       <circle cx={cx} cy={cy} r={maxR} fill="#0C0F14" />
       {categories.map((cat, i) => (
         <path key={cat} d={wedgePath(i, ratings[cat] || 1)} fill={ratingColor(ratings[cat] || 1)} stroke="#0C0F14" strokeWidth={2} />
@@ -9693,6 +9699,7 @@ function RoseChart({ ratings, categories = SKILL_CATEGORIES, size = 420, emphasi
         );
       })}
     </svg>
+    </div>
   );
 }
 
@@ -13036,6 +13043,39 @@ async function fetchNm1ClassicTeams() {
   return parseClassicScoutingFile(buf).teams;
 }
 
+// Logos des clubs : lus sur la FFBB (fonction Netlify ffbb-nm1-logos), convertis du SVG en PNG,
+// puis enregistrés comme logo de l'équipe — SEULEMENT pour les équipes qui n'en ont pas encore
+// (un logo déjà choisi par le coach n'est jamais remplacé).
+function ffbbSvgToPng(dataUrl, maxDim = 200) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const w = img.naturalWidth || maxDim, h = img.naturalHeight || maxDim;
+      const k = Math.min(1, maxDim / Math.max(w, h));
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(w * k)); c.height = Math.max(1, Math.round(h * k));
+      c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+      try { resolve(c.toDataURL("image/png")); } catch (e) { reject(e); }
+    };
+    img.onerror = () => reject(new Error("Logo unreadable."));
+    img.src = dataUrl;
+  });
+}
+async function applyFfbbLogos(names, saveLogo) {
+  const res = await fetch("/.netlify/functions/ffbb-nm1-logos");
+  if (!res.ok) throw new Error("FFBB logos unavailable (" + res.status + ").");
+  const data = await res.json();
+  let added = 0;
+  for (const name of names) {
+    const t = (data.teams || []).find(x => x.logo && normTag(x.name) === normTag(name));
+    if (!t) continue;
+    const existing = await storeGet("scouting:" + name);
+    if (existing && existing.logo) continue;
+    try { await saveLogo(name, await ffbbSvgToPng(t.logo)); added++; } catch { /* logo illisible : ignoré */ }
+  }
+  return added;
+}
+
 function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, visibility }) {
   const scouting = useScoutingTeams();
   const advanced = useTeamAdvancedStats(matchFilter);
@@ -13050,6 +13090,7 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
   const fileDefRef = useRef();
   const fileClassicRef = useRef();
   const [syncMsg, setSyncMsg] = useState("");
+  const ffbbPendingRef = useRef(false); // l'import en attente vient de la synchro FFBB (donc on ajoutera aussi les logos)
 
   // "Our team" est injectée automatiquement à partir des box scores déjà importés,
   // en plus des équipes de scouting enregistrées manuellement/via fichier/photo.
@@ -13086,6 +13127,7 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
       const buf = await file.arrayBuffer();
       const parsed = parseClassicScoutingFile(buf);
       if (!parsed.teams.length) throw new Error("No team detected in this file.");
+      ffbbPendingRef.current = false;
       startPending(parsed.teams, "excel-classic");
     } catch (err) { setFileErr(err.message || "File format not recognized — tell me how it's structured and I'll add detection for it."); }
     e.target.value = "";
@@ -13095,6 +13137,7 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
     setFileErr(""); setSyncMsg("Syncing…");
     try {
       const teams = await fetchNm1ClassicTeams();
+      ffbbPendingRef.current = true;
       startPending(teams, "excel-classic");
       setSyncMsg("");
     } catch (err) { setSyncMsg(""); setFileErr(err.message || "FFBB sync failed."); }
@@ -13118,6 +13161,7 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
           if (!existingName) continue;
           await scouting.saveTeam(existingName, { ...scouting.teams[existingName].stats, ...t.stats }, "excel");
         }
+        try { await applyFfbbLogos(Object.keys(scouting.teams), scouting.saveLogo); } catch { /* idem : sans conséquence */ }
         await storeSet("ffbb_last_sync", Date.now());
       } catch (e) { /* silencieux : la synchro auto ne doit jamais gêner */ }
     })();
@@ -13136,6 +13180,10 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
       const existing = scouting.teams[t.name];
       const mergedStats = existing && (pending.kind === "excel-def" || pending.kind === "excel-classic") ? { ...existing.stats, ...t.stats } : t.stats;
       await scouting.saveTeam(t.name, mergedStats, pending.kind.startsWith("excel") ? "excel" : "photo");
+    }
+    if (ffbbPendingRef.current) {
+      ffbbPendingRef.current = false;
+      try { await applyFfbbLogos(pending.teams.filter(x => x.selected).map(x => x.name), scouting.saveLogo); } catch { /* les logos sont un bonus : un échec ne bloque rien */ }
     }
     setBusy(false); setPending(null); setReplaceChoice(null);
   }
