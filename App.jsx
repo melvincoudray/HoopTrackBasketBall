@@ -2693,7 +2693,7 @@ function useBoxScore(playerName, filterKeys) {
       const data = await storeGet("boxscore:" + m.id);
       if (!data) continue;
       const row = data.rows.find(r => r.player === playerName);
-      if (row) {
+      if (row && !isDnpRow(row)) {
         // Possessions de l'ÉQUIPE pour CE match, nécessaires pour le %usage du joueur — priorité
         // à la ligne de totaux d'équipe si détectée, sinon somme des lignes joueurs du match.
         const teamStats = data.teamRow ? data.teamRow.stats : sumRowStats(data.rows);
@@ -2765,6 +2765,18 @@ function findStatCol(labels, patterns, key) {
     }
   }
   return labels.find(l => patterns.some(p => p.test(l.trim())));
+}
+
+// Joueur qui n'a pas joué (DNP / pas entré) : minutes à 0 sans aucun point, ou aucune stat non nulle.
+// Une telle ligne ne compte PAS comme match joué (moyennes, objectifs, badges).
+function isDnpRow(row) {
+  const vals = row && row.stats ? row.stats : {};
+  const labels = Object.keys(vals);
+  const minCol = findStatCol(labels, STAT_PATTERNS.minutes);
+  const ptsCol = findStatCol(labels, STAT_PATTERNS.pts);
+  const num = (l) => { const n = Number(vals[l]); return isNaN(n) ? 0 : n; };
+  if (minCol !== undefined && num(minCol) <= 0 && (ptsCol === undefined || num(ptsCol) <= 0)) return true;
+  return labels.length === 0 || labels.every(l => num(l) === 0);
 }
 
 // Correspondances de colonnes de box score ajoutées manuellement par le coach (Settings)
@@ -3608,6 +3620,7 @@ function useAllBoxScores(filterKeys) {
       const data = await storeGet("boxscore:" + m.id);
       if (!data) continue;
       data.rows.forEach(row => {
+        if (isDnpRow(row)) return; // DNP : pas un match joué
         if (!map[row.player]) map[row.player] = [];
         map[row.player].push({ date: m.date, opponent: m.opponent, season: m.season || null, stats: { ...row.stats, ...derivedMatchStats(row.stats) } });
       });
@@ -3794,7 +3807,7 @@ async function loadBadgeData(roster) {
     const playerRows = data.rows.filter(r => r !== data.teamRow);
     for (const name of names) {
       const row = data.rows.find(r => r.player === name);
-      if (!row) continue;
+      if (!row || isDnpRow(row)) continue;
       const labels = Object.keys(row.stats);
       const minutesCol = findStatCol(labels, STAT_PATTERNS.minutes);
       const totalMin = minutesCol ? sumStat(playerRows, minutesCol) : null;
