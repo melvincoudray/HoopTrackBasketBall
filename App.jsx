@@ -13030,6 +13030,16 @@ function ScoutingTeamRow({ name, team, onSaveLogo, onDelete, onSaveStats }) {
 
 // Synchro FFBB NM1 : la fonction Netlify lit le tableau officiel (nm1.ffbb.com) ; on le
 // convertit en classeur en mémoire pour réutiliser exactement l'import "Classic" (mêmes stats calculées).
+// Points encaissés par match -> DRTG et Net rating, avec la même formule que la saisie manuelle
+// de "Points allowed" : DRTG = 100 × pts encaissés / possessions ; Net = ORTG − DRTG.
+function withAllowedDerived(stats) {
+  const s = { ...stats };
+  if (s.ptse !== undefined && s.ptse !== null && s.poss) {
+    s.drtg = (100 * s.ptse) / s.poss;
+    if (s.ortg !== undefined) s.nrtg = s.ortg - s.drtg;
+  }
+  return s;
+}
 async function fetchNm1ClassicTeams() {
   const res = await fetch("/.netlify/functions/ffbb-nm1-stats");
   if (!res.ok) throw new Error("FFBB table unavailable (" + res.status + ").");
@@ -13040,7 +13050,15 @@ async function fetchNm1ClassicTeams() {
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "NM1");
   const buf = XLSX.write(wb, { type: "array", bookType: "xlsx" });
-  return parseClassicScoutingFile(buf).teams;
+  // Points encaissés par match (classement FFBB) : ajoutés à chaque équipe, DRTG/Net rating recalculés.
+  const allowed = {};
+  Object.entries(data.allowed || {}).forEach(([n, v]) => { allowed[normTag(n)] = v; });
+  const teams = parseClassicScoutingFile(buf).teams;
+  teams.forEach(t => {
+    const v = allowed[normTag(t.name)];
+    if (typeof v === "number" && !isNaN(v)) t.stats = withAllowedDerived({ ...t.stats, ptse: v });
+  });
+  return teams;
 }
 
 // Logos des clubs : lus sur la FFBB (fonction Netlify ffbb-nm1-logos), convertis du SVG en PNG,
@@ -13159,7 +13177,7 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
         for (const t of teams) {
           const existingName = byNorm[normTag(t.name)];
           if (!existingName) continue;
-          await scouting.saveTeam(existingName, { ...scouting.teams[existingName].stats, ...t.stats }, "excel");
+          await scouting.saveTeam(existingName, withAllowedDerived({ ...scouting.teams[existingName].stats, ...t.stats }), "excel");
         }
         try { await applyFfbbLogos(Object.keys(scouting.teams), scouting.saveLogo); } catch { /* idem : sans conséquence */ }
         await storeSet("ffbb_last_sync", Date.now());
@@ -13178,7 +13196,8 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
       // pour cette équipe (même nom) plutôt que de les écraser — pour "Classic", ça préserve
       // en particulier les "Points allowed" saisis à la main lors d'un précédent import.
       const existing = scouting.teams[t.name];
-      const mergedStats = existing && (pending.kind === "excel-def" || pending.kind === "excel-classic") ? { ...existing.stats, ...t.stats } : t.stats;
+      let mergedStats = existing && (pending.kind === "excel-def" || pending.kind === "excel-classic") ? { ...existing.stats, ...t.stats } : t.stats;
+      if (pending.kind === "excel-classic") mergedStats = withAllowedDerived(mergedStats); // DRTG/Net rating cohérents avec les points encaissés
       await scouting.saveTeam(t.name, mergedStats, pending.kind.startsWith("excel") ? "excel" : "photo");
     }
     if (ffbbPendingRef.current) {
