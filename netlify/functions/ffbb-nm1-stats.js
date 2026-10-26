@@ -38,16 +38,36 @@ export function parseNm1Table(html) {
   return { headers, rows };
 }
 
+// Points encaissés par match de chaque équipe, lus dans le classement officiel
+// (https://nm1.ffbb.com/saison-reguliere/classement — un tableau par poule) : { "Nom équipe": moyenne }.
+// Colonnes : Position, Equipe, Points, MJ, V, D, Pts marqués (total/moy), Pts encaissés (total/moy), Différence.
+export function parseStandingsAllowed(html) {
+  const out = {};
+  for (const tr of html.matchAll(/<tr[^>]*>([\s\S]*?)<\/tr>/gi)) {
+    const cells = [...tr[1].matchAll(/<td[^>]*>([\s\S]*?)<\/td>/gi)].map(m => cellText(m[1]));
+    if (cells.length < 10) continue;
+    const avg = parseFloat(String(cells[9]).replace(",", "."));
+    if (cells[1] && !isNaN(avg)) out[cells[1]] = avg;
+  }
+  return out;
+}
+
 export const handler = async (event) => {
   const season = String((event.queryStringParameters && event.queryStringParameters.season) || "2026").replace(/[^0-9]/g, "") || "2026";
   try {
     const res = await fetch(BASE + season, { headers: { "User-Agent": "HoopTrack/1.0 (team stats sync)", "Accept": "text/html" } });
     if (!res.ok) return { statusCode: 502, body: JSON.stringify({ error: "NM1 site answered " + res.status }) };
     const { headers, rows } = parseNm1Table(await res.text());
+    // Points encaissés (classement) : un bonus — s'il échoue, le reste de la synchro fonctionne quand même.
+    let allowed = {};
+    try {
+      const cres = await fetch("https://nm1.ffbb.com/saison-reguliere/classement", { headers: { "User-Agent": "HoopTrack/1.0 (team stats sync)", "Accept": "text/html" } });
+      if (cres.ok) allowed = parseStandingsAllowed(await cres.text());
+    } catch { allowed = {}; }
     return {
       statusCode: 200,
       headers: { "Content-Type": "application/json", "Cache-Control": "public, max-age=300, s-maxage=1800" },
-      body: JSON.stringify({ season, fetchedAt: new Date().toISOString(), headers, rows }),
+      body: JSON.stringify({ season, fetchedAt: new Date().toISOString(), headers, rows, allowed }),
     };
   } catch (e) {
     return { statusCode: 502, body: JSON.stringify({ error: String(e.message || e) }) };
