@@ -11425,6 +11425,45 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
   // par le coach et enregistrée pour toute l'équipe — demandé par l'utilisateur.
   const { layout: scoutingLayout, save: saveScoutingLayout, resetShape: resetScoutingShape } = useScoutingLayout();
   const [editingLayoutFor, setEditingLayoutFor] = useState(null); // id du joueur en cours d'édition de mise en page, ou null
+  // Synchro de l'effectif depuis le site FFBB NM1 : joueur déjà créé (même nom) -> SEULE la photo
+  // est remplacée (si le site en a une) ; joueur absent -> fiche créée (nom, numéro, taille, poste,
+  // photo) avec notes/plan/main forte vides pour que le coach les complète.
+  const [rosterMsg, setRosterMsg] = useState("");
+  const [rosterBusy, setRosterBusy] = useState(false);
+  async function syncFfbbRoster() {
+    if (!selectedTeam || rosterBusy) return;
+    setRosterBusy(true); setRosterMsg("Syncing…");
+    try {
+      const res = await fetch("/.netlify/functions/ffbb-nm1-roster?team=" + encodeURIComponent(selectedTeam));
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "FFBB roster unavailable (" + res.status + ").");
+      const key = s => String(s).split(/\s+/).filter(Boolean).map(normTag).sort().join("|");
+      const byKey = {};
+      report.players.forEach(p => { byKey[key((p.firstName || "") + " " + (p.lastName || ""))] = p; });
+      let added = 0, photos = 0;
+      for (const fp of data.players || []) {
+        let photo = null;
+        if (fp.photo) {
+          try { photo = await fileToResizedDataURL(await (await fetch(fp.photo)).blob(), 300, 0.85); } catch { photo = null; }
+        }
+        const existing = byKey[key(fp.name)];
+        if (existing) {
+          if (photo) { await report.savePlayer({ ...existing, photo }); photos++; }
+        } else {
+          const parts = fp.name.split(/\s+/);
+          await report.savePlayer({
+            firstName: parts[0] || "", lastName: parts.slice(1).join(" "), jersey: fp.jersey || "", position: fp.position || "",
+            plan: "", closeOut: "medium", height: fp.height || "", handedness: "",
+            ratings: Object.fromEntries(SKILL_CATEGORIES.map(c => [c, 3])), highlights: [], photo,
+          });
+          added++;
+        }
+      }
+      setRosterMsg(added + " player" + (added === 1 ? "" : "s") + " added, " + photos + " photo" + (photos === 1 ? "" : "s") + " updated.");
+    } catch (err) { setRosterMsg(err.message || "FFBB sync failed."); }
+    setRosterBusy(false);
+  }
+
   async function handleLogoUpload(e) {
     const file = e.target.files[0];
     if (!file || !selectedTeam) return;
@@ -11484,9 +11523,15 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
             <div>
               <div className="screen-only" style={{ display: "flex", gap: 10, marginBottom: 20, flexWrap: "wrap", justifyContent: "space-between", alignItems: "center" }}>
                 {isCoach && !editing ? (
-                  <button onClick={() => setEditing("new")} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: AMBER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
-                    <Plus size={14} /> Add a player
-                  </button>
+                  <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+                    <button onClick={() => setEditing("new")} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: AMBER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+                      <Plus size={14} /> Add a player
+                    </button>
+                    <button onClick={syncFfbbRoster} disabled={rosterBusy} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: AMBER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", opacity: rosterBusy ? 0.6 : 1 }}>
+                      <RefreshCw size={14} /> Sync roster (FFBB)
+                    </button>
+                    {rosterMsg && <span style={{ fontSize: 12, color: "#8B93A1" }}>{rosterMsg}</span>}
+                  </div>
                 ) : <div />}
                 <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
                   {report.players.length > 0 && (
