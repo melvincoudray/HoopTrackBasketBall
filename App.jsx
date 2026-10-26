@@ -9723,7 +9723,22 @@ function useScoutingReport(teamName) {
     });
   }
 
-  return { collective, players, loading, saveCollective, savePlayer, deletePlayer, movePlayer };
+  // Trie les joueurs par poste croissant (1, 1-2, 2, 2-3 … 5) et enregistre cet ordre ; les joueurs
+  // sans poste vont à la fin, et à poste égal l'ordre actuel est conservé.
+  async function sortPlayersByPosition() {
+    const posValue = p => {
+      const parts = String(p.position || "").split("-").map(Number).filter(n => !isNaN(n) && n > 0);
+      return parts.length ? parts.reduce((a, b) => a + b, 0) / parts.length : 99;
+    };
+    const ids = (await storeGet("scouting_players:" + teamName)) || [];
+    const byId = Object.fromEntries(players.map(p => [p.id, p]));
+    const next = ids.map((id, i) => ({ id, i, v: byId[id] ? posValue(byId[id]) : 99 }))
+      .sort((a, b) => a.v - b.v || a.i - b.i).map(x => x.id);
+    await storeSet("scouting_players:" + teamName, next);
+    setPlayers(next.map(id => byId[id]).filter(Boolean));
+  }
+
+  return { collective, players, loading, saveCollective, savePlayer, deletePlayer, movePlayer, sortPlayersByPosition };
 }
 
 function embedUrl(url) {
@@ -11545,6 +11560,11 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
                     <button onClick={() => setEditing("new")} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: AMBER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
                       <Plus size={14} /> Add a player
                     </button>
+                    {report.players.length > 1 && (
+                      <button onClick={report.sortPlayersByPosition} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: AMBER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
+                        <TrendingUp size={14} /> Sort by position
+                      </button>
+                    )}
                     <button onClick={syncFfbbRoster} disabled={rosterBusy} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: AMBER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit", opacity: rosterBusy ? 0.6 : 1 }}>
                       <RefreshCw size={14} /> Sync roster (FFBB)
                     </button>
