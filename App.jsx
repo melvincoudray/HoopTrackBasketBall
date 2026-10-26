@@ -11979,11 +11979,38 @@ function useObservationPlayerTagMap(teamName) {
   return { map, setTag };
 }
 
+// Récupère (et enregistre dans la fiche) les stats FFBB d'un joueur quand elles manquent —
+// évite d'avoir à relancer "Sync roster (FFBB)" à la main. Mêmes calculs avancés que la synchro.
+async function loadFfbbStatsForPlayer(observedTeamName, player, canSave) {
+  const teamNames = (await storeGet("scouting_teams")) || [];
+  const match = teamNames.find(n => normTag(n) === normTag(observedTeamName));
+  if (!match) throw new Error("This team isn't in your Scouting list.");
+  const res = await fetch("/.netlify/functions/ffbb-nm1-roster?team=" + encodeURIComponent(match));
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "FFBB roster unavailable (" + res.status + ").");
+  const key = s => String(s).split(/\s+/).filter(Boolean).map(normTag).sort().join("|");
+  const fp = (data.players || []).find(p => key(p.name) === key((player.firstName || "") + " " + (player.lastName || "")));
+  if (!fp) throw new Error("This player wasn't found in the FFBB roster of " + match + ".");
+  if (!("stats" in fp)) throw new Error("The Netlify function ffbb-nm1-roster.js is out of date — replace it with the latest version on GitHub.");
+  if (!fp.stats) throw new Error("The FFBB has no stats for this player yet this season.");
+  const ts = ((await storeGet("scouting:" + match)) || {}).stats;
+  const teamPoss = ts && ts.t2 != null && ts.t3 != null && ts.lft != null && ts.bp != null ? (ts.t2 + ts.t3) - (ts.ro || 0) + ts.bp + 0.44 * ts.lft : null;
+  let st = fp.stats;
+  if (teamPoss && st.min > 0 && st.tov != null && st.t2 != null && st.t3 != null && st.lft != null) {
+    const ended = st.t2 + st.t3 + st.tov + 0.44 * st.lft;
+    const theo = (st.min / 40) * teamPoss;
+    if (theo > 0) st = { ...st, theoPoss: theo, usage: (100 * ended) / theo };
+  }
+  if (canSave) await storeSet("scouting_player:" + match + ":" + player.id, { ...player, ffbbId: fp.ffbbId, ffbbStats: st });
+  return st;
+}
+
 // Blocs "Box Score" d'un joueur adverse, à partir des moyennes de saison lues sur le site FFBB NM1
 // (enregistrées dans sa fiche par "Sync roster (FFBB)"). Mêmes encadrés, même ordre que le Box
 // Score de nos joueurs ; ceux que la FFBB ne fournit pas (+/-, fautes, usage…) sont omis.
-function FfbbBoxScoreTiles({ stats }) {
-  if (!stats) return <EmptyState text="No FFBB stats for this player yet (no game played, or not synced) — use 'Sync roster (FFBB)' in Scouting Report → Individual." />;
+function FfbbBoxScoreTiles({ stats, loading, error }) {
+  if (loading) return <EmptyState text="Loading FFBB stats…" />;
+  if (!stats) return <EmptyState text={error || "No FFBB stats for this player yet."} />;
   const f1 = v => (v === null || v === undefined ? "–" : Number(v).toFixed(1));
   const pct = (m, a) => (a > 0 ? (100 * m / a).toFixed(1) + "%" : "–");
   const sub = "average / game";
@@ -12029,6 +12056,16 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
   const [openPlayer, setOpenPlayer] = useState(null);
   const [showConfirm, setShowConfirm] = useState(false);
   const { map: tagMap, setTag: setTagDecision } = useObservationPlayerTagMap(teamName);
+  // Stats FFBB chargées à l'ouverture si la fiche n'en a pas encore : { [idJoueur]: stats | "loading" | "error:..." }
+  const [ffbbLive, setFfbbLive] = useState({});
+  useEffect(() => {
+    if (!openPlayer || openPlayer.ffbbStats || ffbbLive[openPlayer.id] !== undefined) return;
+    const pid = openPlayer.id;
+    setFfbbLive(m => ({ ...m, [pid]: "loading" }));
+    loadFfbbStatsForPlayer(teamName, openPlayer, isCoach)
+      .then(st => setFfbbLive(m => ({ ...m, [pid]: st })))
+      .catch(e => setFfbbLive(m => ({ ...m, [pid]: "error:" + (e.message || "FFBB stats unavailable.") })));
+  }, [openPlayer]);
 
   const allTags = useMemo(() => {
     const set = new Set();
@@ -12108,7 +12145,7 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
                 <div style={{ fontSize: 17, fontWeight: 800, color: PAPER }}>{[openPlayer.firstName, openPlayer.lastName].filter(Boolean).join(" ")}{openPlayer.jersey ? ` #${openPlayer.jersey}` : ""}</div>
                 <button onClick={() => setOpenPlayer(null)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer" }}><X size={20} /></button>
               </div>
-              <FfbbBoxScoreTiles stats={openPlayer.ffbbStats} />
+              {(() => { const live = ffbbLive[openPlayer.id]; const stats = openPlayer.ffbbStats || (live && typeof live === "object" ? live : null); return <FfbbBoxScoreTiles stats={stats} loading={!stats && (live === "loading" || live === undefined)} error={typeof live === "string" && live.startsWith("error:") ? live.slice(6) : ""} />; })()}
               {playerOff.length + playerDef.length > 0
                 ? <OffenseDefenseBreakdown off={playerOff} def={playerDef} categories={categories} enableClipExport clipGrouping={clipGrouping} />
                 : <EmptyState text="No tagged action for this player in the observation yet." />}
