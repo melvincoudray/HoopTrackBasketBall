@@ -42,7 +42,9 @@ export function parseRoster(html) {
   const seen = new Set();
   const out = [];
   for (const it of items) {
-    const href = (it.match(/href="[^"]*\/joueur\/(\d+)-[^"]*"/) || [])[1];
+    const hm0 = it.match(/href="[^"]*\/joueur\/((\d+)-[^"\/?#]*)"/);
+    const href = hm0 ? hm0[2] : "";
+    const slug = hm0 ? hm0[1] : "";
     if (!href || seen.has(href)) continue;
     seen.add(href);
     const name = decodeEntities((it.match(/<h3[^>]*>([\s\S]*?)<\/h3>/) || [])[1] || "").replace(/\s+/g, " ").trim();
@@ -52,7 +54,7 @@ export function parseRoster(html) {
     const position = (it.match(/Poste\s*:\s*([\d-]+)/i) || [])[1] || "";
     const birth = (it.match(/<p>\s*(\d{2}\/\d{2}\/\d{2,4})\s*<\/p>/) || [])[1] || "";
     const photoUrl = (it.match(/<img[^>]*src="([^"]+)"/) || [])[1] || "";
-    if (name) out.push({ ffbbId: href, name, jersey, height, position, birth, photoUrl });
+    if (name) out.push({ ffbbId: href, slug, name, jersey, height, position, birth, photoUrl });
   }
   return out;
 }
@@ -77,9 +79,9 @@ export function parsePlayerSeason(html, teamName, seasonLabel) {
   return null;
 }
 
-async function getPlayerStats(ffbbId, teamName, seasonLabel) {
+async function getPlayerStats(slug, teamName, seasonLabel) {
   try {
-    const r = await fetch(ROOT + "/saison-reguliere/joueur/" + ffbbId, { headers: UA });
+    const r = await fetch(ROOT + "/saison-reguliere/joueur/" + slug, { headers: UA });
     if (!r.ok) return null;
     return parsePlayerSeason(await r.text(), teamName, seasonLabel);
   } catch { return null; }
@@ -116,8 +118,8 @@ export const handler = async (event) => {
     const yy = Number(season);
     const seasonLabel = String(yy % 100).padStart(2, "0") + "-" + String((yy + 1) % 100).padStart(2, "0");
     await Promise.all(players.map(async p => {
-      const [photo, stats] = await Promise.all([getPhoto(p.photoUrl), getPlayerStats(p.ffbbId, link.name, seasonLabel)]);
-      p.photo = photo; p.stats = stats; delete p.photoUrl;
+      const [photo, stats] = await Promise.all([getPhoto(p.photoUrl), getPlayerStats(p.slug, link.name, seasonLabel)]);
+      p.photo = photo; p.stats = stats; delete p.photoUrl; delete p.slug;
     }));
     return {
       statusCode: 200,
