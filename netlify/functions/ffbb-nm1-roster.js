@@ -87,6 +87,29 @@ async function getPlayerStats(slug, teamName, seasonLabel) {
   } catch { return null; }
 }
 
+// Largeur d'une image à partir de son en-tête (PNG, JPEG, WebP, GIF) ; null si format inconnu (ex. SVG).
+function imageWidth(buf) {
+  if (buf.length > 24 && buf.readUInt32BE(0) === 0x89504e47) return buf.readUInt32BE(16);
+  if (buf.length > 10 && buf.toString("ascii", 0, 3) === "GIF") return buf.readUInt16LE(6);
+  if (buf.length > 30 && buf.toString("ascii", 0, 4) === "RIFF" && buf.toString("ascii", 8, 12) === "WEBP") {
+    const t = buf.toString("ascii", 12, 16);
+    if (t === "VP8X") return 1 + buf.readUIntLE(24, 3);
+    if (t === "VP8 ") return buf.readUInt16LE(26) & 0x3fff;
+    if (t === "VP8L") return 1 + (((buf[22] & 0x3f) << 8) | buf[21]);
+    return null;
+  }
+  if (buf.length > 4 && buf[0] === 0xff && buf[1] === 0xd8) {
+    let i = 2;
+    while (i + 9 < buf.length) {
+      if (buf[i] !== 0xff) { i++; continue; }
+      const m = buf[i + 1];
+      if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) return buf.readUInt16BE(i + 7);
+      i += 2 + buf.readUInt16BE(i + 2);
+    }
+  }
+  return null;
+}
+
 async function getPhoto(url) {
   if (!/^https:\/\/www\.proballers\.com\//.test(url || "")) return null;
   try {
@@ -96,9 +119,11 @@ async function getPhoto(url) {
     if (!type.startsWith("image/")) return null;
     const buf = Buffer.from(await r.arrayBuffer());
     if (buf.length < 500) return null;
-    // Sans vraie photo, le site renvoie une image par défaut de 150 px (les vraies font 300 px) :
-    // on la repère par la largeur écrite dans l'en-tête PNG et on l'ignore.
-    if (buf.readUInt32BE(0) === 0x89504e47 && buf.readUInt32BE(16) < 300) return null;
+    // Sans vraie photo, le site renvoie une silhouette de 150 px (les vraies photos font 300 px).
+    // On n'accepte que les images dont la largeur est lue et vaut au moins 300 px : tout le reste
+    // (silhouette, SVG, format inconnu) est ignoré, pour ne jamais écraser une photo existante.
+    const w = imageWidth(buf);
+    if (!w || w < 300) return null;
     return "data:" + type + ";base64," + buf.toString("base64");
   } catch { return null; }
 }
