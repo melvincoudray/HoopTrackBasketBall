@@ -269,16 +269,24 @@ async function exportScoutingPdf(containerId, filename, title) {
           if (data.length > 2000) roseImgs[idx] = { w, pad, data }; // sinon (canvas refusé par le navigateur) : on garde la roue SVG d'origine
         } catch { /* on garde le SVG d'origine */ }
       }
-      const canvas = await html2canvas(card, { backgroundColor: "#ffffff", scale: Math.min(2, 1400 / cssW), useCORS: true, logging: false,
-        onclone: (doc) => {
-          doc.querySelectorAll("svg[data-rose-i]").forEach((sv) => {
-            const r = roseImgs[sv.getAttribute("data-rose-i")]; if (!r) return;
-            const box = doc.createElement("div"); box.style.cssText = `position:relative;flex-shrink:0;width:${r.w}px;height:${r.w}px`;
-            const im = doc.createElement("img"); im.src = r.data;
-            im.style.cssText = `position:absolute;left:${-r.pad}px;top:${-r.pad}px;width:${r.w + 2 * r.pad}px;height:${r.w + 2 * r.pad}px;max-width:none`;
-            box.appendChild(im); sv.replaceWith(box);
-          });
-        } });
+      // Remplacement fait directement dans la page (zone d'impression hors écran) puis annulé juste après la capture :
+      // l'image est ainsi déjà chargée quand html2canvas la lit.
+      const swaps = [];
+      for (const [idx, sv] of roseSvgs.entries()) {
+        const r = roseImgs[idx]; if (!r || !sv.parentNode) continue;
+        const box = document.createElement("div"); box.style.cssText = `position:relative;flex-shrink:0;width:${r.w}px;height:${r.w}px`;
+        const im = document.createElement("img"); im.src = r.data;
+        im.style.cssText = `position:absolute;left:${-r.pad}px;top:${-r.pad}px;width:${r.w + 2 * r.pad}px;height:${r.w + 2 * r.pad}px;max-width:none;max-height:none;min-width:0;display:block`;
+        box.appendChild(im);
+        try { await im.decode(); } catch { continue; } // image illisible : on garde la roue SVG d'origine
+        sv.parentNode.insertBefore(box, sv); sv.style.display = "none"; swaps.push({ box, sv });
+      }
+      let canvas;
+      try {
+        canvas = await html2canvas(card, { backgroundColor: "#ffffff", scale: Math.min(2, 1400 / cssW), useCORS: true, logging: false });
+      } finally {
+        swaps.forEach(({ box, sv }) => { box.remove(); sv.style.display = ""; });
+      }
       shots.push({ img: canvas.toDataURL("image/jpeg", 0.82), ratio: canvas.height / canvas.width });
     }
     // 2 fiches par page, TOUTES à la même largeur : celle qui permet à la fiche la plus haute de
