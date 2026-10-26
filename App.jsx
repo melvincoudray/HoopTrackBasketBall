@@ -246,19 +246,24 @@ async function exportScoutingPdf(containerId, filename, title) {
     const pdf = new jsPDF({ unit: "pt", format: "a4", orientation: "portrait", compress: true });
     const pageW = 595.28, pageH = 841.89, margin = 24, gap = 14;
     const usableW = pageW - 2 * margin;
+    // 1re passe : capture de chaque fiche (largeur cible ≈ 1400 px, assez net et léger).
+    const shots = [];
+    for (const card of cards) {
+      const cssW = card.getBoundingClientRect().width || 1;
+      const canvas = await html2canvas(card, { backgroundColor: "#ffffff", scale: Math.min(2, 1400 / cssW), useCORS: true, logging: false });
+      shots.push({ img: canvas.toDataURL("image/jpeg", 0.82), ratio: canvas.height / canvas.width });
+    }
+    // 2 fiches par page, TOUTES à la même largeur : celle qui permet à la fiche la plus haute de
+    // tenir (la place du titre est réservée sur chaque page).
+    const maxH = (pageH - 2 * margin - 28 - gap) / 2;
+    const w = Math.min(usableW, maxH / Math.max(...shots.map(s => s.ratio)));
     let y = margin, onPage = 0;
     pdf.setFontSize(13); pdf.setTextColor(26, 29, 36);
     pdf.text(title, margin, y + 10); y += 28;
-    for (const card of cards) {
-      const canvas = await html2canvas(card, { backgroundColor: "#ffffff", scale: 1.6, useCORS: true, logging: false });
-      const img = canvas.toDataURL("image/jpeg", 0.82);
-      let w = usableW, h = (canvas.height * w) / canvas.width;
-      // 2 fiches par page, toutes de la même taille maximale (la place du titre est réservée
-      // sur chaque page) : une fiche un peu trop haute est réduite pour que la paire tienne.
-      const maxH = (pageH - 2 * margin - 28 - gap) / 2;
-      if (h > maxH) { w = (w * maxH) / h; h = maxH; }
+    for (const sh of shots) {
+      const h = sh.ratio * w;
       if (onPage >= 2) { pdf.addPage(); y = margin; onPage = 0; }
-      pdf.addImage(img, "JPEG", margin + (usableW - w) / 2, y, w, h);
+      pdf.addImage(sh.img, "JPEG", margin + (usableW - w) / 2, y, w, h);
       y += h + gap; onPage++;
     }
     pdf.save(filename.replace(/\.html$/, ".pdf"));
@@ -10250,7 +10255,10 @@ function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, t
   // l'export, pour tenir à 2 joueurs par page A4 portrait — 380px, déjà vérifié ; responsive à
   // l'écran, via une largeur CSS à 100%).
   const L = layout || DEFAULT_SCOUTING_LAYOUT;
-  const cardWidthPx = printMode ? 720 : fitWidthPx ? Math.round(fitWidthPx) : Math.round(640 * Math.max(0.75, Math.min(1.8, chartScale ?? 1)) * (SCOUTING_LAYOUT_REF_W / 500));
+  // L'export (printMode) utilise EXACTEMENT la même géométrie que l'écran (même largeur de référence,
+  // même échelle "Display") : la roue et ses libellés ont une marge fixe en pixels, donc une carte
+  // plus petite que celle de l'écran donnait une roue minuscule et des textes disproportionnés.
+  const cardWidthPx = fitWidthPx ? Math.round(fitWidthPx) : Math.round(640 * Math.max(0.75, Math.min(1.8, chartScale ?? 1)) * (SCOUTING_LAYOUT_REF_W / 500));
   const scaleFactor = cardWidthPx / SCOUTING_LAYOUT_REF_W; // pour mettre à l'échelle les tailles de police et la roue
   // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "Game Plan" coupait la 3ᵉ ligne dès que le
   // texte dépassait la hauteur fixe prévue) : demandé — que la carte s'adapte réellement, au
@@ -10311,17 +10319,15 @@ function ScoutingPlayerCard({ player, isCoach, bgPhoto, bgDarkness, bgStretch, t
     <div data-no-split="true" style={{
       position: "relative",
       color: PAPER, // l'export place la fiche dans un conteneur à texte sombre : sans ça "Close Out :" devenait illisible
-      background: bgPhoto
-        ? `linear-gradient(rgba(22,27,34,${darkness}), rgba(22,27,34,${darkness})), url(${bgPhoto})`
-        : PANEL,
-      // "100% 100%" (au lieu de "cover") étire la photo pour remplir tout le cadre sans jamais
-      // la couper ni la répéter en mosaïque — quitte à légèrement déformer l'image si ses
-      // proportions ne correspondent pas exactement à celles du cadre.
-      backgroundSize: stretch ? "100% 100%" : "cover", backgroundPosition: "center", backgroundRepeat: "no-repeat",
+      background: PANEL,
       border: `1px solid ${LINE}`, borderRadius: 14, marginBottom: 14,
       width: printMode ? cardWidthPx : "100%",
       aspectRatio: `${SCOUTING_LAYOUT_REF_W} / ${SCOUTING_LAYOUT_REF_H + extraYpx / scaleFactor}`, overflow: "hidden",
     }}>
+      {/* Photo de fond + voile sombre en calques (et non en background CSS multiple, que l'export PDF
+          rendait de travers : image répétée/décalée). Étirée (fill) ou recadrée (cover) selon le réglage. */}
+      {bgPhoto && <img src={bgPhoto} alt="" style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", objectFit: stretch ? "fill" : "cover" }} />}
+      {bgPhoto && <div style={{ position: "absolute", top: 0, left: 0, width: "100%", height: "100%", background: `rgba(22,27,34,${darkness})` }} />}
       {/* Logo de l'équipe scoutée, à l'intérieur du cadre de la fiche (pas en dehors, sur le
           document partagé) — demandé par l'utilisateur. */}
       {teamLogo && <img src={teamLogo} alt="" style={{ ...shapeStyle("logo"), borderRadius: 6, objectFit: "cover" }} />}
@@ -11713,7 +11719,7 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
                     <h1 style={{ fontSize: 18, marginBottom: 8 }}>Scouting individuel — {selectedTeam}</h1>
                     {report.players.map((p, i) => (
                       <div key={p.id} data-new-page={i % 2 === 0 ? "true" : undefined} style={{ marginBottom: 0, pageBreakInside: "avoid", pageBreakBefore: i % 2 === 0 ? "always" : "auto" }}>
-                        <ScoutingPlayerCard player={p} isCoach={false} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness} bgStretch={teamBg?.stretch} teamLogo={teamLogo} layout={scoutingLayout} onEdit={() => {}} onDelete={() => {}} printMode />
+                        <ScoutingPlayerCard player={p} isCoach={false} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness} bgStretch={teamBg?.stretch} teamLogo={teamLogo} chartScale={displaySettings?.chartScale} layout={scoutingLayout} onEdit={() => {}} onDelete={() => {}} printMode />
                       </div>
                     ))}
                   </div>
