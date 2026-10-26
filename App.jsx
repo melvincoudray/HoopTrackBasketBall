@@ -11441,7 +11441,6 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
       const res = await fetch("/.netlify/functions/ffbb-nm1-roster?team=" + encodeURIComponent(selectedTeam));
       const data = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(data.error || "FFBB roster unavailable (" + res.status + ").");
-      const key = s => String(s).split(/\s+/).filter(Boolean).map(normTag).sort().join("|");
       // Possessions théoriques et % Usage : même méthode que le Box Score de nos joueurs, calculées
       // ici car la FFBB ne les donne pas. Possessions d'équipe par match (FGA - OREB + TOV + 0.44 FTA,
       // d'après le tableau des stats de l'équipe), match de 40 min ; possessions terminées du joueur =
@@ -11454,15 +11453,13 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
         const theo = (st.min / 40) * teamPoss;
         return theo > 0 ? { ...st, theoPoss: theo, usage: (100 * ended) / theo } : st;
       };
-      const byKey = {};
-      report.players.forEach(p => { byKey[key((p.firstName || "") + " " + (p.lastName || ""))] = p; });
       let added = 0, photos = 0;
       for (const fp of data.players || []) {
         let photo = null;
         if (fp.photo) {
           try { photo = await fileToResizedDataURL(await (await fetch(fp.photo)).blob(), 300, 0.85); } catch { photo = null; }
         }
-        const existing = byKey[key(fp.name)];
+        const existing = report.players.find(p => ffbbSamePerson(p, fp));
         if (existing) {
           // Seules la photo (si la FFBB en a une) et les stats FFBB changent ; le reste de la fiche est intact.
           await report.savePlayer({ ...existing, ...(photo ? { photo } : {}), ffbbId: fp.ffbbId, ffbbStats: withAdvanced(fp.stats) || existing.ffbbStats || null });
@@ -11979,6 +11976,30 @@ function useObservationPlayerTagMap(teamName) {
   return { map, setTag };
 }
 
+// Rapprochement d'un joueur déjà créé avec un joueur de l'effectif FFBB, tolérant aux écarts
+// d'orthographe du prénom (ex. "Zion" / "Zyon") : même nom complet, OU même nom de famille avec
+// soit le même numéro de maillot, soit un prénom quasi identique (2 lettres d'écart au plus).
+function ffbbLevenshtein(a, b) {
+  const d = Array.from({ length: a.length + 1 }, (_, i) => [i, ...Array(b.length).fill(0)]);
+  for (let j = 1; j <= b.length; j++) d[0][j] = j;
+  for (let i = 1; i <= a.length; i++) for (let j = 1; j <= b.length; j++)
+    d[i][j] = Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1, d[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+  return d[a.length][b.length];
+}
+function ffbbSamePerson(player, fp) {
+  const key = s => String(s).split(/\s+/).filter(Boolean).map(normTag).sort().join("|");
+  if (key((player.firstName || "") + " " + (player.lastName || "")) === key(fp.name)) return true;
+  const toks = String(fp.name).split(/\s+/).filter(Boolean).map(normTag);
+  const last = normTag(player.lastName || "");
+  if (!last || !toks.length) return false;
+  const lastOk = toks.includes(last) || toks.slice(1).join("") === last || toks.join("").endsWith(last);
+  if (!lastOk) return false;
+  const sameJersey = !!player.jersey && !!fp.jersey && String(player.jersey).trim() === String(fp.jersey).trim();
+  const first = normTag(player.firstName || "");
+  const firstClose = !!first && !!toks[0] && (first === toks[0] || ffbbLevenshtein(first, toks[0]) <= 2);
+  return sameJersey || firstClose;
+}
+
 // Récupère (et enregistre dans la fiche) les stats FFBB d'un joueur quand elles manquent —
 // évite d'avoir à relancer "Sync roster (FFBB)" à la main. Mêmes calculs avancés que la synchro.
 async function loadFfbbStatsForPlayer(observedTeamName, player, canSave) {
@@ -11988,8 +12009,7 @@ async function loadFfbbStatsForPlayer(observedTeamName, player, canSave) {
   const res = await fetch("/.netlify/functions/ffbb-nm1-roster?team=" + encodeURIComponent(match));
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || "FFBB roster unavailable (" + res.status + ").");
-  const key = s => String(s).split(/\s+/).filter(Boolean).map(normTag).sort().join("|");
-  const fp = (data.players || []).find(p => key(p.name) === key((player.firstName || "") + " " + (player.lastName || "")));
+  const fp = (data.players || []).find(p => ffbbSamePerson(player, p));
   if (!fp) throw new Error("This player wasn't found in the FFBB roster of " + match + ".");
   if (!("stats" in fp)) throw new Error("The Netlify function ffbb-nm1-roster.js is out of date — replace it with the latest version on GitHub.");
   if (!fp.stats) throw new Error("The FFBB has no stats for this player yet this season.");
