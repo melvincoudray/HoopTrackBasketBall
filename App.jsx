@@ -2205,7 +2205,7 @@ async function loadSlideData(names, playerTeams, needMine) {
   const mine = needMine ? await loadMine() : null;
   return { teams, teamNames, obs, layout, logos, players, mine };
 }
-const EMPTY_SLIDE_DATA = { teams: {}, teamNames: [], obs: {}, layout: DEFAULT_SCOUTING_LAYOUT, logos: {}, players: {}, mine: null };
+const EMPTY_SLIDE_DATA = { teams: {}, teamNames: [], obs: {}, get layout() { return DEFAULT_SCOUTING_LAYOUT; }, logos: {}, players: {}, mine: null }; // getter : la constante est définie plus bas dans le fichier
 function slideDataNeeds(slides) {
   const names = new Set(), pteams = new Set();
   let mine = false;
@@ -2651,7 +2651,6 @@ async function renderSlidePng(slide, data, imgs) {
 }
 
 // --- Éditeur ---------------------------------------------------------------------------------------------------
-const sInp = { ...inputStyle, width: "100%", boxSizing: "border-box", letterSpacing: "normal", fontFamily: "inherit", fontSize: 13, padding: "7px 9px" };
 function SField({ label, children, w }) {
   return <div style={{ flex: w ? `0 0 ${w}px` : "1 1 0", minWidth: w ? 0 : 90 }}><label style={{ ...labelStyle, marginBottom: 3, fontSize: 10 }}>{label}</label>{children}</div>;
 }
@@ -6843,6 +6842,7 @@ function LoginScreen({ roster, onLogin }) {
 
 const btnRow = { display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", padding: "12px 14px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, fontSize: 14, cursor: "pointer", textAlign: "left", fontFamily: "inherit" };
 const inputStyle = { width: "100%", padding: "12px 14px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, fontSize: 16, letterSpacing: "0.2em", fontFamily: "ui-monospace, monospace", boxSizing: "border-box" };
+const sInp = { ...inputStyle, width: "100%", boxSizing: "border-box", letterSpacing: "normal", fontFamily: "inherit", fontSize: 13, padding: "7px 9px" };
 const btnPrimary = { flex: 1, padding: "11px 14px", background: AMBER, border: "none", borderRadius: 8, color: "#1A1300", fontWeight: 700, cursor: "pointer", fontSize: 14 };
 const btnSecondary = { padding: "11px 14px", background: "transparent", border: `1px solid ${LINE}`, borderRadius: 8, color: "#8B93A1", cursor: "pointer", fontSize: 14 };
 
