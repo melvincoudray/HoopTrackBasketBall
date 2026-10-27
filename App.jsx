@@ -2192,6 +2192,52 @@ function slideImageIds(slide) {
 }
 
 // --- Données liées : Scouting Comparison, Observation, logos, fiches joueurs -------------------------------
+// Logos "carrés" : certains logos (surtout ceux de la FFBB) arrivent sur un carré blanc alors que le club a un
+// logo rond. On retire le fond clair relié aux bords de l'image (les blancs à l'intérieur du logo restent),
+// puis on rogne les marges transparentes pour ne garder que le logo. Les logos au fond coloré ne sont pas touchés.
+const LOGO_CLEAN_CACHE = new Map();
+async function logoClean(url) {
+  if (!url || typeof url !== "string") return url;
+  if (LOGO_CLEAN_CACHE.has(url)) return LOGO_CLEAN_CACHE.get(url);
+  const out = await (async () => {
+    try {
+      const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
+      const k = Math.min(1, 500 / Math.max(img.naturalWidth, img.naturalHeight));
+      const W = Math.max(1, Math.round(img.naturalWidth * k)), H = Math.max(1, Math.round(img.naturalHeight * k));
+      const cv = document.createElement("canvas"); cv.width = W; cv.height = H;
+      const g = cv.getContext("2d", { willReadFrequently: true }); g.drawImage(img, 0, 0, W, H);
+      const im = g.getImageData(0, 0, W, H), d = im.data;
+      const px = (x, y) => (y * W + x) * 4;
+      const corners = [px(0, 0), px(W - 1, 0), px(0, H - 1), px(W - 1, H - 1)];
+      const isLightOpaque = (i) => d[i + 3] > 200 && d[i] > 225 && d[i + 1] > 225 && d[i + 2] > 225;
+      const isClear = (i) => d[i + 3] < 12;
+      if (corners.every(i => isLightOpaque(i) || isClear(i))) {
+        const seen = new Uint8Array(W * H), stack = [];
+        const push = (x, y) => { if (x < 0 || y < 0 || x >= W || y >= H) return; const p = y * W + x; if (seen[p]) return; const i = p * 4; if (isClear(i) || (d[i + 3] > 40 && d[i] > 205 && d[i + 1] > 205 && d[i + 2] > 205)) { seen[p] = 1; stack.push(p); } };
+        for (let x = 0; x < W; x++) { push(x, 0); push(x, H - 1); }
+        for (let y = 0; y < H; y++) { push(0, y); push(W - 1, y); }
+        while (stack.length) { const p = stack.pop(), x = p % W, y = (p - x) / W; push(x + 1, y); push(x - 1, y); push(x, y + 1); push(x, y - 1); }
+        for (let p = 0; p < W * H; p++) if (seen[p]) d[p * 4 + 3] = 0;
+        // liseré : pixels clairs semi-transparents collés au fond retiré -> atténués
+        for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
+          const p = y * W + x; if (seen[p]) continue;
+          if (seen[p - 1] || seen[p + 1] || seen[p - W] || seen[p + W]) { const i = p * 4; if (d[i] > 235 && d[i + 1] > 235 && d[i + 2] > 235) d[i + 3] = 0; }
+        }
+        g.putImageData(im, 0, 0);
+      }
+      let x0 = W, y0 = H, x1 = -1, y1 = -1;
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) if (d[px(x, y) + 3] > 12) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+      if (x1 < 0) return url;
+      const bw = x1 - x0 + 1, bh = y1 - y0 + 1;
+      if (bw >= W * 0.97 && bh >= H * 0.97 && !corners.some(isClear)) return url; // rien à retirer ni à rogner
+      const c2 = document.createElement("canvas"); c2.width = bw; c2.height = bh;
+      c2.getContext("2d").drawImage(cv, x0, y0, bw, bh, 0, 0, bw, bh);
+      return c2.toDataURL("image/png");
+    } catch (e) { return url; }
+  })();
+  LOGO_CLEAN_CACHE.set(url, out);
+  return out;
+}
 const SLIDE_PLAYER_CACHE = new Map();
 let SLIDE_FFBB_LOGOS = null;
 async function slideFfbbLogo(name) {
@@ -2231,7 +2277,7 @@ async function loadSlideData(names, playerTeams, needMine) {
   for (const n of names) {
     if (!n) continue;
     const key = teamNames.find(x => normTag(x) === normTag(n)) || teamNames.find(x => ffbbSameOpponent(x, n));
-    logos[n] = (key && teams[key]?.logo) || (await slideFfbbLogo(n));
+    logos[n] = await logoClean((key && teams[key]?.logo) || (await slideFfbbLogo(n)));
   }
   const players = {};
   for (const t of playerTeams) {
@@ -15169,7 +15215,7 @@ async function applyFfbbLogos(names, saveLogo) {
     if (!t) continue;
     const existing = await storeGet("scouting:" + name);
     if (existing && existing.logo) continue;
-    try { await saveLogo(name, await ffbbSvgToPng(t.logo)); added++; } catch { /* logo illisible : ignoré */ }
+    try { await saveLogo(name, await logoClean(await ffbbSvgToPng(t.logo))); added++; } catch { /* logo illisible : ignoré */ }
   }
   return added;
 }
