@@ -2042,11 +2042,52 @@ const slideKindLabel = (k) => { const x = SLIDE_KINDS.find(y => y.id === k) || S
 const SLIDE_FONT_CHOICES = ["Arial", "Georgia", "Impact", "Trebuchet MS", "Verdana", "Courier New", "Times New Roman", "Anton", "Bebas Neue", "Oswald", "Montserrat", "Playfair Display", "Roboto Condensed", "Teko"];
 const SLIDE_GFONTS_URL = "https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Montserrat:wght@400;700;800&family=Oswald:wght@400;700&family=Playfair+Display:wght@700&family=Roboto+Condensed:wght@400;700&family=Teko:wght@500;700&display=swap";
 function ensureSlideFonts() {
+  try { loadCustomSlideFonts(); } catch (e) { /* polices importées : sans conséquence */ }
   try {
     if (document.getElementById("slide-gfonts")) return;
     const l = document.createElement("link"); l.id = "slide-gfonts"; l.rel = "stylesheet"; l.href = SLIDE_GFONTS_URL;
     document.head.appendChild(l);
   } catch (e) { /* hors navigateur */ }
+}
+// Polices importées par le coach (.ttf / .otf / .woff / .woff2) : enregistrées (slide_fonts + slide_font:<id>),
+// déclarées au navigateur via FontFace, donc utilisables dans l'éditeur, le lecteur et l'export vidéo.
+const SLIDE_FONT_REGISTERED = new Set();
+async function loadCustomSlideFonts() {
+  let idx = [];
+  try { idx = (await storeGet("slide_fonts")) || []; } catch (e) { return []; }
+  for (const f of idx) {
+    if (SLIDE_FONT_REGISTERED.has(f.id)) continue;
+    try {
+      const data = await storeGet("slide_font:" + f.id);
+      if (!data) continue;
+      const ff = new FontFace(f.name, `url(${data})`, { weight: "100 900", style: "normal" });
+      await ff.load();
+      document.fonts.add(ff);
+      SLIDE_FONT_REGISTERED.add(f.id);
+    } catch (e) { /* police illisible : ignorée */ }
+  }
+  return idx;
+}
+async function slideFontUpload(file) {
+  if (!/\.(ttf|otf|woff2?)$/i.test(file.name)) throw new Error("Use a .ttf, .otf, .woff or .woff2 file.");
+  if (file.size > 3 * 1024 * 1024) throw new Error("Font too large (3 MB max).");
+  const data = await new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = () => rej(new Error("File unreadable.")); r.readAsDataURL(file); });
+  const idx = (await storeGet("slide_fonts")) || [];
+  let name = file.name.replace(/\.[^.]+$/, "").replace(/["'\\]/g, "").trim() || "Custom font";
+  if (SLIDE_FONT_CHOICES.includes(name) || idx.some(f => f.name === name)) name += " (custom)";
+  const id = uid();
+  const ff = new FontFace(name, `url(${data})`, { weight: "100 900", style: "normal" });
+  try { await ff.load(); } catch (e) { throw new Error("This file is not a valid font."); } // refuse un fichier qui n'est pas une vraie police
+  document.fonts.add(ff);
+  SLIDE_FONT_REGISTERED.add(id);
+  await storeSet("slide_font:" + id, data);
+  await storeSet("slide_fonts", [...idx, { id, name, addedAt: Date.now() }]);
+  return name;
+}
+async function slideFontDelete(id) {
+  const idx = (await storeGet("slide_fonts")) || [];
+  await storeSet("slide_fonts", idx.filter(f => f.id !== id));
+  await storeDelete("slide_font:" + id);
 }
 const SLIDE_LANG = {
   fr: { days: ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"], months: ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"], matchday: n => `Journée ${n}` },
@@ -2524,6 +2565,17 @@ function SlideElementView({ el, slide, data, imgs, editable }) {
     return <div style={{ width: "100%", height: "100%", backgroundImage: `url(${src})`, backgroundSize: "contain", backgroundRepeat: "no-repeat", backgroundPosition: "center", opacity: el.opacity ?? 1 }} />;
   }
   if (el.type === "image") {
+    // Slide "Play" : schéma dessiné dans Draw (playbook), affiché comme dans l'export PDF — fond blanc, traits noirs.
+    if (el.slot && !el.imageId && slide.ctx?.playbook?.frames) {
+      const si = (slide.elements || []).filter(e => e.slot).findIndex(e => e.id === el.id);
+      const fr = slide.ctx.playbook.frames[si];
+      if (fr) return (
+        <div style={{ width: "100%", height: "100%", boxSizing: "border-box", background: "#FFFFFF", borderRadius: el.radius ?? 14, padding: 10, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+          <svg viewBox={drawVB(fr)} preserveAspectRatio="xMidYMid meet" style={{ flex: 1, minHeight: 0, width: "100%", display: "block" }} dangerouslySetInnerHTML={{ __html: drawFrameSvg(fr, DRAW_PAL_PRINT) }} />
+          {fr.cap ? <div style={{ fontSize: Math.max(13, Math.min(22, el.h * 0.06)), color: "#000", fontFamily: "Arial, Helvetica, sans-serif", textAlign: "center", marginTop: 4, lineHeight: 1.15 }}>{fr.cap}</div> : null}
+        </div>
+      );
+    }
     const src = el.imageId ? imgs[el.imageId] : null;
     const frame = el.frame ? `${el.frameWidth ?? 3}px solid ${el.frameColor || "#FFFFFF"}` : "none";
     if (!src) return editable ? <div style={{ width: "100%", height: "100%", boxSizing: "border-box", border: "2px dashed #5C6470", borderRadius: el.radius ?? 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#8B93A1", fontSize: 20, fontFamily: "sans-serif", textAlign: "center" }}>{el.slot ? "Diagram — double-click to choose" : "Image — double-click to choose"}</div> : null;
@@ -2657,6 +2709,7 @@ async function renderSlidePng(slide, data, imgs) {
     root.render(<SlideCanvas slide={slide} data={data} imgs={imgs} />);
     const urls = [...Object.values(imgs || {}), ...Object.values(data.logos || {})].filter(Boolean);
     await Promise.all(urls.map(u => { const im = new Image(); im.src = u; return im.decode().catch(() => {}); }));
+    await loadCustomSlideFonts();
     const fonts = new Set((slide.elements || []).map(e => e.font || (e.type === "text" || e.type === "stat" ? "Oswald" : null)).filter(Boolean));
     if (document.fonts) {
       await Promise.all([...fonts].map(f => document.fonts.load(`700 40px "${f}"`).catch(() => {})));
@@ -2738,6 +2791,30 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
   const [msg, setMsg] = useState("");
   const [fetching, setFetching] = useState(false);
   const [saved, setSaved] = useState("");
+  const [drawPlays, setDrawPlays] = useState([]); // plays dessinés (Draw) : playbooks + plays envoyées au Staff de l'adversaire
+  useEffect(() => {
+    let off = false;
+    (async () => {
+      const out = [];
+      ((await storeGet("draw_playbooks")) || []).forEach(b => (b.plays || []).forEach(p => { if ((p.frames || []).length) out.push({ key: "b:" + b.id + ":" + p.id, book: b.name, name: p.name, group: p.group || "Plays", frames: p.frames }); }));
+      const opp = (slide.ctx || {}).opponent;
+      if (opp) ((await storeGet("draw_staff:" + opp)) || []).forEach(p => { if ((p.frames || []).length) out.push({ key: "s:" + opp + ":" + p.id, book: "Staff — " + opp, name: p.name, group: p.group || "Plays", frames: p.frames }); });
+      if (!off) setDrawPlays(out);
+    })();
+    return () => { off = true; };
+  }, [(slide.ctx || {}).opponent]);
+  const [customFonts, setCustomFonts] = useState([]);
+  const [fontMsg, setFontMsg] = useState("");
+  const refreshFonts = async () => setCustomFonts(await loadCustomSlideFonts());
+  useEffect(() => { refreshFonts(); }, []);
+  const fontChoices = [...SLIDE_FONT_CHOICES, ...customFonts.map(f => f.name)];
+  async function importFont(e) {
+    const file = e.target.files && e.target.files[0]; e.target.value = "";
+    if (!file) return;
+    setFontMsg("Importing…");
+    try { const name = await slideFontUpload(file); await refreshFonts(); setFontMsg("Imported: " + name + " (now in every Font list)."); }
+    catch (x) { setFontMsg(x.message || "Font import failed."); }
+  }
   const c = slide.ctx || {};
   const els = slide.elements || [];
   const sel = els.find(e => e.id === selId) || null;
@@ -2776,7 +2853,15 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
   async function setDiagrams(n) {
     onChange({ ctx: { ...c, diagrams: n }, elements: applyDiagramLayout(els, n) });
   }
+  // Choisit un play dessiné : ses diagrammes (images du playbook) remplissent les emplacements, 4 maximum.
+  function playbookPatch(e) {
+    if (!e) return { ctx: { ...c, playbook: undefined }, elements: els };
+    const n = Math.max(1, Math.min(4, e.frames.length));
+    return { ctx: { ...c, playbook: { key: e.key, name: e.name, frames: e.frames }, diagrams: n, play: c.play || e.name }, elements: applyDiagramLayout(els, n).map(x => (x.slot ? { ...x, imageId: null } : x)) };
+  }
+  const pickDrawPlay = (key) => onChange(playbookPatch(drawPlays.find(x => x.key === key) || null));
   async function pickPlay(tag) {
+    if (!c.playbook) { const hit = drawPlays.find(x => normTag(x.name) === normTag(tag)); if (hit) { onChange({ ...playbookPatch(hit), ctx: { ...playbookPatch(hit).ctx, play: tag } }); return; } }
     const mem = ((await storeGet("play_diagrams")) || {})[normTag(tag)] || [];
     const slots = els.filter(e => e.slot);
     let next = els;
@@ -2834,6 +2919,19 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
             <button onClick={resetLayout} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 8, color: "#8B93A1", padding: "7px 12px", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>Reset layout</button>
             <button onClick={onClose} style={{ ...btnPrimary, flex: "none", padding: "7px 16px", fontSize: 13 }}>Done</button>
           </div>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10, fontSize: 12 }}>
+          <label style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, padding: "6px 12px", cursor: "pointer", fontSize: 12.5 }}>
+            Import a font (.ttf, .otf, .woff, .woff2)
+            <input type="file" accept=".ttf,.otf,.woff,.woff2" onChange={importFont} style={{ display: "none" }} />
+          </label>
+          {customFonts.map(f => (
+            <span key={f.id} style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 6, padding: "3px 8px", color: "#B9C2D0", fontFamily: `'${f.name}', sans-serif`, fontSize: 13 }}>
+              {f.name}
+              <button onClick={async () => { await slideFontDelete(f.id); refreshFonts(); }} title="Remove this font (slides using it fall back to a default font)" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", marginLeft: 4 }}>×</button>
+            </span>
+          ))}
+          {fontMsg && <span style={{ color: /fail|large|use a|unreadable|error|invalid/i.test(fontMsg) ? AMBER : TEAL }}>{fontMsg}</span>}
         </div>
         {saved && <div style={{ fontSize: 12, color: TEAL, marginBottom: 8 }}>{saved}</div>}
         <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "flex-start" }}>
@@ -2904,7 +3002,17 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
               )}
               {slide.kind === "play" && (
                 <>
-                  <SField label="Play">{tagSelect(c.play, pickPlay)}</SField>
+                  <SField label="Drawn play (Draw tab → playbooks)">
+                    <select value={c.playbook?.key || ""} onChange={e => pickDrawPlay(e.target.value)} style={sInp}>
+                      <option value="">{drawPlays.length ? "— None (use images) —" : "— No drawn play available —"}</option>
+                      {Array.from(new Set(drawPlays.map(x => x.book))).map(b => (
+                        <optgroup key={b} label={b}>{drawPlays.filter(x => x.book === b).map(x => <option key={x.key} value={x.key}>{x.group} › {x.name}{x.frames.length > 1 ? ` (${x.frames.length} diagrams)` : ""}</option>)}</optgroup>
+                      ))}
+                    </select>
+                    {c.playbook && c.playbook.frames.length > 4 && <div style={{ fontSize: 11.5, color: AMBER, marginTop: 4 }}>This play has {c.playbook.frames.length} diagrams: the first 4 are shown.</div>}
+                    {!drawPlays.length && <div style={{ fontSize: 11.5, color: AMBER, marginTop: 4 }}>Draw and save a play in a playbook first (Draw tab). Diagrams are then used automatically, on a white background like the PDF export.</div>}
+                  </SField>
+                  <SField label="Play tag (name shown + observation stats)">{tagSelect(c.play, pickPlay)}</SField>
                   <SField label="Number of diagrams">
                     <div style={{ display: "flex", gap: 6 }}>{[1, 2, 3, 4].map(n => <button key={n} onClick={() => setDiagrams(n)} style={{ flex: 1, padding: "6px 0", borderRadius: 6, cursor: "pointer", background: (c.diagrams || 2) === n ? AMBER : PANEL2, color: (c.diagrams || 2) === n ? "#1A1300" : PAPER, border: `1px solid ${LINE}`, fontWeight: 700 }}>{n}</button>)}</div>
                   </SField>
@@ -2973,7 +3081,7 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
                         <textarea value={sel.content || ""} onChange={e => patchEl(sel.id, { content: e.target.value })} rows={3} style={{ ...sInp, resize: "vertical" }} />
                       </SField>
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                        <SField label="Font"><select value={sel.font || "Oswald"} onChange={e => patchEl(sel.id, { font: e.target.value })} style={sInp}>{SLIDE_FONT_CHOICES.map(f => <option key={f} value={f}>{f}</option>)}</select></SField>
+                        <SField label="Font"><select value={sel.font || "Oswald"} onChange={e => patchEl(sel.id, { font: e.target.value })} style={sInp}>{fontChoices.map(f => <option key={f} value={f}>{f}</option>)}</select></SField>
                         <SField label="Size" w={74}><input type="number" value={sel.size || 32} onChange={e => patchEl(sel.id, { size: Math.max(8, Number(e.target.value) || 32) })} style={sInp} /></SField>
                         <SField label="Color" w={60}><input type="color" value={sel.color || "#FFFFFF"} onChange={e => patchEl(sel.id, { color: e.target.value })} style={{ ...sInp, padding: 2, height: 34 }} /></SField>
                       </div>
@@ -3073,7 +3181,7 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
                       <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
                         <SField label="Custom label"><input value={sel.label || ""} onChange={e => patchEl(sel.id, { label: e.target.value })} style={sInp} placeholder="(automatic)" /></SField>
                         <SField label="Color" w={60}><input type="color" value={sel.color || AMBER} onChange={e => patchEl(sel.id, { color: e.target.value })} style={{ ...sInp, padding: 2, height: 34 }} /></SField>
-                        <SField label="Font" w={130}><select value={sel.font || "Oswald"} onChange={e => patchEl(sel.id, { font: e.target.value })} style={sInp}>{SLIDE_FONT_CHOICES.map(f => <option key={f} value={f}>{f}</option>)}</select></SField>
+                        <SField label="Font" w={130}><select value={sel.font || "Oswald"} onChange={e => patchEl(sel.id, { font: e.target.value })} style={sInp}>{fontChoices.map(f => <option key={f} value={f}>{f}</option>)}</select></SField>
                         <SField label="Value size" w={80}><input type="number" value={sel.valueSize || ""} placeholder="auto" onChange={e => patchEl(sel.id, { valueSize: Number(e.target.value) || undefined })} style={sInp} /></SField>
                       </div>
                     </>
