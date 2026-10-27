@@ -2469,7 +2469,7 @@ function SlideStatBlock({ el, slide, data }) {
   const ls = Math.round(el.labelSize || Math.max(13, Math.min(el.h * 0.12, 26)));
   const font = `'${el.font || "Oswald"}', sans-serif`;
   return (
-    <div style={{ width: "100%", height: "100%", boxSizing: "border-box", background: el.bg || "rgba(255,255,255,0.08)", border: `2px solid ${hexRgba(accent, 0.55)}`, borderRadius: el.radius ?? 18, padding: "10px 14px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: font, overflow: "hidden" }}>
+    <div style={{ width: "100%", height: "100%", boxSizing: "border-box", background: el.bg || "#1B2A44", border: `2px solid ${accent}`, borderRadius: el.radius ?? 18, padding: "10px 14px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: font, overflow: "hidden" }}>
       <div style={{ fontSize: ls, color: accent, textTransform: "uppercase", letterSpacing: 2, fontWeight: 700, textAlign: "center", lineHeight: 1.1, marginBottom: 6 }}>{info.label}</div>
       <div style={{ display: "flex", gap: Math.round(vs * 0.5), alignItems: "flex-start", justifyContent: "center", width: "100%" }}>
         {info.items.map((it, i) => (
