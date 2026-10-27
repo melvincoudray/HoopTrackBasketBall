@@ -2036,6 +2036,7 @@ const SLIDE_KINDS = [
   { id: "individual", family: "scouting", label: "Scouting report — individual", duration: 8 },
   { id: "fb_match", family: "feedback", label: "Match (score & logos)", duration: 5 },
   { id: "fb_section", family: "feedback", label: "Part announcement (stats)", duration: 6 },
+  { id: "photo", family: "photo", label: "Photo", duration: 5 },
 ];
 const isFeedbackKind = (k) => String(k).startsWith("fb_");
 const slideKindLabel = (k) => { const x = SLIDE_KINDS.find(y => y.id === k) || SLIDE_KINDS[0]; return (x.family === "feedback" ? "Feedback — " : "") + x.label; };
@@ -2125,7 +2126,7 @@ function slideVars(slide) {
   return {
     myTeam: c.myTeam || "", opponent: c.opponent || "",
     matchday: n ? L.matchday(n) : (g.journee || ""), date, time, dateTime: [date, time].filter(Boolean).join(" · "),
-    venue: g.venue || "", city: g.city || "", venueCity: g.city || "", // le nom de la salle n'est plus affiché : {venueCity} = ville seule
+    venue: g.venue || "", city: g.city || "", venueCity: [g.venue, g.city].filter(Boolean).join(" — "),
     side: c.side === "def" ? "DEFENSE" : "OFFENSE", play: c.play || "",
     myScore: ms === null ? "–" : String(ms), oppScore: os === null ? "–" : String(os), score: ms === null || os === null ? "– – –" : `${ms} - ${os}`, result,
   };
@@ -2418,7 +2419,7 @@ function defaultSlide(kind, ctx) {
       sText(290, 50, 700, 44, "{matchday}", { size: 28, color: accent, upper: true, spacing: 6 }),
       sText(240, 96, 800, 120, "{opponent}", { font: "Anton", size: 96, weight: 400, upper: true, shadow: true }),
       sText(290, 214, 700, 44, "{dateTime}", { size: 32, weight: 400 }),
-      sText(290, 262, 700, 40, "{city}", { size: 24, weight: 400, color: "#B9C2D0" }),
+      sText(290, 262, 700, 40, "{venueCity}", { size: 24, weight: 400, color: "#B9C2D0" }),
       sStat(44, 400, 280, 230, { key: "ortg" }), sStat(348, 400, 280, 230, { key: "drtg" }),
       sStat(652, 400, 280, 230, { key: "efg" }), sStat(956, 400, 280, 230, { key: "pctbp" }),
     ];
@@ -2445,6 +2446,9 @@ function defaultSlide(kind, ctx) {
       sStat(1060, 20, 160, 110, { source: "obs", tag: "@play", metric: "pppp", obsSide: "slide" }),
     ];
     base.ctx.diagrams = 2;
+  } else if (kind === "photo") { // photo plein cadre : seule la durée se règle
+    base.bg = { c1: "#000000", c2: "#000000", imageId: null, dark: 0 };
+    base.elements = [sEl("image", 0, 0, SLIDE_W, SLIDE_H, { imageId: null, fit: "contain", frame: false, slot: false })];
   } else if (kind === "individual") {
     base.elements = [sEl("individual", 190, 30, 900, 660, { team: "", playerId: "" })];
   } else if (kind === "fb_match") {
@@ -2992,7 +2996,8 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
                     <SField label="Date (dd/mm)"><input value={game.dm || ""} onChange={e => setGame({ dm: e.target.value })} style={sInp} placeholder="27/10" /></SField>
                     <SField label="Time"><input value={game.time || ""} onChange={e => setGame({ time: e.target.value })} style={sInp} placeholder="20:00" /></SField>
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr)", gap: 8 }}>
+                  <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 8 }}>
+                    <SField label="Venue"><input value={game.venue || ""} onChange={e => setGame({ venue: e.target.value })} style={sInp} /></SField>
                     <SField label="City"><input value={game.city || ""} onChange={e => setGame({ city: e.target.value })} style={sInp} /></SField>
                   </div>
                 </>
@@ -3318,6 +3323,18 @@ function MontageTab({ isCoach }) {
     persist(list.map(m => m.id === id ? { ...m, items: [...m.items, it] } : m));
   }
   const externalKeys = Array.from(CLIP_VIDEO_CACHE.keys()).filter(k => k.startsWith("ext::"));
+  // Photo importée = slide directe (plein cadre, fond noir) ; on règle seulement sa durée dans la carte.
+  async function addPhotoSlide(file) {
+    if (!file) return;
+    try {
+      const imgId = await slideImgUpload(file);
+      const s = defaultSlide("photo");
+      s.elements = s.elements.map(e => (e.type === "image" ? { ...e, imageId: imgId } : e));
+      let list = montagesRef.current || [], id = activeId;
+      if (!list.find(m => m.id === id)) { id = uid(); list = [...list, { id, name: `Montage ${list.length + 1}`, createdAt: Date.now(), items: [] }]; setActiveId(id); }
+      persist(list.map(m => m.id === id ? { ...m, items: [...m.items, s] } : m));
+    } catch (x) { alert(x.message || "Photo import failed."); }
+  }
   async function addSlide(kind) {
     const prev = [...items].reverse().find(i => i.type === "slide");
     const s = await newSlideFor(kind, prev ? prev.ctx : null);
@@ -3515,11 +3532,17 @@ function MontageTab({ isCoach }) {
 
           {isCoach && (
             <div style={{ padding: 12, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, marginBottom: 18 }}>
-              {[["scouting", "Add a slide — Scouting"], ["feedback", "Add a slide — Feedback"]].map(([fam, title]) => (
+              {[["scouting", "Add a slide — Scouting"], ["feedback", "Add a slide — Feedback"], ["photo", "Add a photo"]].map(([fam, title]) => (
                 <div key={fam} style={{ marginBottom: 10 }}>
                   <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 8 }}>{title}</div>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                    {SLIDE_KINDS.filter(k => k.family === fam).map(k => (
+                    {fam === "photo" && (
+                      <label style={{ background: PANEL2, border: `1px solid ${AMBER_DIM}`, borderRadius: 8, color: AMBER, cursor: "pointer", fontSize: 12.5, padding: "7px 12px", fontFamily: "inherit" }}>
+                        + Import a photo as a slide
+                        <input type="file" accept="image/*" multiple onChange={async e => { const fs = Array.from(e.target.files || []); e.target.value = ""; for (const f of fs) await addPhotoSlide(f); }} style={{ display: "none" }} />
+                      </label>
+                    )}
+                    {SLIDE_KINDS.filter(k => k.family === fam && fam !== "photo").map(k => (
                       <button key={k.id} onClick={() => addSlide(k.id)} style={{ background: PANEL2, border: `1px solid ${AMBER_DIM}`, borderRadius: 8, color: AMBER, cursor: "pointer", fontSize: 12.5, padding: "7px 12px", fontFamily: "inherit" }}><Plus size={12} style={{ verticalAlign: "-2px" }} /> {k.label}</button>
                     ))}
                   </div>
