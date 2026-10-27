@@ -2,6 +2,8 @@
 //  • GET ?team=vitre                  -> { matches: [{ id, slug, date, home, away, scoreHome, scoreAway }] }
 //                                         (matchs JOUÉS de l'équipe, du plus ancien au plus récent)
 //  • GET ?team=vitre&match=<id>-<slug> -> { id, date, time, home, away, ours:{name,players,total}, opp:{...} }
+//  • GET ?mode=league                  -> { matches: [{ id, slug, dm, home, away }] }  (TOUS les matchs joués de la ligue)
+//  • GET ?mode=leaguematch&match=<id>-<slug> -> { id, date, teams: [{ name, total }] }  (totaux des 2 équipes, rebonds d'équipe inclus)
 // Aucune dépendance externe (ESM, fetch natif de Node 18+).
 
 const ROOT = "https://nm1.ffbb.com";
@@ -35,6 +37,54 @@ export function parseSchedule(html) {
     if (!out.has(link[1])) out.set(link[1], { id: link[1], slug: link[2], dm: date[1] ? date[1] + "/" + date[2] : null, home: (alts[0] || home || "").trim(), away: (alts[1] || away || "").trim(), scoreHome: sh, scoreAway: sa });
   }
   return [...out.values()];
+}
+
+
+// Tous les matchs (joués ou à venir) du calendrier d'une page : + horaire et journée.
+// [{ id, slug, dm: "JJ/MM", time: "HH:MM", journee: "Journée 8, Group B", home, away, played }]
+export function parseCalendar(html) {
+  const out = new Map();
+  const re = /<li class="display-games__third-list__entry[^"]*">([\s\S]*?)<\/li>/g;
+  let m;
+  while ((m = re.exec(html))) {
+    const li = m[1];
+    const link = li.match(/href="\/saison-reguliere\/match\/(\d+)-([^"]+)"[^>]*title="([^"]*)"/);
+    if (!link) continue;
+    const dt = strip((li.match(/<span class="date">([\s\S]*?)<\/span>/) || [])[1] || "").match(/(\d{2})\/(\d{2})\s+(\d{2}:\d{2})/) || [];
+    const jr = strip((li.match(/<span class="game__day">([\s\S]*?)<\/span>/) || [])[1] || "");
+    const alts = [...li.matchAll(/<img class="picture"[^>]*alt="([^"]*)"/g)].map(x => decodeEntities(x[1]).trim());
+    const scores = [...li.matchAll(/<span class="team__score[^"]*">\s*([^<]*?)\s*<\/span>/g)].map(x => x[1].trim());
+    const [home, away] = decodeEntities(link[3]).split(/\s+vs\s+/);
+    if (!out.has(link[1])) out.set(link[1], { id: link[1], slug: link[2], dm: dt[1] ? dt[1] + "/" + dt[2] : null, time: dt[3] || null, journee: jr, home: (alts[0] || home || "").trim(), away: (alts[1] || away || "").trim(), played: /^\d+$/.test(scores[0] || "") });
+  }
+  return [...out.values()];
+}
+
+const MOIS = ["janvier", "fevrier", "mars", "avril", "mai", "juin", "juillet", "aout", "septembre", "octobre", "novembre", "decembre"];
+// "Derniers / Prochains matchs" d'une page d'équipe : salle des matchs à venir.
+// [{ home, away, journee, venue }]
+export function parseVenues(html) {
+  const out = [];
+  const re = /<li class="main__team__last-next-games__entry[^"]*">([\s\S]*?)<\/li>/g;
+  let m;
+  while ((m = re.exec(html))) {
+    const li = m[1];
+    const venue = strip((li.match(/fa-map-marker-alt"><\/i>([\s\S]*?)<\/div>/) || [])[1] || "");
+    const teams = [...li.matchAll(/<a href="\/saison-reguliere\/equipe\/(\d+)-[^"]*" title="([^"]*)"/g)].map(x => decodeEntities(x[2]).trim());
+    const jr = strip((li.match(/<span class="game__day[^"]*">([\s\S]*?)<\/span>\s*(?:<div|<\/span>)/) || [])[1] || "");
+    const dd = strip((li.match(/<div class="date">([\s\S]*?)<\/div>/) || [])[1] || "").match(/(\d{1,2})\s+([a-zéèêûîôàç]+)\.?\s*-\s*(\d{2}:\d{2})/i) || [];
+    const mi = MOIS.indexOf(norm(dd[2] || ""));
+    const played = /last-next-games__entry__bottom--last/.test(li);
+    if (teams.length >= 2) out.push({ home: teams[0], away: teams[1], journee: (jr.match(/Journée[^,]*,?[^<]*/) || [jr])[0].trim(), venue: played ? "" : venue, dm: mi >= 0 ? String(dd[1]).padStart(2, "0") + "/" + String(mi + 1).padStart(2, "0") : null, time: dd[3] || null, played });
+  }
+  return out;
+}
+
+// "Adresse : Salle de la Poultière, 3 bis rue de la Poultière 35500 Vitre" -> { hall, city }
+export function parseAddress(html) {
+  const a = strip((html.match(/<p class="team__infos">\s*Adresse\s*:([\s\S]*?)<\/p>/) || [])[1] || "");
+  const city = (a.match(/\b\d{5}\s+(.+)$/) || [])[1] || "";
+  return { hall: a.split(",")[0].trim(), city: city.trim(), address: a };
 }
 
 // "4-8" -> [4, 8, 4] (réussis, tentés, manqués) ; "" / "-" -> null
@@ -101,6 +151,71 @@ export const handler = async (event) => {
     const team = norm(q.team || "vitre");
     const season = (q.season || "2026").replace(/\D/g, "") || "2026";
     const headers = { "Content-Type": "application/json", "Cache-Control": "no-cache" };
+
+    const lead0 = async () => getText(ROOT + "/saison-reguliere/leaders/equipes/" + season);
+    const teamPathOf = (lead, name) => {
+      for (const a of lead.match(/<a\b[^>]*>/gi) || []) {
+        if (!/class="[^"]*\bteam\b[^"]*"/.test(a)) continue;
+        const href = (a.match(/href="([^"]*\/equipe\/\d+-[^"]*)"/) || [])[1];
+        const title = (a.match(/title="([^"]*)"/) || [])[1];
+        if (href && title && norm(title) === norm(name)) return href;
+      }
+      return null;
+    };
+
+    // ?mode=games&team=vitre&opp=Rennes -> matchs (aller/retour) entre les deux équipes avec journée, date, heure, salle, ville
+    if (q.mode === "games") {
+      const lead = await lead0();
+      const ownPath = teamPathOf(lead, team);
+      if (!ownPath) return { statusCode: 404, headers, body: JSON.stringify({ error: "Team not found in the NM1 table." }) };
+      const oppN = norm(q.opp || "");
+      const ownHtml = await getText(ownPath.startsWith("http") ? ownPath : ROOT + ownPath);
+      const oppPath = teamPathOf(lead, q.opp || "");
+      const oppHtml = oppPath ? await getText(oppPath.startsWith("http") ? oppPath : ROOT + oppPath) : "";
+      const pair = g => oppN && [g.home, g.away].some(n => norm(n) === oppN) && [g.home, g.away].some(n => norm(n) === team);
+      const byKey = new Map();
+      const put = (g) => { const k = norm(g.home) + "|" + norm(g.away); byKey.set(k, { ...(byKey.get(k) || {}), ...Object.fromEntries(Object.entries(g).filter(([, v]) => v !== null && v !== "" && v !== undefined)) }); };
+      for (const html of [ownHtml, oppHtml]) {
+        parseCalendar(html).filter(pair).forEach(put);
+        parseVenues(html).filter(pair).forEach(v => put({ ...v, journee: v.journee.replace(/^NM1,\s*/, "") }));
+      }
+      const games = [...byKey.values()].sort((a, b) => String(a.dm || "").split("/").reverse().join("").localeCompare(String(b.dm || "").split("/").reverse().join("")));
+      const cache = {};
+      const addr = async (name) => {
+        const k = norm(name);
+        if (cache[k]) return cache[k];
+        let html = ownHtml;
+        if (k !== team) { const pth = teamPathOf(lead, name); html = pth ? await getText(pth.startsWith("http") ? pth : ROOT + pth) : ""; }
+        return (cache[k] = parseAddress(html));
+      };
+      const res = [];
+      for (const g of games) {
+        const ad = await addr(g.home);
+        res.push({ ...g, venue: g.venue || ad.hall || "", city: ad.city || "", hostsAddress: ad.address || "" });
+      }
+      return { statusCode: 200, headers, body: JSON.stringify({ games: res }) };
+    }
+
+    // ?mode=league -> tous les matchs joués de la ligue (page calendrier)
+    if (q.mode === "league") {
+      const html = await getText(ROOT + "/saison-reguliere/calendrier");
+      const matches = parseCalendar(html).filter(g => g.played).map(g => ({ id: g.id, slug: g.slug, dm: g.dm, home: g.home, away: g.away }));
+      return { statusCode: 200, headers, body: JSON.stringify({ fetchedAt: new Date().toISOString(), matches }) };
+    }
+    // ?mode=leaguematch&match=<id>-<slug> -> totaux des deux équipes (sans les joueurs : réponse légère)
+    if (q.mode === "leaguematch" && q.match) {
+      const mid = String(q.match).replace(/[^a-z0-9\-]/gi, "");
+      const p = parseMatch(await getText(ROOT + "/saison-reguliere/match/" + mid));
+      if (p.teams.length < 2 || !p.teams.every(t => t.total)) return { statusCode: 404, headers, body: JSON.stringify({ error: "No box score on this match page yet." }) };
+      const teams = p.teams.map(t => {
+        const tot = { ...t.total };
+        // Rebonds d'équipe : le pied de tableau les contient en général ; sinon joueurs + ligne "Équipe".
+        const sum = k => t.players.reduce((a, pl) => a + (pl.stats[k] || 0), 0) + (t.teamExtra ? (t.teamExtra[k] || 0) : 0);
+        ["ro", "rd", "rt"].forEach(k => { tot[k] = Math.max(tot[k] || 0, sum(k)); });
+        return { name: t.name, total: tot };
+      });
+      return { statusCode: 200, headers, body: JSON.stringify({ id: mid, date: p.date, teams }) };
+    }
 
     if (q.match) {
       const mid = String(q.match).replace(/[^a-z0-9\-]/gi, "");
