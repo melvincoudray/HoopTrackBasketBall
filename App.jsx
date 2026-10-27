@@ -2074,7 +2074,7 @@ function slideIsoToDm(d) {
   return a ? `${a[3]}/${a[2]}` : b ? `${b[1]}/${b[2]}` : "";
 }
 function slideVars(slide) {
-  const c = slide.ctx || {}, g = c.game || {}, lang = c.lang || "fr", L = SLIDE_LANG[lang] || SLIDE_LANG.fr;
+  const c = slide.ctx || {}, g = c.game || {}, lang = c.lang || "en", L = SLIDE_LANG[lang] || SLIDE_LANG.en;
   const fb = c.fbMatch || null;
   const n = (String(g.journee || "").match(/(\d+)/) || [])[1];
   const date = slideGameDate(g.dm || (fb ? slideIsoToDm(fb.date) : ""), lang), time = slideGameTime(g.time, lang);
@@ -2084,7 +2084,7 @@ function slideVars(slide) {
   return {
     myTeam: c.myTeam || "", opponent: c.opponent || "",
     matchday: n ? L.matchday(n) : (g.journee || ""), date, time, dateTime: [date, time].filter(Boolean).join(" · "),
-    venue: g.venue || "", city: g.city || "", venueCity: [g.venue, g.city].filter(Boolean).join(" — "),
+    venue: g.venue || "", city: g.city || "", venueCity: g.city || "", // le nom de la salle n'est plus affiché : {venueCity} = ville seule
     side: c.side === "def" ? "DEFENSE" : "OFFENSE", play: c.play || "",
     myScore: ms === null ? "–" : String(ms), oppScore: os === null ? "–" : String(os), score: ms === null || os === null ? "– – –" : `${ms} - ${os}`, result,
   };
@@ -2368,7 +2368,7 @@ function applyDiagramLayout(elements, n) {
 }
 function defaultSlide(kind, ctx) {
   const k = SLIDE_KINDS.find(x => x.id === kind) || SLIDE_KINDS[0];
-  const base = { id: uid(), type: "slide", kind, duration: k.duration, bg: { c1: "#0B1220", c2: "#16233B", imageId: null, dark: 45 }, ctx: { lang: "fr", side: "off", ...ctx }, elements: [] };
+  const base = { id: uid(), type: "slide", kind, duration: k.duration, bg: { c1: "#0B1220", c2: "#16233B", imageId: null, dark: 45 }, ctx: { lang: "en", side: "off", ...ctx }, elements: [] };
   const accent = AMBER;
   if (kind === "presentation") {
     base.elements = [
@@ -2377,7 +2377,7 @@ function defaultSlide(kind, ctx) {
       sText(290, 50, 700, 44, "{matchday}", { size: 28, color: accent, upper: true, spacing: 6 }),
       sText(240, 96, 800, 120, "{opponent}", { font: "Anton", size: 96, weight: 400, upper: true, shadow: true }),
       sText(290, 214, 700, 44, "{dateTime}", { size: 32, weight: 400 }),
-      sText(290, 262, 700, 40, "{venueCity}", { size: 24, weight: 400, color: "#B9C2D0" }),
+      sText(290, 262, 700, 40, "{city}", { size: 24, weight: 400, color: "#B9C2D0" }),
       sStat(44, 400, 280, 230, { key: "ortg" }), sStat(348, 400, 280, 230, { key: "drtg" }),
       sStat(652, 400, 280, 230, { key: "efg" }), sStat(956, 400, 280, 230, { key: "pctbp" }),
     ];
@@ -2534,19 +2534,41 @@ function SlideElementView({ el, slide, data, imgs, editable }) {
   if (el.type === "individual") return <SlideIndividual el={el} slide={slide} data={data} />;
   return null;
 }
+// Aimantation + guides d'alignement (éditeur de slides) : bords et centres de l'élément déplacé comparés à ceux
+// des autres éléments et de la slide (bords + axes). Alt maintenu = pas d'aimantation.
+function slideSnap(d, els, nx, ny, nw, nh, th) {
+  const TX = [0, SLIDE_W / 2, SLIDE_W], TY = [0, SLIDE_H / 2, SLIDE_H];
+  els.forEach(o => { if (o.id === d.id) return; TX.push(o.x, o.x + o.w / 2, o.x + o.w); TY.push(o.y, o.y + o.h / 2, o.y + o.h); });
+  const best = (cands, targets) => { let b = null; cands.forEach(c => targets.forEach(t => { const df = t - c; if (Math.abs(df) <= th && (b === null || Math.abs(df) < Math.abs(b))) b = df; })); return b; };
+  const size = d.mode === "size";
+  const cx = size ? [nx + nw] : [nx, nx + nw / 2, nx + nw], cy = size ? [ny + nh] : [ny, ny + nh / 2, ny + nh];
+  const dx = best(cx, TX), dy = best(cy, TY);
+  if (dx !== null) { if (size) nw += dx; else nx += dx; }
+  if (dy !== null) { if (size) nh += dy; else ny += dy; }
+  const gx = [], gy = [];
+  (size ? [nx + nw] : [nx, nx + nw / 2, nx + nw]).forEach(c => TX.forEach(t => { if (Math.abs(t - c) < 0.6 && !gx.includes(t)) gx.push(t); }));
+  (size ? [ny + nh] : [ny, ny + nh / 2, ny + nh]).forEach(c => TY.forEach(t => { if (Math.abs(t - c) < 0.6 && !gy.includes(t)) gy.push(t); }));
+  return { x: Math.round(nx), y: Math.round(ny), w: Math.round(nw), h: Math.round(nh), gx, gy };
+}
 function SlideCanvas({ slide, data, imgs, editable, scale, selectedId, onSelect, onPatch, onEditImage }) {
   const drag = useRef(null);
   const live = useRef({});
-  live.current = { onPatch, scale };
+  const [guides, setGuides] = useState({ gx: [], gy: [] });
+  live.current = { onPatch, scale, els: slide.elements || [] };
   useEffect(() => {
     if (!editable) return;
     const mv = (e) => {
       const d = drag.current; if (!d) return;
       const k = live.current.scale || 1, dx = (e.clientX - d.sx) / k, dy = (e.clientY - d.sy) / k;
-      if (d.mode === "move") live.current.onPatch(d.id, { x: Math.round(d.x + dx), y: Math.round(d.y + dy) });
-      else live.current.onPatch(d.id, { w: Math.max(20, Math.round(d.w + dx)), h: Math.max(20, Math.round(d.h + dy)) });
+      if (d.mode === "move") {
+        const r = e.altKey ? { x: Math.round(d.x + dx), y: Math.round(d.y + dy), gx: [], gy: [] } : slideSnap(d, live.current.els, d.x + dx, d.y + dy, d.w, d.h, 7 / k);
+        live.current.onPatch(d.id, { x: r.x, y: r.y }); setGuides({ gx: r.gx, gy: r.gy });
+      } else {
+        const r = e.altKey ? { w: Math.round(d.w + dx), h: Math.round(d.h + dy), gx: [], gy: [] } : slideSnap(d, live.current.els, d.x, d.y, d.w + dx, d.h + dy, 7 / k);
+        live.current.onPatch(d.id, { w: Math.max(20, r.w), h: Math.max(20, r.h) }); setGuides({ gx: r.gx, gy: r.gy });
+      }
     };
-    const up = () => { drag.current = null; };
+    const up = () => { drag.current = null; setGuides({ gx: [], gy: [] }); };
     window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up);
     return () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); };
   }, [editable]);
@@ -2568,6 +2590,8 @@ function SlideCanvas({ slide, data, imgs, editable, scale, selectedId, onSelect,
           </div>
         );
       })}
+      {editable && guides.gx.map(x => <div key={"gx" + x} style={{ position: "absolute", left: x - 1, top: 0, width: 2, height: SLIDE_H, background: "#FF3EA5", pointerEvents: "none", zIndex: 50 }} />)}
+      {editable && guides.gy.map(y => <div key={"gy" + y} style={{ position: "absolute", top: y - 1, left: 0, height: 2, width: SLIDE_W, background: "#FF3EA5", pointerEvents: "none", zIndex: 50 }} />)}
     </div>
   );
 }
@@ -2815,7 +2839,7 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
         <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "flex-start" }}>
           <div style={{ flex: "1 1 640px", minWidth: 0 }}>
             <ScaledSlide slide={slide} data={data} imgs={imgs} editable selectedId={selId} onSelect={setSelId} onPatch={patchEl} onEditImage={(id) => setPicker({ target: id })} />
-            <div style={{ fontSize: 11.5, color: "#5C6470", marginTop: 6 }}>Drag an element to move it, drag the green square to resize it, double-click an image frame to choose its picture.</div>
+            <div style={{ fontSize: 11.5, color: "#5C6470", marginTop: 6 }}>Drag an element to move it, drag the green square to resize it (pink guides show alignment, hold Alt to move freely), double-click an image frame to choose its picture.</div>
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
               {[["Text", () => addEl(sText(400, 300, 480, 80, "Text", { size: 40 }))],
                 ["Logo", () => addEl(sEl("logo", 540, 260, 200, 200, { team: "opp" }))],
@@ -2870,8 +2894,7 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
                     <SField label="Date (dd/mm)"><input value={game.dm || ""} onChange={e => setGame({ dm: e.target.value })} style={sInp} placeholder="27/10" /></SField>
                     <SField label="Time"><input value={game.time || ""} onChange={e => setGame({ time: e.target.value })} style={sInp} placeholder="20:00" /></SField>
                   </div>
-                  <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 8 }}>
-                    <SField label="Venue"><input value={game.venue || ""} onChange={e => setGame({ venue: e.target.value })} style={sInp} /></SField>
+                  <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr)", gap: 8 }}>
                     <SField label="City"><input value={game.city || ""} onChange={e => setGame({ city: e.target.value })} style={sInp} /></SField>
                   </div>
                 </>
@@ -2910,7 +2933,7 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
                 </SField>
               )}
               <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <SField label="Date language" w={130}><select value={c.lang || "fr"} onChange={e => setCtx({ lang: e.target.value })} style={sInp}><option value="fr">Français</option><option value="en">English</option></select></SField>
+                <SField label="Language (matchday, date)" w={150}><select value={c.lang || "en"} onChange={e => setCtx({ lang: e.target.value })} style={sInp}><option value="fr">Français</option><option value="en">English</option></select></SField>
                 <SField label="Duration (s)" w={96}><input type="number" min="1" step="0.5" value={slide.duration} onChange={e => onChange({ duration: Math.max(1, Number(e.target.value) || 1) })} style={sInp} /></SField>
               </div>
             </div>
