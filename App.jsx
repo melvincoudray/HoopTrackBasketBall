@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import { createRoot } from "react-dom/client";
 import * as XLSX from "xlsx";
 import initSqlJs from "sql.js";
 import { FFmpeg } from "@ffmpeg/ffmpeg";
 import { toBlobURL } from "@ffmpeg/util";
-import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon, Calendar, Star, Bell, BellOff, Pencil, RefreshCw } from "lucide-react";
+import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon, Calendar, Star, Bell, BellOff, Pencil, RefreshCw, Film } from "lucide-react";
 import {
   PieChart, Pie, Cell, ComposedChart, Bar as RBar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
   RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar,
@@ -706,6 +707,21 @@ const SCOUT_STAT_SCHEMA = [
   { key: "dEfg", label: "eFG% allowed", pct: true, lowerBetter: true, group: "Defense (opponent)" },
   { key: "dPctbp", label: "% Turnovers forced", pct: true, group: "Defense (opponent)" },
   { key: "dFtafga", label: "FTA/FGA allowed", lowerBetter: true, group: "Defense (opponent)" },
+  { key: "oPctro", label: "Opp. % off. rebounds", pct: true, lowerBetter: true, group: "Defense (opponent)" },
+  { key: "oRo", label: "Off. rebounds allowed", lowerBetter: true, group: "Defense (opponent)" },
+  { key: "oRd", label: "Opp. def. rebounds", group: "Defense (opponent)" },
+  { key: "oRt", label: "Opp. total rebounds", lowerBetter: true, group: "Defense (opponent)" },
+  { key: "oR2", label: "2pt allowed (made)", lowerBetter: true, group: "Defense (opponent)" },
+  { key: "oT2", label: "2pt allowed (attempted)", group: "Defense (opponent)" },
+  { key: "oR3", label: "3pt allowed (made)", lowerBetter: true, group: "Defense (opponent)" },
+  { key: "oT3", label: "3pt allowed (attempted)", group: "Defense (opponent)" },
+  { key: "oLfr", label: "FT allowed (made)", lowerBetter: true, group: "Defense (opponent)" },
+  { key: "oLft", label: "FT allowed (attempted)", lowerBetter: true, group: "Defense (opponent)" },
+  { key: "oPd", label: "Opp. assists", lowerBetter: true, group: "Defense (opponent)" },
+  { key: "oIn", label: "Opp. steals", group: "Defense (opponent)" },
+  { key: "oBp", label: "Opp. turnovers (forced)", group: "Defense (opponent)" },
+  { key: "oCt", label: "Opp. blocks", group: "Defense (opponent)" },
+  { key: "oFte", label: "Opp. fouls", group: "Defense (opponent)" },
 ];
 const SCOUT_KEY_BY_LABEL = {};
 SCOUT_STAT_SCHEMA.forEach(s => { SCOUT_KEY_BY_LABEL[normTag(s.label)] = s.key; });
@@ -1627,7 +1643,7 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
             const url = URL.createObjectURL(blob);
             clipUrlsRef.current.push(url);
             const label = `${noun} ${n} — ${g.label} · clip ${ci + 1}/${g.clips.length}`;
-            setClipResults(prev => [...prev, { url, label }]);
+            setClipResults(prev => [...prev, { url, label, item: { label: `${playName} — ${sideLabel} · ${g.label}`, sourceKey: cacheKeyOf(g.key), sourceName: file.name, sourceLabel: `${noun} ${g.label}`, start, end } }]);
             try { await ffmpeg.deleteFile(outName); } catch (e) {}
             clipIdx++;
           }
@@ -1799,6 +1815,7 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
                   <div style={{ fontSize: 12, color: "#8B93A1" }}>{c.label}</div>
                   <video controls autoPlay={i === clipResults.length - 1 && !busy} src={c.url} style={{ width: "100%", borderRadius: 8, background: "#000" }} />
                   <a href={c.url} download={`${playName.replace(/\s+/g, "_")}_${sideLabel}_clip${i + 1}.mp4`} style={{ ...btnPrimary, textAlign: "center", textDecoration: "none", display: "block", boxSizing: "border-box" }}>Save this clip to my device</a>
+                  {c.item && <AddToMontageButton item={c.item} />}
                 </div>
               ))}
               {busy && <div style={{ color: TEAL, fontSize: 12.5 }}>{progress || "Preparing the next clip…"}</div>}
@@ -1822,6 +1839,1610 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
           </button>
         )}
       </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Onglet Montage — plusieurs montages nommés, chacun = liste ordonnée de clips (et, plus tard, de slides).
+// On ne sauvegarde QUE les découpages (source, début/fin d'origine, début/fin recoupés, ordre) sous la clé
+// "montages" : jamais de vidéo. Les vidéos sont redemandées au coach (CLIP_VIDEO_CACHE, le temps que le site
+// reste ouvert) ; la clé d'une vidéo de match est celle utilisée par la fenêtre de clips, donc ré-importer
+// la vidéo du match ici la rend aussi disponible là-bas. Une vidéo externe a la clé "ext::nom::taille".
+// ---------------------------------------------------------------------------
+async function loadMontages() { return (await storeGet("montages")) || []; }
+const fmtClock = (s) => { const t = Math.max(0, Number(s) || 0); return `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, "0")}.${Math.floor((t % 1) * 10)}`; };
+const clampNum = (v, a, b) => Math.min(b, Math.max(a, v));
+
+// Bouton "Add to montage" affiché à côté de "Save" dans la fenêtre de clips (mode Clip by clip).
+function AddToMontageButton({ item }) {
+  const [open, setOpen] = useState(false);
+  const [list, setList] = useState([]);
+  const [target, setTarget] = useState("new");
+  const [newName, setNewName] = useState("");
+  const [msg, setMsg] = useState("");
+  async function openIt() {
+    const l = await loadMontages();
+    setList(l); setTarget(l.length ? l[l.length - 1].id : "new"); setNewName(""); setMsg(""); setOpen(true);
+  }
+  async function add() {
+    let l = await loadMontages();
+    let id = target;
+    if (target === "new" || !l.find(m => m.id === target)) {
+      id = uid();
+      l = [...l, { id, name: newName.trim() || `Montage ${l.length + 1}`, createdAt: Date.now(), items: [] }];
+    }
+    l = l.map(m => m.id === id ? { ...m, items: [...m.items, { ...item, id: uid(), type: "clip", trimStart: item.start, trimEnd: item.end }] } : m);
+    await storeSet("montages", l);
+    setMsg(`Added to "${l.find(m => m.id === id).name}".`);
+    setOpen(false);
+  }
+  const sel = { ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "auto", minWidth: 140 };
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+      {!open && <button onClick={openIt} style={{ ...btnPrimary, flex: "none", background: PANEL, border: `1px solid ${AMBER}`, color: AMBER }}>Add to montage</button>}
+      {open && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center", padding: 10, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8 }}>
+          <select value={target} onChange={e => setTarget(e.target.value)} style={sel}>
+            {list.map(m => <option key={m.id} value={m.id}>{m.name} ({m.items.length})</option>)}
+            <option value="new">+ New montage…</option>
+          </select>
+          {(target === "new" || !list.length) && <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="Montage name" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 170 }} />}
+          <button onClick={add} style={{ padding: "8px 14px", background: AMBER, border: "none", borderRadius: 8, color: "#1a1200", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 13 }}>Add</button>
+          <button onClick={() => setOpen(false)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>Cancel</button>
+        </div>
+      )}
+      {msg && <div style={{ fontSize: 12, color: TEAL }}>{msg}</div>}
+    </div>
+  );
+}
+
+// URLs d'aperçu (blob) des vidéos actuellement disponibles pour une liste de clés — créées/révoquées ici.
+function useSourceUrls(keys, version) {
+  const [urls, setUrls] = useState({});
+  const sig = keys.join("|");
+  useEffect(() => {
+    const made = {};
+    keys.forEach(k => { const f = CLIP_VIDEO_CACHE.get(k); if (f) made[k] = URL.createObjectURL(f); });
+    setUrls(made);
+    return () => Object.values(made).forEach(u => URL.revokeObjectURL(u));
+  }, [sig, version]);
+  return urls;
+}
+
+function MontageClipCard({ item, index, count, url, isCoach, onChange, onRemove, onMove, onImport, drag }) {
+  const vref = useRef(null);
+  const [dur, setDur] = useState(null);
+  const t0 = item.trimStart, t1 = item.trimEnd;
+  const lo = item.external ? 0 : Math.max(0, item.start - 30);
+  const hi = dur ? (item.external ? dur : Math.min(dur, item.end + 30)) : item.end + 30;
+  const seek = (t) => { if (vref.current && isFinite(t)) vref.current.currentTime = t; };
+  const setStart = (v) => { v = clampNum(Number(v) || 0, lo, t1 - 0.2); onChange({ trimStart: v }); seek(v); };
+  const setEnd = (v) => { v = clampNum(Number(v) || 0, t0 + 0.2, hi); onChange({ trimEnd: v }); seek(Math.max(t0, v - 0.8)); };
+  const now = () => (vref.current ? vref.current.currentTime : 0);
+  const num = { ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 84 };
+  return (
+    <div onDragOver={drag.onDragOver} onDrop={drag.onDrop} style={{ display: "flex", flexDirection: "column", gap: 8, padding: 12, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
+        <div style={{ fontSize: 13, color: PAPER, fontWeight: 600 }}>
+          <span style={{ color: AMBER, marginRight: 8 }}>{index + 1}</span>{item.label}
+          <span style={{ color: "#5C6470", fontWeight: 400 }}> · {(t1 - t0).toFixed(1)}s</span>
+        </div>
+        {isCoach && (
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span title="Drag to reorder" draggable onDragStart={drag.onDragStart} style={{ cursor: "grab", color: "#5C6470", fontSize: 16, lineHeight: 1 }}>⠿</span>
+            <button disabled={index === 0} onClick={() => onMove(-1)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", cursor: index === 0 ? "default" : "pointer", padding: "2px 8px", opacity: index === 0 ? 0.4 : 1 }}>↑</button>
+            <button disabled={index === count - 1} onClick={() => onMove(1)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", cursor: index === count - 1 ? "default" : "pointer", padding: "2px 8px", opacity: index === count - 1 ? 0.4 : 1 }}>↓</button>
+            <button onClick={onRemove} title="Remove from montage" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
+          </div>
+        )}
+      </div>
+      <div style={{ fontSize: 11.5, color: "#5C6470" }}>{item.sourceLabel} · {item.sourceName}</div>
+      {url ? (
+        <video ref={vref} src={url} controls preload="metadata" style={{ width: "100%", maxHeight: 280, borderRadius: 8, background: "#000" }}
+          onLoadedMetadata={e => { setDur(e.target.duration); e.target.currentTime = t0; }}
+          onPlay={e => { const v = e.target; if (v.currentTime < t0 - 0.05 || v.currentTime >= t1 - 0.05) v.currentTime = t0; }}
+          onTimeUpdate={e => { if (e.target.currentTime >= t1) e.target.pause(); }} />
+      ) : (
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", padding: 10, border: `1px dashed ${LINE}`, borderRadius: 8, fontSize: 12.5, color: "#8B93A1" }}>
+          Video not loaded — import it to preview and trim:
+          <input type="file" accept="video/*" onChange={e => { const f = e.target.files[0]; if (f) onImport(item.sourceKey, f); }} style={{ color: "#8B93A1", fontSize: 12.5 }} />
+        </div>
+      )}
+      {isCoach && (
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "flex-end" }}>
+          <div>
+            <label style={labelStyle}>Start (s)</label>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <input type="number" step="0.1" value={Number(t0.toFixed(1))} onChange={e => setStart(e.target.value)} style={num} />
+              {url && <button onClick={() => setStart(now())} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: TEAL, cursor: "pointer", fontSize: 11.5, padding: "4px 8px", fontFamily: "inherit" }}>Set to current</button>}
+            </div>
+          </div>
+          <div>
+            <label style={labelStyle}>End (s)</label>
+            <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+              <input type="number" step="0.1" value={Number(t1.toFixed(1))} onChange={e => setEnd(e.target.value)} style={num} />
+              {url && <button onClick={() => setEnd(now())} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: TEAL, cursor: "pointer", fontSize: 11.5, padding: "4px 8px", fontFamily: "inherit" }}>Set to current</button>}
+            </div>
+          </div>
+          {url && <button onClick={() => { const v = vref.current; if (v) { v.currentTime = t0; v.play(); } }} style={{ padding: "8px 14px", background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 8, color: AMBER, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>Preview trimmed clip</button>}
+          <button onClick={() => onChange({ trimStart: item.start, trimEnd: item.end })} style={{ background: "none", border: "none", color: "#8B93A1", textDecoration: "underline", cursor: "pointer", fontSize: 11.5, fontFamily: "inherit" }}>Reset to original</button>
+        </div>
+      )}
+      {isCoach && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <input type="range" min={lo} max={hi} step="0.1" value={clampNum(t0, lo, hi)} onChange={e => setStart(e.target.value)} />
+          <input type="range" min={lo} max={hi} step="0.1" value={clampNum(t1, lo, hi)} onChange={e => setEnd(e.target.value)} />
+          <div style={{ fontSize: 11, color: "#5C6470" }}>Top slider: start · bottom slider: end · range {fmtClock(lo)} – {fmtClock(hi)}</div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Lecture enchaînée de tous les clips et slides du montage (aperçu, sans export).
+function MontagePlayer({ items, urls, onClose, slideEnv }) {
+  const playable = items.filter(i => (i.type === "clip" && urls[i.sourceKey]) || i.type === "slide");
+  const [n, setN] = useState(0);
+  const vref = useRef(null);
+  const cur = playable[n];
+  useEffect(() => {
+    if (!cur) return;
+    if (cur.type === "slide") {
+      const t = setTimeout(() => setN(k => (k < playable.length - 1 ? k + 1 : k)), Math.max(1, cur.duration || 1) * 1000);
+      return () => clearTimeout(t);
+    }
+    const v = vref.current; if (!v) return;
+    v.src = urls[cur.sourceKey];
+    const onMeta = () => { v.currentTime = cur.trimStart; v.play().catch(() => {}); };
+    v.addEventListener("loadedmetadata", onMeta, { once: true });
+    return () => v.removeEventListener("loadedmetadata", onMeta);
+  }, [n]);
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }}>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 14, padding: 20, maxWidth: 860, width: "100%" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
+          <div style={{ fontSize: 13, color: PAPER, fontWeight: 600 }}>{cur ? `${n + 1}/${playable.length} — ${cur.type === "slide" ? slideTitle(cur) : cur.label}` : "Nothing to play (import the videos first)."}</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer" }}><X size={18} /></button>
+        </div>
+        {cur && cur.type === "clip" && <video key={n} ref={vref} controls style={{ width: "100%", maxHeight: "70vh", borderRadius: 8, background: "#000" }}
+          onTimeUpdate={e => { if (e.target.currentTime >= cur.trimEnd) { if (n < playable.length - 1) setN(n + 1); else e.target.pause(); } }}
+          onEnded={() => { if (n < playable.length - 1) setN(n + 1); }} />}
+        {cur && cur.type === "slide" && <ScaledSlide key={cur.id + n} slide={cur} data={slideEnv.data} imgs={slideEnv.imgs} />}
+        <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+          <button disabled={n === 0} onClick={() => setN(n - 1)} style={{ ...btnPrimary, flex: "none", background: PANEL2, color: PAPER, opacity: n === 0 ? 0.5 : 1 }}>Previous</button>
+          <button disabled={n >= playable.length - 1} onClick={() => setN(n + 1)} style={{ ...btnPrimary, flex: "none", background: PANEL2, color: PAPER, opacity: n >= playable.length - 1 ? 0.5 : 1 }}>Next</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Slides du montage (famille "Scouting") — 5 modèles : présentation, annonce de côté (Offense/Defense),
+// annonce de sous-partie, play, visuel de Scouting Report Individual.
+// Une slide = fond + éléments positionnés sur une grille 1280×720 (texte, logo, photo cadrée, rectangle, bloc
+// de stats, fiche joueur). Les éléments contiennent des LIENS vers les données (variables {opponent}, {date}…,
+// stats Scouting Comparison / Observation), jamais des valeurs figées : changer l'adversaire ou le play remet
+// tout à jour. Tout est sauvegardé (montage + modèles par type + bibliothèque d'images + diagrammes par play)
+// pour que la création de slides devienne automatique.
+// ---------------------------------------------------------------------------
+const SLIDE_W = 1280, SLIDE_H = 720;
+const SLIDE_KINDS = [
+  { id: "presentation", family: "scouting", label: "Presentation", duration: 6 },
+  { id: "side", family: "scouting", label: "Side announcement (Offense / Defense)", duration: 3 },
+  { id: "section", family: "scouting", label: "Sub-section announcement", duration: 5 },
+  { id: "play", family: "scouting", label: "Play", duration: 8 },
+  { id: "individual", family: "scouting", label: "Scouting report — individual", duration: 8 },
+  { id: "fb_match", family: "feedback", label: "Match (score & logos)", duration: 5 },
+  { id: "fb_section", family: "feedback", label: "Part announcement (stats)", duration: 6 },
+];
+const isFeedbackKind = (k) => String(k).startsWith("fb_");
+const slideKindLabel = (k) => { const x = SLIDE_KINDS.find(y => y.id === k) || SLIDE_KINDS[0]; return (x.family === "feedback" ? "Feedback — " : "") + x.label; };
+const SLIDE_FONT_CHOICES = ["Arial", "Georgia", "Impact", "Trebuchet MS", "Verdana", "Courier New", "Times New Roman", "Anton", "Bebas Neue", "Oswald", "Montserrat", "Playfair Display", "Roboto Condensed", "Teko"];
+const SLIDE_GFONTS_URL = "https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Montserrat:wght@400;700;800&family=Oswald:wght@400;700&family=Playfair+Display:wght@700&family=Roboto+Condensed:wght@400;700&family=Teko:wght@500;700&display=swap";
+function ensureSlideFonts() {
+  try {
+    if (document.getElementById("slide-gfonts")) return;
+    const l = document.createElement("link"); l.id = "slide-gfonts"; l.rel = "stylesheet"; l.href = SLIDE_GFONTS_URL;
+    document.head.appendChild(l);
+  } catch (e) { /* hors navigateur */ }
+}
+const SLIDE_LANG = {
+  fr: { days: ["dimanche", "lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi"], months: ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"], matchday: n => `Journée ${n}` },
+  en: { days: ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"], months: ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"], matchday: n => `Matchday ${n}` },
+};
+function slideGameDate(dm, lang) {
+  const m = String(dm || "").match(/^(\d{1,2})\/(\d{1,2})$/);
+  if (!m) return "";
+  const day = +m[1], mon = +m[2], now = new Date();
+  const base = now.getMonth() >= 6 ? now.getFullYear() : now.getFullYear() - 1;
+  const d = new Date(mon >= 7 ? base : base + 1, mon - 1, day);
+  const L = SLIDE_LANG[lang] || SLIDE_LANG.fr;
+  return lang === "en" ? `${L.days[d.getDay()]} ${L.months[mon - 1]} ${day}` : `${L.days[d.getDay()]} ${day} ${L.months[mon - 1]}`;
+}
+function slideGameTime(t, lang) {
+  const m = String(t || "").match(/^(\d{1,2}):(\d{2})$/);
+  if (!m) return "";
+  const h = +m[1];
+  if (lang === "en") return `${h % 12 || 12}:${m[2]} ${h >= 12 ? "PM" : "AM"}`;
+  return `${h}h${m[2]}`;
+}
+// "2026-10-23" ou "23/10/2026" -> "dd/mm"
+function slideIsoToDm(d) {
+  const a = String(d || "").match(/^(\d{4})-(\d{2})-(\d{2})/), b = String(d || "").match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/);
+  return a ? `${a[3]}/${a[2]}` : b ? `${b[1]}/${b[2]}` : "";
+}
+function slideVars(slide) {
+  const c = slide.ctx || {}, g = c.game || {}, lang = c.lang || "fr", L = SLIDE_LANG[lang] || SLIDE_LANG.fr;
+  const fb = c.fbMatch || null;
+  const n = (String(g.journee || "").match(/(\d+)/) || [])[1];
+  const date = slideGameDate(g.dm || (fb ? slideIsoToDm(fb.date) : ""), lang), time = slideGameTime(g.time, lang);
+  const ms = fb && fb.myScore !== undefined && fb.myScore !== null && fb.myScore !== "" ? Number(fb.myScore) : null;
+  const os = fb && fb.oppScore !== undefined && fb.oppScore !== null && fb.oppScore !== "" ? Number(fb.oppScore) : null;
+  const result = ms === null || os === null ? "" : ms > os ? (lang === "en" ? "WIN" : "VICTOIRE") : ms < os ? (lang === "en" ? "LOSS" : "DÉFAITE") : (lang === "en" ? "DRAW" : "ÉGALITÉ");
+  return {
+    myTeam: c.myTeam || "", opponent: c.opponent || "",
+    matchday: n ? L.matchday(n) : (g.journee || ""), date, time, dateTime: [date, time].filter(Boolean).join(" · "),
+    venue: g.venue || "", city: g.city || "", venueCity: [g.venue, g.city].filter(Boolean).join(" — "),
+    side: c.side === "def" ? "DEFENSE" : "OFFENSE", play: c.play || "",
+    myScore: ms === null ? "–" : String(ms), oppScore: os === null ? "–" : String(os), score: ms === null || os === null ? "– – –" : `${ms} - ${os}`, result,
+  };
+}
+const slideText = (tpl, vars) => String(tpl ?? "").replace(/\{(\w+)\}/g, (m, k) => (k in vars ? vars[k] : m));
+function hexRgba(hex, a) {
+  const m = String(hex || "").match(/^#?([0-9a-f]{6})$/i);
+  if (!m) return hex || "transparent";
+  const n = parseInt(m[1], 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${a ?? 1})`;
+}
+
+// --- Images : bibliothèque (réduites puis stockées une seule fois, réutilisables) ---------------------------
+const SLIDE_IMG_CACHE = new Map();
+async function slideImgGet(id) {
+  if (!id) return null;
+  if (SLIDE_IMG_CACHE.has(id)) return SLIDE_IMG_CACHE.get(id);
+  const v = await storeGet("slide_img:" + id);
+  if (v) SLIDE_IMG_CACHE.set(id, v);
+  return v || null;
+}
+async function slideImgUpload(file) {
+  const url = URL.createObjectURL(file);
+  try {
+    const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = () => rej(new Error("Image unreadable.")); im.src = url; });
+    const keepAlpha = /png|svg|webp|gif/.test(file.type);
+    const k = Math.min(1, (keepAlpha ? 1400 : 1920) / Math.max(img.naturalWidth, img.naturalHeight));
+    const c = document.createElement("canvas");
+    c.width = Math.max(1, Math.round(img.naturalWidth * k)); c.height = Math.max(1, Math.round(img.naturalHeight * k));
+    const g = c.getContext("2d");
+    if (!keepAlpha) { g.fillStyle = "#000"; g.fillRect(0, 0, c.width, c.height); }
+    g.drawImage(img, 0, 0, c.width, c.height);
+    const data = c.toDataURL(keepAlpha ? "image/png" : "image/jpeg", 0.86);
+    const id = uid();
+    await storeSet("slide_img:" + id, data);
+    const idx = (await storeGet("slide_images")) || [];
+    await storeSet("slide_images", [...idx, { id, name: file.name, addedAt: Date.now() }]);
+    SLIDE_IMG_CACHE.set(id, data);
+    return id;
+  } finally { URL.revokeObjectURL(url); }
+}
+async function slideImgDelete(id) {
+  const idx = (await storeGet("slide_images")) || [];
+  await storeSet("slide_images", idx.filter(x => x.id !== id));
+  await storeDelete("slide_img:" + id);
+  SLIDE_IMG_CACHE.delete(id);
+}
+function useSlideImgs(ids) {
+  const [m, setM] = useState({});
+  const key = ids.join("|");
+  useEffect(() => {
+    let off = false;
+    (async () => { const out = {}; for (const id of ids) { const v = await slideImgGet(id); if (v) out[id] = v; } if (!off) setM(out); })();
+    return () => { off = true; };
+  }, [key]);
+  return m;
+}
+function slideImageIds(slide) {
+  const ids = [];
+  if (slide.bg?.imageId) ids.push(slide.bg.imageId);
+  (slide.elements || []).forEach(e => { if (e.type === "image" && e.imageId) ids.push(e.imageId); });
+  return ids;
+}
+
+// --- Données liées : Scouting Comparison, Observation, logos, fiches joueurs -------------------------------
+const SLIDE_PLAYER_CACHE = new Map();
+let SLIDE_FFBB_LOGOS = null;
+async function slideFfbbLogo(name) {
+  try {
+    if (!SLIDE_FFBB_LOGOS) SLIDE_FFBB_LOGOS = fetch("/.netlify/functions/ffbb-nm1-logos").then(r => (r.ok ? r.json() : { teams: [] })).catch(() => ({ teams: [] }));
+    const d = await SLIDE_FFBB_LOGOS;
+    const t = (d.teams || []).find(x => x.logo && normTag(x.name) === normTag(name)) || (d.teams || []).find(x => x.logo && ffbbSameOpponent(x.name, name));
+    return t ? await ffbbSvgToPng(t.logo, 400) : null;
+  } catch (e) { return null; }
+}
+// Mes matchs (box scores + codage) : liste, stats d'équipe par match, actions codées (Team Play).
+async function loadMine() {
+  const bIdx = (await storeGet("boxscore_index")) || [], cIdx = (await storeGet("match_index")) || [];
+  const meta = new Map();
+  [...cIdx, ...bIdx].forEach(m => { const k = matchKey(m.date, m.opponent); meta.set(k, { ...(meta.get(k) || {}), key: k, date: m.date, opponent: m.opponent, season: m.season, matchType: m.matchType }); });
+  const adv = await loadTeamAdvancedStats(null);
+  const rows = {};
+  (adv.perMatch || []).forEach(r => { rows[matchKey(r.date, r.opponent)] = r; });
+  const plays = [];
+  for (const m of cIdx) {
+    const d = await storeGet("match:" + m.id);
+    if (d && Array.isArray(d.plays)) d.plays.forEach(p => plays.push({ ...p, _key: matchKey(m.date, m.opponent) }));
+  }
+  const list = [...meta.values()].map(m => {
+    const r = rows[m.key];
+    return { ...m, myScore: r && r.pts !== null && r.pts !== undefined ? r.pts : null, oppScore: r && r.opponentScore !== undefined ? r.opponentScore : null };
+  }).sort((a, b) => String(b.date).localeCompare(String(a.date)));
+  return { list, rows, plays, season: await storeGet("current_season") };
+}
+async function loadSlideData(names, playerTeams, needMine) {
+  const teamNames = (await storeGet("scouting_teams")) || [];
+  const teams = {};
+  for (const n of teamNames) { const t = await storeGet("scouting:" + n); if (t) teams[n] = t; }
+  const obs = (await storeGet("scouting_observations")) || {};
+  const layout = { ...DEFAULT_SCOUTING_LAYOUT, ...((await storeGet("scouting_layout")) || {}) };
+  const logos = {};
+  for (const n of names) {
+    if (!n) continue;
+    const key = teamNames.find(x => normTag(x) === normTag(n)) || teamNames.find(x => ffbbSameOpponent(x, n));
+    logos[n] = (key && teams[key]?.logo) || (await slideFfbbLogo(n));
+  }
+  const players = {};
+  for (const t of playerTeams) {
+    if (!t) continue;
+    if (!SLIDE_PLAYER_CACHE.has(t)) {
+      const ids = (await storeGet("scouting_players:" + t)) || [];
+      const list = [];
+      for (const id of ids) { const p = await storeGet("scouting_player:" + t + ":" + id); if (p) list.push(p); }
+      SLIDE_PLAYER_CACHE.set(t, { list, bg: await storeGet("scouting_team_bg:" + t) });
+    }
+    players[t] = SLIDE_PLAYER_CACHE.get(t);
+  }
+  const mine = needMine ? await loadMine() : null;
+  return { teams, teamNames, obs, layout, logos, players, mine };
+}
+const EMPTY_SLIDE_DATA = { teams: {}, teamNames: [], obs: {}, layout: DEFAULT_SCOUTING_LAYOUT, logos: {}, players: {}, mine: null };
+function slideDataNeeds(slides) {
+  const names = new Set(), pteams = new Set();
+  let mine = false;
+  slides.forEach(s => {
+    const c = s.ctx || {};
+    if (isFeedbackKind(s.kind)) mine = true;
+    if ((s.elements || []).some(e => e.type === "stat" && (e.source === "box" || e.source === "team"))) mine = true;
+    if (c.myTeam) names.add(c.myTeam);
+    if (c.opponent) names.add(c.opponent);
+    (s.elements || []).forEach(e => {
+      if (e.type === "logo" && e.team && e.team !== "me" && e.team !== "opp") names.add(e.team);
+      if (e.type === "individual" && (e.team || c.opponent)) pteams.add(e.team || c.opponent);
+    });
+  });
+  return { names: [...names], pteams: [...pteams], mine };
+}
+function useSlideData(names, pteams, mine, version) {
+  const [data, setData] = useState(null);
+  const key = names.join("|") + "#" + pteams.join("|") + "#" + (mine ? 1 : 0) + "#" + (version || 0);
+  useEffect(() => {
+    let off = false;
+    loadSlideData(names, pteams, mine).then(d => { if (!off) setData(d); }).catch(() => { if (!off) setData(EMPTY_SLIDE_DATA); });
+    return () => { off = true; };
+  }, [key]);
+  return data || EMPTY_SLIDE_DATA;
+}
+function slideObsPlays(slide, el, data) {
+  const c = slide.ctx || {};
+  const want = el.obsTeam || c.obsTeam || c.opponent || "";
+  const key = Object.keys(data.obs || {}).find(k => normTag(k) === normTag(want));
+  return key ? observationIncludedPlays(data.obs[key]) : null;
+}
+function obsTagStat(plays, label, cats) {
+  const lists = Object.values(cats || {}).filter(l => Array.isArray(l) && l.some(x => normTag(x) === normTag(label)));
+  const matching = plays.filter(p => tagIsSet(p.tags, label));
+  const pts = matching.reduce((s, p) => s + playPoints(p.tags), 0);
+  let denom = plays.length;
+  if (lists[0]) denom = lists[0].reduce((s, l) => s + plays.filter(p => tagIsSet(p.tags, l)).length, 0);
+  return { count: matching.length, freq: denom ? (100 * matching.length) / denom : 0, pppp: matching.length ? pts / matching.length : 0, open: openPct(matching) };
+}
+const OBS_METRICS = [["freq", "Frequency"], ["pppp", "PPPP"], ["open", "Open %"], ["count", "Actions"]];
+// Stats d'équipe issues de MES box scores (même calcul que l'onglet Team) : [clé, libellé, décimales, "%"?]
+const BOX_STATS = [
+  ["pts", "Points", 0], ["oppPts", "Points allowed", 0], ["ortg", "ORTG", 1], ["drtg", "DRTG", 1], ["poss", "Possessions", 0],
+  ["efg", "eFG%", 1, "%"], ["tovPct", "% TOV", 1, "%"], ["orebPct", "% Reb OFF", 1, "%"], ["astPct", "% Assists", 1, "%"],
+  ["pct2", "% 2pts", 1, "%"], ["pct3", "% 3pts", 1, "%"], ["pctFT", "% LF", 1, "%"], ["ftRate", "FT rate (FTA/FGA)", 1, "%"],
+  ["ast", "Assists", 0], ["tov", "Turnovers", 0], ["stl", "Steals", 0], ["blk", "Blocks", 0], ["fouls", "Fouls", 0],
+  ["reb", "Rebounds", 0], ["oreb", "Off. rebounds", 0], ["dreb", "Def. rebounds", 0], ["eff", "Evaluation", 0], ["plusMinus", "+/-", 0], ["fga", "FG attempted", 0], ["fta", "FT attempted", 0],
+];
+const BOX_PCT_X100 = ["efg", "tovPct", "ftRate"]; // stockés en fraction match par match
+function slideScopeKeys(slide, scope, mine) {
+  const c = slide.ctx || {};
+  if (scope === "match") return c.fbMatch && c.fbMatch.key ? [c.fbMatch.key] : [];
+  const all = mine.list.map(m => m.key);
+  if (scope === "season") return mine.list.filter(m => m.season === mine.season).map(m => m.key);
+  return all;
+}
+function boxStatValue(mine, keys, stat) {
+  const rows = keys.map(k => mine.rows[k]).filter(Boolean);
+  if (!rows.length) return { v: null, n: 0 };
+  let v;
+  if (rows.length === 1) {
+    const r = rows[0];
+    v = stat === "oppPts" ? r.opponentScore : r[stat];
+    if (v !== null && v !== undefined && BOX_PCT_X100.includes(stat)) v *= 100;
+  } else {
+    const w = computeWeightedTeamPercentages(rows);
+    if (stat in w) { v = w[stat]; if (v !== null && stat === "ftRate") v *= 100; }
+    else {
+      const vals = rows.map(r => (stat === "oppPts" ? r.opponentScore : r[stat])).filter(x => x !== null && x !== undefined);
+      v = vals.length ? vals.reduce((a, b) => a + b, 0) / vals.length : null;
+    }
+  }
+  return { v: v === undefined ? null : v, n: rows.length };
+}
+const SCOPE_LABELS = { match: "this match", season: "current season", all: "all matches" };
+// Contenu d'un bloc de stats : { label, items:[{text, name, color}], note }
+function slideStatInfo(el, slide, data) {
+  const c = slide.ctx || {};
+  if (el.source === "box") {
+    const def = BOX_STATS.find(b => b[0] === el.key);
+    const label = el.label || (def ? def[1] : "Choose a stat");
+    const scope = el.scope || (isFeedbackKind(slide.kind) ? "match" : "all");
+    const fmt = (v) => (v === null || v === undefined ? "–" : v.toFixed(def ? def[2] : 1) + (def && def[3] ? "%" : ""));
+    if (!def) return { label, items: [{ text: "–", color: el.color || AMBER }], note: "" };
+    if (!data.mine) return { label, items: [{ text: "–", color: el.color || AMBER }], note: "loading…" };
+    const a = boxStatValue(data.mine, slideScopeKeys(slide, scope, data.mine), el.key);
+    const items = [{ text: fmt(a.v), name: el.compare && scope === "match" ? "Match" : "", color: el.color || AMBER }];
+    if (el.compare && scope === "match") items.push({ text: fmt(boxStatValue(data.mine, slideScopeKeys(slide, "all", data.mine), el.key).v), name: "Average", color: TEAL });
+    return { label, items, note: a.n ? (scope === "match" ? "" : `${SCOPE_LABELS[scope]} · ${a.n} match${a.n > 1 ? "es" : ""}`) : (scope === "match" ? "no box score for this match" : "no data") };
+  }
+  if (el.source === "team") {
+    const tag = el.tag === "@play" ? (c.play || "") : (el.tag || "");
+    const metric = el.metric || "freq";
+    const mname = (OBS_METRICS.find(m => m[0] === metric) || [])[1] || "";
+    const side = (el.obsSide && el.obsSide !== "slide") ? el.obsSide : (c.side || "off");
+    const label = el.label || [tag, mname].filter(Boolean).join(" · ");
+    const scope = el.scope || (isFeedbackKind(slide.kind) ? "match" : "all");
+    if (!tag) return { label: el.label || "Choose a stat", items: [{ text: "–", color: el.color || AMBER }], note: "" };
+    if (!data.mine) return { label, items: [{ text: "–", color: el.color || AMBER }], note: "loading…" };
+    const keys = new Set(slideScopeKeys(slide, scope, data.mine));
+    const plays = data.mine.plays.filter(p => keys.has(p._key)).filter(side === "def" ? isDefense : isOffense);
+    const st = obsTagStat(plays, tag, currentTagCategories());
+    let text = "–";
+    if (st.count || metric === "count") text = metric === "freq" ? `${st.freq.toFixed(0)}%` : metric === "pppp" ? st.pppp.toFixed(2) : metric === "open" ? (st.open === null ? "–" : `${st.open.toFixed(0)}%`) : String(st.count);
+    return { label, items: [{ text, color: el.color || AMBER }], note: st.count ? `${st.count} action${st.count > 1 ? "s" : ""} · ${side === "def" ? "defense" : "offense"} · ${SCOPE_LABELS[scope]}` : (plays.length ? "" : "no coded match") };
+  }
+  if (el.source === "obs") {
+    const tag = el.tag === "@play" ? (c.play || "") : (el.tag || "");
+    const metric = el.metric || "freq";
+    const mname = (OBS_METRICS.find(m => m[0] === metric) || [])[1] || "";
+    const side = (el.obsSide && el.obsSide !== "slide") ? el.obsSide : (c.side || "off");
+    const label = el.label || [tag, mname].filter(Boolean).join(" · ");
+    const plays = slideObsPlays(slide, el, data);
+    if (!tag) return { label: el.label || "Choose a stat", items: [{ text: "–", color: el.color || AMBER }], note: "" };
+    if (!plays) return { label, items: [{ text: "–", color: el.color || AMBER }], note: "no observation" };
+    const sidePlays = plays.filter(side === "def" ? isDefense : isOffense);
+    const st = obsTagStat(sidePlays, tag, currentObservationTagCategories());
+    let text = "–";
+    if (st.count || metric === "count") {
+      text = metric === "freq" ? `${st.freq.toFixed(0)}%` : metric === "pppp" ? st.pppp.toFixed(2) : metric === "open" ? (st.open === null ? "–" : `${st.open.toFixed(0)}%`) : String(st.count);
+    }
+    return { label, items: [{ text, color: el.color || AMBER }], note: st.count ? `${st.count} action${st.count > 1 ? "s" : ""} · ${side === "def" ? "defense" : "offense"}` : "" };
+  }
+  // Scouting Comparison
+  const schema = SCOUT_STAT_SCHEMA.find(s => s.key === el.key);
+  const label = el.label || (schema ? schema.label : "Choose a stat");
+  const mode = el.mode || "vs";
+  const fmt = (v) => (v === undefined || v === null ? "–" : schema?.pct ? v.toFixed(1) + "%" : v.toFixed(1));
+  const find = (n) => { const k = Object.keys(data.teams || {}).find(x => normTag(x) === normTag(n)); return k ? { k, t: data.teams[k] } : null; };
+  const me = find(c.myTeam || ""), op = find(c.opponent || "");
+  const items = [];
+  const add = (who, name, found, color) => {
+    const v = found?.t?.stats?.[el.key];
+    const r = el.showRank && found ? leagueRank(data.teams, el.key, found.k) : null;
+    items.push({ text: fmt(v), name: r ? `${name} · #${r.rank}/${r.total}` : name, color });
+  };
+  if (mode !== "opp") add("me", c.myTeam || "My team", me, AMBER);
+  if (mode !== "me") add("opp", c.opponent || "Opponent", op, TEAL);
+  return { label, items, note: "" };
+}
+
+// --- Modèles par défaut --------------------------------------------------------------------------------------
+const sEl = (type, x, y, w, h, extra) => ({ id: uid(), type, x, y, w, h, ...extra });
+const sText = (x, y, w, h, content, o) => sEl("text", x, y, w, h, { content, font: "Oswald", size: 32, color: "#FFFFFF", weight: 700, align: "center", upper: false, shadow: false, ...o });
+const sStat = (x, y, w, h, o) => sEl("stat", x, y, w, h, { source: "cmp", key: "ortg", mode: "vs", color: AMBER, ...o });
+function playDiagramRects(n) {
+  const T = 150, H = 540;
+  if (n <= 1) return [{ x: 190, y: T, w: 900, h: H }];
+  if (n === 2) return [{ x: 60, y: T, w: 570, h: H }, { x: 650, y: T, w: 570, h: H }];
+  if (n === 3) return [{ x: 60, y: T, w: 700, h: H }, { x: 780, y: T, w: 440, h: 260 }, { x: 780, y: T + 280, w: 440, h: 260 }];
+  return [{ x: 60, y: T, w: 570, h: 260 }, { x: 650, y: T, w: 570, h: 260 }, { x: 60, y: T + 280, w: 570, h: 260 }, { x: 650, y: T + 280, w: 570, h: 260 }];
+}
+const sSlot = (r, imageId) => sEl("image", r.x, r.y, r.w, r.h, { imageId: imageId || null, slot: true, fit: "contain", frame: true, frameColor: "#FFFFFF", frameWidth: 3, radius: 14 });
+function applyDiagramLayout(elements, n) {
+  const slots = elements.filter(e => e.slot);
+  const rects = playDiagramRects(n);
+  const next = rects.map((r, i) => (slots[i] ? { ...slots[i], ...r } : sSlot(r)));
+  return [...next, ...elements.filter(e => !e.slot)];
+}
+function defaultSlide(kind, ctx) {
+  const k = SLIDE_KINDS.find(x => x.id === kind) || SLIDE_KINDS[0];
+  const base = { id: uid(), type: "slide", kind, duration: k.duration, bg: { c1: "#0B1220", c2: "#16233B", imageId: null, dark: 45 }, ctx: { lang: "fr", side: "off", ...ctx }, elements: [] };
+  const accent = AMBER;
+  if (kind === "presentation") {
+    base.elements = [
+      sEl("logo", 70, 50, 190, 190, { team: "me" }), sEl("logo", 1020, 50, 190, 190, { team: "opp" }),
+      sText(40, 246, 250, 40, "{myTeam}", { size: 26 }), sText(990, 246, 250, 40, "{opponent}", { size: 26 }),
+      sText(290, 50, 700, 44, "{matchday}", { size: 28, color: accent, upper: true, spacing: 6 }),
+      sText(240, 96, 800, 120, "{opponent}", { font: "Anton", size: 96, weight: 400, upper: true, shadow: true }),
+      sText(290, 214, 700, 44, "{dateTime}", { size: 32, weight: 400 }),
+      sText(290, 262, 700, 40, "{venueCity}", { size: 24, weight: 400, color: "#B9C2D0" }),
+      sStat(44, 400, 280, 230, { key: "ortg" }), sStat(348, 400, 280, 230, { key: "drtg" }),
+      sStat(652, 400, 280, 230, { key: "efg" }), sStat(956, 400, 280, 230, { key: "pctbp" }),
+    ];
+  } else if (kind === "side") {
+    base.elements = [
+      sEl("logo", 1010, 30, 220, 220, { team: "opp" }),
+      sText(60, 50, 900, 60, "{myTeam}  vs  {opponent}", { size: 34, weight: 400, align: "left", color: "#B9C2D0" }),
+      sText(60, 200, 1160, 320, "{side}", { font: "Anton", size: 250, weight: 400, color: accent, upper: true, shadow: true }),
+    ];
+  } else if (kind === "section") {
+    base.elements = [
+      sText(60, 40, 1160, 110, "SUB-SECTION TITLE", { font: "Anton", size: 72, weight: 400, align: "left", upper: true }),
+      sEl("rect", 60, 152, 180, 8, { color: accent, opacity: 1, radius: 4 }),
+      sStat(60, 200, 360, 200, { source: "obs", tag: "", metric: "freq", obsSide: "slide" }),
+      sStat(460, 200, 360, 200, { source: "obs", tag: "", metric: "pppp", obsSide: "slide" }),
+      sStat(860, 200, 360, 200, { source: "obs", tag: "", metric: "open", obsSide: "slide" }),
+      sText(60, 440, 1160, 230, "Free text…", { size: 30, weight: 400, align: "left" }),
+    ];
+  } else if (kind === "play") {
+    base.elements = [
+      ...playDiagramRects(2).map(r => sSlot(r)),
+      sText(60, 24, 800, 100, "{play}", { font: "Anton", size: 64, weight: 400, align: "left", upper: true, shadow: true }),
+      sStat(880, 20, 160, 110, { source: "obs", tag: "@play", metric: "freq", obsSide: "slide" }),
+      sStat(1060, 20, 160, 110, { source: "obs", tag: "@play", metric: "pppp", obsSide: "slide" }),
+    ];
+    base.ctx.diagrams = 2;
+  } else if (kind === "individual") {
+    base.elements = [sEl("individual", 190, 30, 900, 660, { team: "", playerId: "" })];
+  } else if (kind === "fb_match") {
+    base.elements = [
+      sText(60, 40, 1160, 100, "MATCH FEEDBACK", { font: "Anton", size: 72, weight: 400, upper: true, shadow: true }),
+      sText(240, 138, 800, 44, "{dateTime}", { size: 30, weight: 400, color: "#B9C2D0" }),
+      sEl("logo", 110, 230, 280, 280, { team: "me" }), sEl("logo", 890, 230, 280, 280, { team: "opp" }),
+      sText(80, 520, 340, 50, "{myTeam}", { size: 34 }), sText(860, 520, 340, 50, "{opponent}", { size: 34 }),
+      sText(400, 250, 480, 220, "{score}", { font: "Anton", size: 150, weight: 400, shadow: true }),
+      sText(400, 476, 480, 60, "{result}", { size: 40, color: accent, upper: true, spacing: 8 }),
+    ];
+  } else if (kind === "fb_section") {
+    base.elements = [
+      sText(60, 40, 1160, 110, "PART TITLE", { font: "Anton", size: 72, weight: 400, align: "left", upper: true }),
+      sEl("rect", 60, 152, 180, 8, { color: accent, opacity: 1, radius: 4 }),
+      sStat(60, 200, 360, 200, { source: "box", key: "ortg", scope: "match" }),
+      sStat(460, 200, 360, 200, { source: "box", key: "efg", scope: "match" }),
+      sStat(860, 200, 360, 200, { source: "box", key: "tovPct", scope: "match" }),
+      sText(60, 440, 1160, 230, "Free text…", { size: 30, weight: 400, align: "left" }),
+    ];
+  }
+  return base;
+}
+function cloneSlideFresh(s) {
+  return { ...s, id: uid(), elements: (s.elements || []).map(e => ({ ...e, id: uid() })), bg: { ...(s.bg || {}) }, ctx: { ...(s.ctx || {}) } };
+}
+async function newSlideFor(kind, prevCtx) {
+  const tpls = (await storeGet("slide_templates")) || {};
+  const last = (await storeGet("slide_last_ctx")) || {};
+  const inherit = {};
+  const src = { ...last, ...(prevCtx || {}) };
+  ["myTeam", "opponent", "obsTeam", "game", "games", "lang", "side", "fbMatch"].forEach(k => { if (src[k] !== undefined) inherit[k] = src[k]; });
+  if (!inherit.myTeam) { // par défaut : mon équipe (celle de la synchro FFBB), si elle figure dans Scouting
+    const names = (await storeGet("scouting_teams")) || [], mine = (await storeGet("ffbb_box_team")) || "Vitré";
+    const f = names.find(n => normTag(n) === normTag(mine));
+    if (f) inherit.myTeam = f;
+  }
+  const t = tpls[kind];
+  if (t) {
+    const s = cloneSlideFresh({ ...defaultSlide(kind), ...t, type: "slide", kind });
+    s.ctx = { ...(t.ctx || {}), ...inherit };
+    return s;
+  }
+  return defaultSlide(kind, inherit);
+}
+function slideTitle(s) {
+  const c = s.ctx || {};
+  const extra = s.kind === "play" ? c.play : s.kind === "side" ? (c.side === "def" ? "Defense" : "Offense") : s.kind === "fb_section" ? ((s.elements || []).find(e => e.type === "text") || {}).content : c.opponent;
+  return `${slideKindLabel(s.kind)}${extra ? " — " + extra : ""}`;
+}
+
+// --- Rendu d'une slide ---------------------------------------------------------------------------------------
+function resolveLogoName(el, slide) {
+  const c = slide.ctx || {};
+  return el.team === "me" ? c.myTeam : el.team === "opp" ? c.opponent : el.team;
+}
+function SlideStatBlock({ el, slide, data }) {
+  const info = slideStatInfo(el, slide, data);
+  const accent = el.color || AMBER;
+  const n = info.items.length;
+  const maxLen = Math.max(3, ...info.items.map(i => String(i.text).length));
+  const vs = Math.round(el.valueSize || Math.min(el.h * 0.36, (el.w - 28) / (n * (maxLen * 0.55 + 0.5)), 110));
+  const ls = Math.round(el.labelSize || Math.max(13, Math.min(el.h * 0.12, 26)));
+  const font = `'${el.font || "Oswald"}', sans-serif`;
+  return (
+    <div style={{ width: "100%", height: "100%", boxSizing: "border-box", background: el.bg || "rgba(255,255,255,0.08)", border: `2px solid ${hexRgba(accent, 0.55)}`, borderRadius: el.radius ?? 18, padding: "10px 14px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: font, overflow: "hidden" }}>
+      <div style={{ fontSize: ls, color: accent, textTransform: "uppercase", letterSpacing: 2, fontWeight: 700, textAlign: "center", lineHeight: 1.1, marginBottom: 6 }}>{info.label}</div>
+      <div style={{ display: "flex", gap: Math.round(vs * 0.5), alignItems: "flex-start", justifyContent: "center", width: "100%" }}>
+        {info.items.map((it, i) => (
+          <div key={i} style={{ textAlign: "center", minWidth: 0 }}>
+            <div style={{ fontSize: vs, fontWeight: 700, color: it.color, lineHeight: 1.05 }}>{it.text}</div>
+            {it.name && <div style={{ fontSize: Math.max(11, Math.round(ls * 0.75)), color: "#B9C2D0", marginTop: 2, whiteSpace: "nowrap" }}>{it.name}</div>}
+          </div>
+        ))}
+      </div>
+      {info.note && <div style={{ fontSize: Math.max(11, Math.round(ls * 0.7)), color: "#8B93A1", marginTop: 6 }}>{info.note}</div>}
+    </div>
+  );
+}
+function SlideIndividual({ el, slide, data }) {
+  const team = el.team || slide.ctx?.opponent || "";
+  const rec = data.players?.[team];
+  const player = rec && (rec.list.find(p => p.id === el.playerId) || null);
+  const tkey = Object.keys(data.teams || {}).find(k => normTag(k) === normTag(team));
+  const logo = tkey ? data.teams[tkey].logo : null;
+  const ref = useRef(null);
+  const [cardW, setCardW] = useState(el.w);
+  useEffect(() => { setCardW(el.w); }, [el.w, el.h, player && player.id]);
+  useEffect(() => {
+    const node = ref.current;
+    if (!node || !player) return;
+    const h = node.offsetHeight;
+    if (h > el.h + 1 && cardW > 200) setCardW(Math.floor(cardW * (el.h / h)));
+  });
+  if (!player) return <div style={{ width: "100%", height: "100%", border: "2px dashed #5C6470", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", color: "#8B93A1", fontSize: 22, fontFamily: "sans-serif", textAlign: "center", padding: 20 }}>Choose a scouted player (Scouting report — individual)</div>;
+  return (
+    <div style={{ width: "100%", height: "100%", display: "flex", justifyContent: "center", alignItems: "flex-start", overflow: "hidden" }}>
+      <div ref={ref} style={{ width: cardW }}>
+        <ScoutingPlayerCard player={player} isCoach={false} bgPhoto={rec.bg?.photo} bgDarkness={rec.bg?.darkness} bgStretch={rec.bg?.stretch} teamLogo={logo} layout={data.layout} onEdit={() => {}} onDelete={() => {}} printMode fitWidthPx={cardW} />
+      </div>
+    </div>
+  );
+}
+function SlideElementView({ el, slide, data, imgs, editable }) {
+  const vars = slideVars(slide);
+  if (el.type === "text") {
+    const just = el.align === "left" ? "flex-start" : el.align === "right" ? "flex-end" : "center";
+    return (
+      <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: just, overflow: "hidden" }}>
+        <div style={{ width: "100%", textAlign: el.align || "center", fontFamily: `'${el.font || "Oswald"}', sans-serif`, fontSize: el.size || 32, fontWeight: el.weight || 700, fontStyle: el.italic ? "italic" : "normal", color: el.color || "#FFFFFF", lineHeight: 1.12, letterSpacing: el.spacing || 0, textTransform: el.upper ? "uppercase" : "none", whiteSpace: "pre-wrap", textShadow: el.shadow ? "0 3px 14px rgba(0,0,0,0.65)" : "none" }}>{slideText(el.content, vars)}</div>
+      </div>
+    );
+  }
+  if (el.type === "logo") {
+    const name = resolveLogoName(el, slide);
+    const src = name ? data.logos?.[name] : null;
+    if (!src) return editable ? <div style={{ width: "100%", height: "100%", border: "2px dashed #5C6470", borderRadius: "50%", display: "flex", alignItems: "center", justifyContent: "center", color: "#8B93A1", fontSize: 16, fontFamily: "sans-serif", textAlign: "center" }}>{name ? "No logo" : "Choose team"}</div> : null;
+    return <div style={{ width: "100%", height: "100%", backgroundImage: `url(${src})`, backgroundSize: "contain", backgroundRepeat: "no-repeat", backgroundPosition: "center", opacity: el.opacity ?? 1 }} />;
+  }
+  if (el.type === "image") {
+    const src = el.imageId ? imgs[el.imageId] : null;
+    const frame = el.frame ? `${el.frameWidth ?? 3}px solid ${el.frameColor || "#FFFFFF"}` : "none";
+    if (!src) return editable ? <div style={{ width: "100%", height: "100%", boxSizing: "border-box", border: "2px dashed #5C6470", borderRadius: el.radius ?? 0, display: "flex", alignItems: "center", justifyContent: "center", color: "#8B93A1", fontSize: 20, fontFamily: "sans-serif", textAlign: "center" }}>{el.slot ? "Diagram — double-click to choose" : "Image — double-click to choose"}</div> : null;
+    return <div style={{ width: "100%", height: "100%", boxSizing: "border-box", border: frame, borderRadius: el.radius ?? 0, overflow: "hidden", backgroundImage: `url(${src})`, backgroundSize: el.fit === "cover" ? "cover" : "contain", backgroundRepeat: "no-repeat", backgroundPosition: "center", backgroundColor: el.fit === "contain" && el.frame ? "rgba(255,255,255,0.05)" : "transparent" }} />;
+  }
+  if (el.type === "rect") return <div style={{ width: "100%", height: "100%", background: hexRgba(el.color || "#FFFFFF", el.opacity ?? 0.15), borderRadius: el.radius ?? 0 }} />;
+  if (el.type === "stat") return <SlideStatBlock el={el} slide={slide} data={data} />;
+  if (el.type === "individual") return <SlideIndividual el={el} slide={slide} data={data} />;
+  return null;
+}
+function SlideCanvas({ slide, data, imgs, editable, scale, selectedId, onSelect, onPatch, onEditImage }) {
+  const drag = useRef(null);
+  const live = useRef({});
+  live.current = { onPatch, scale };
+  useEffect(() => {
+    if (!editable) return;
+    const mv = (e) => {
+      const d = drag.current; if (!d) return;
+      const k = live.current.scale || 1, dx = (e.clientX - d.sx) / k, dy = (e.clientY - d.sy) / k;
+      if (d.mode === "move") live.current.onPatch(d.id, { x: Math.round(d.x + dx), y: Math.round(d.y + dy) });
+      else live.current.onPatch(d.id, { w: Math.max(20, Math.round(d.w + dx)), h: Math.max(20, Math.round(d.h + dy)) });
+    };
+    const up = () => { drag.current = null; };
+    window.addEventListener("pointermove", mv); window.addEventListener("pointerup", up);
+    return () => { window.removeEventListener("pointermove", mv); window.removeEventListener("pointerup", up); };
+  }, [editable]);
+  const bg = slide.bg || {};
+  const bgImg = bg.imageId ? imgs[bg.imageId] : null;
+  return (
+    <div onPointerDown={editable ? () => onSelect && onSelect(null) : undefined} style={{ position: "relative", width: SLIDE_W, height: SLIDE_H, overflow: "hidden", background: `linear-gradient(135deg, ${bg.c1 || "#0B1220"}, ${bg.c2 || bg.c1 || "#16233B"})`, userSelect: "none" }}>
+      {bgImg && <div style={{ position: "absolute", left: 0, top: 0, width: SLIDE_W, height: SLIDE_H, backgroundImage: `url(${bgImg})`, backgroundSize: "cover", backgroundPosition: "center" }} />}
+      {bgImg && <div style={{ position: "absolute", left: 0, top: 0, width: SLIDE_W, height: SLIDE_H, background: `rgba(0,0,0,${(bg.dark ?? 45) / 100})` }} />}
+      {(slide.elements || []).map(el => {
+        const sel = editable && selectedId === el.id;
+        return (
+          <div key={el.id}
+            onPointerDown={editable ? (e) => { e.stopPropagation(); e.preventDefault(); onSelect(el.id); drag.current = { id: el.id, mode: "move", sx: e.clientX, sy: e.clientY, x: el.x, y: el.y, w: el.w, h: el.h }; } : undefined}
+            onDoubleClick={editable && el.type === "image" ? () => onEditImage && onEditImage(el.id) : undefined}
+            style={{ position: "absolute", left: el.x, top: el.y, width: el.w, height: el.h, outline: sel ? "3px solid #2FB8A6" : "none", outlineOffset: 2, cursor: editable ? "move" : "default" }}>
+            <SlideElementView el={el} slide={slide} data={data} imgs={imgs} editable={editable} />
+            {sel && <div onPointerDown={(e) => { e.stopPropagation(); e.preventDefault(); drag.current = { id: el.id, mode: "size", sx: e.clientX, sy: e.clientY, x: el.x, y: el.y, w: el.w, h: el.h }; }} style={{ position: "absolute", right: -14, bottom: -14, width: 26, height: 26, background: "#2FB8A6", borderRadius: 6, cursor: "nwse-resize" }} />}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+// Slide mise à l'échelle dans la largeur disponible (aperçus, lecteur, éditeur).
+function ScaledSlide({ slide, data, imgs, maxWidth, editable, selectedId, onSelect, onPatch, onEditImage }) {
+  const ref = useRef(null);
+  const [w, setW] = useState(maxWidth || 400);
+  useEffect(() => { ensureSlideFonts(); }, []);
+  useEffect(() => {
+    const el = ref.current; if (!el) return;
+    const upd = () => setW(el.clientWidth || maxWidth || 400);
+    upd();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(upd); ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const s = w / SLIDE_W;
+  return (
+    <div ref={ref} style={{ width: "100%", maxWidth: maxWidth || "100%", aspectRatio: "16 / 9", position: "relative", overflow: "hidden", borderRadius: 8, background: "#000", border: `1px solid ${LINE}` }}>
+      <div style={{ position: "absolute", left: 0, top: 0, width: SLIDE_W, height: SLIDE_H, transform: `scale(${s})`, transformOrigin: "top left" }}>
+        <SlideCanvas slide={slide} data={data} imgs={imgs} editable={editable} scale={s} selectedId={selectedId} onSelect={onSelect} onPatch={onPatch} onEditImage={onEditImage} />
+      </div>
+    </div>
+  );
+}
+
+// Roues du Scouting Report : html2canvas coupe ce qui dépasse d'un SVG → même contournement que l'export PDF
+// (roue pré-rendue en PNG avec marge, posée à la place du SVG le temps de la capture). Renvoie les « annuler ».
+async function slideSwapRoses(root) {
+  const undo = [];
+  for (const sv of [...root.querySelectorAll("svg[data-rose]")]) {
+    try {
+      const w = parseFloat(sv.getAttribute("width")); const pad = Math.round(w * 0.3); const T = w + 2 * pad;
+      const c = sv.cloneNode(true);
+      c.setAttribute("xmlns", "http://www.w3.org/2000/svg"); c.setAttribute("width", T); c.setAttribute("height", T);
+      c.setAttribute("viewBox", `${-pad} ${-pad} ${T} ${T}`); c.removeAttribute("style");
+      const url = URL.createObjectURL(new Blob([new XMLSerializer().serializeToString(c)], { type: "image/svg+xml;charset=utf-8" }));
+      const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
+      const k = Math.min(2, 1800 / T); const cv = document.createElement("canvas"); cv.width = Math.round(T * k); cv.height = Math.round(T * k);
+      cv.getContext("2d").drawImage(img, 0, 0, cv.width, cv.height); URL.revokeObjectURL(url);
+      const dataUrl = cv.toDataURL("image/png");
+      if (dataUrl.length < 2000) continue;
+      const box = document.createElement("div"); box.style.cssText = `position:relative;flex-shrink:0;width:${w}px;height:${w}px`;
+      const im = document.createElement("img"); im.src = dataUrl;
+      im.style.cssText = `position:absolute;left:${-pad}px;top:${-pad}px;width:${w + 2 * pad}px;height:${w + 2 * pad}px;max-width:none;max-height:none;min-width:0;display:block`;
+      box.appendChild(im);
+      await im.decode();
+      sv.parentNode.insertBefore(box, sv); sv.style.display = "none";
+      undo.push(() => { box.remove(); sv.style.display = ""; });
+    } catch (e) { /* on garde la roue SVG d'origine */ }
+  }
+  return undo;
+}
+// Slide → PNG 1280×720 (même rendu que l'aperçu).
+async function renderSlidePng(slide, data, imgs) {
+  ensureSlideFonts();
+  const host = document.createElement("div");
+  host.style.cssText = `position:fixed;left:-20000px;top:0;width:${SLIDE_W}px;height:${SLIDE_H}px;pointer-events:none`;
+  document.body.appendChild(host);
+  const root = createRoot(host);
+  let undo = [];
+  try {
+    root.render(<SlideCanvas slide={slide} data={data} imgs={imgs} />);
+    const urls = [...Object.values(imgs || {}), ...Object.values(data.logos || {})].filter(Boolean);
+    await Promise.all(urls.map(u => { const im = new Image(); im.src = u; return im.decode().catch(() => {}); }));
+    const fonts = new Set((slide.elements || []).map(e => e.font || (e.type === "text" || e.type === "stat" ? "Oswald" : null)).filter(Boolean));
+    if (document.fonts) {
+      await Promise.all([...fonts].map(f => document.fonts.load(`700 40px "${f}"`).catch(() => {})));
+      try { await document.fonts.ready; } catch (e) { /* ignoré */ }
+    }
+    await new Promise(r => setTimeout(r, 450));
+    undo = await slideSwapRoses(host);
+    const { default: html2canvas } = await import("html2canvas");
+    const canvas = await html2canvas(host.firstChild, { backgroundColor: null, scale: 1, useCORS: true, logging: false, width: SLIDE_W, height: SLIDE_H });
+    return await new Promise((res, rej) => canvas.toBlob(b => (b ? res(b) : rej(new Error("Slide rendering failed."))), "image/png"));
+  } finally {
+    undo.forEach(f => f());
+    try { root.unmount(); } catch (e) { /* déjà démonté */ }
+    host.remove();
+  }
+}
+
+// --- Éditeur ---------------------------------------------------------------------------------------------------
+const sInp = { ...inputStyle, width: "100%", boxSizing: "border-box", letterSpacing: "normal", fontFamily: "inherit", fontSize: 13, padding: "7px 9px" };
+function SField({ label, children, w }) {
+  return <div style={{ flex: w ? `0 0 ${w}px` : "1 1 0", minWidth: w ? 0 : 90 }}><label style={{ ...labelStyle, marginBottom: 3, fontSize: 10 }}>{label}</label>{children}</div>;
+}
+function SlideImagePicker({ onPick, onClose }) {
+  const [list, setList] = useState(null);
+  const [imgs, setImgs] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  async function load() {
+    const idx = (await storeGet("slide_images")) || [];
+    setList(idx);
+    const m = {}; for (const x of idx) { const v = await slideImgGet(x.id); if (v) m[x.id] = v; }
+    setImgs(m);
+  }
+  useEffect(() => { load(); }, []);
+  async function upload(e) {
+    const f = e.target.files[0]; e.target.value = "";
+    if (!f) return;
+    setBusy(true); setErr("");
+    try { const id = await slideImgUpload(f); onPick(id); } catch (x) { setErr(x.message || "Upload failed."); }
+    setBusy(false);
+  }
+  async function del(id) { await slideImgDelete(id); load(); }
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.8)", zIndex: 1100, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, width: "100%", maxWidth: 760, maxHeight: "86vh", overflow: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: PAPER }}>Image library</div>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer" }}><X size={18} /></button>
+        </div>
+        <label style={{ ...btnPrimary, flex: "none", display: "inline-block", cursor: "pointer", marginBottom: 12 }}>{busy ? "Uploading…" : "Upload a new image"}<input type="file" accept="image/*" onChange={upload} style={{ display: "none" }} /></label>
+        {err && <div style={{ color: RED, fontSize: 12.5, marginBottom: 8 }}>{err}</div>}
+        <div style={{ fontSize: 11.5, color: "#5C6470", marginBottom: 10 }}>Images are resized and saved once on the site, so you can reuse them on any slide.</div>
+        {list && !list.length && <div style={{ fontSize: 12.5, color: "#8B93A1" }}>No image yet.</div>}
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 10 }}>
+          {(list || []).map(x => (
+            <div key={x.id} style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, padding: 6 }}>
+              <div onClick={() => onPick(x.id)} style={{ cursor: "pointer", height: 100, borderRadius: 6, backgroundColor: "#0B1220", backgroundImage: imgs[x.id] ? `url(${imgs[x.id]})` : "none", backgroundSize: "contain", backgroundRepeat: "no-repeat", backgroundPosition: "center" }} />
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4, gap: 4 }}>
+                <span style={{ fontSize: 10.5, color: "#8B93A1", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{x.name}</span>
+                <button onClick={() => del(x.id)} title="Delete from the library" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={12} /></button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+async function fetchFfbbGames(myTeam, opponent) {
+  const r = await fetch(`/.netlify/functions/ffbb-nm1-matches?mode=games&team=${encodeURIComponent(myTeam)}&opp=${encodeURIComponent(opponent)}`);
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || `FFBB unavailable (${r.status}).`);
+  return j.games || [];
+}
+const gameLabel = (g) => `${g.journee || "?"} · ${g.dm || "?"} ${g.time || ""} · ${g.home} – ${g.away}${g.played ? " (played)" : ""}`;
+
+function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
+  const [selId, setSelId] = useState(null);
+  const [picker, setPicker] = useState(null); // { target: "bg" | elementId }
+  const [msg, setMsg] = useState("");
+  const [fetching, setFetching] = useState(false);
+  const [saved, setSaved] = useState("");
+  const c = slide.ctx || {};
+  const els = slide.elements || [];
+  const sel = els.find(e => e.id === selId) || null;
+  const cats = currentObservationTagCategories();
+  const teamNames = data.teamNames || [];
+  const obsNames = Object.keys(data.obs || {});
+  const setCtx = (p) => onChange({ ctx: { ...c, ...p } });
+  const patchEl = (id, p) => onChange({ elements: els.map(e => (e.id === id ? { ...e, ...p } : e)) });
+  const setBg = (p) => onChange({ bg: { ...(slide.bg || {}), ...p } });
+  const addEl = (el) => { onChange({ elements: [...els, el] }); setSelId(el.id); };
+  const game = c.game || {};
+  const setGame = (p) => setCtx({ game: { ...game, ...p } });
+
+  async function refreshGames(me, opp, keep) {
+    if (!me || !opp) return;
+    setFetching(true); setMsg("");
+    try {
+      const games = await fetchFfbbGames(me, opp);
+      if (!games.length) { setCtx({ myTeam: me, opponent: opp, games: [] }); setMsg("No match found on the FFBB site for these two teams — fill the fields below by hand."); }
+      else {
+        const pick = (keep && games.find(g => g.id && g.id === game.id)) || games.find(g => !g.played) || games[games.length - 1];
+        setCtx({ myTeam: me, opponent: opp, games, game: pick });
+        setMsg(`${games.length} match${games.length > 1 ? "es" : ""} found on the FFBB site.`);
+      }
+    } catch (e) { setCtx({ myTeam: me, opponent: opp }); setMsg((e.message || "FFBB unavailable.") + " Fill the fields below by hand."); }
+    setFetching(false);
+  }
+  function pickMe(v) { setCtx({ myTeam: v }); if (c.opponent && !isFeedbackKind(slide.kind)) refreshGames(v, c.opponent); }
+  const fbm = c.fbMatch || null;
+  function pickMatch(key) {
+    const m = ((data.mine && data.mine.list) || []).find(x => x.key === key);
+    if (m) setCtx({ fbMatch: { key: m.key, date: m.date, opponent: m.opponent, myScore: m.myScore, oppScore: m.oppScore }, opponent: m.opponent });
+  }
+  const setFbScore = (k, v) => setCtx({ fbMatch: { ...(fbm || {}), [k]: v === "" ? "" : Number(v) } });
+  function pickOpp(v) { setCtx({ opponent: v, obsTeam: undefined }); if (c.myTeam) refreshGames(c.myTeam, v); }
+  async function setDiagrams(n) {
+    onChange({ ctx: { ...c, diagrams: n }, elements: applyDiagramLayout(els, n) });
+  }
+  async function pickPlay(tag) {
+    const mem = ((await storeGet("play_diagrams")) || {})[normTag(tag)] || [];
+    const slots = els.filter(e => e.slot);
+    let next = els;
+    if (mem.length && slots.every(s => !s.imageId)) {
+      let i = 0; next = els.map(e => (e.slot ? { ...e, imageId: mem[i++] || null } : e));
+    }
+    onChange({ ctx: { ...c, play: tag }, elements: next });
+  }
+  async function pickImage(id) {
+    const t = picker && picker.target;
+    setPicker(null);
+    if (t === "bg") { setBg({ imageId: id }); return; }
+    if (!t) return;
+    const next = els.map(e => (e.id === t ? { ...e, imageId: id } : e));
+    onChange({ elements: next });
+    if (slide.kind === "play" && c.play) { // les diagrammes d'un play sont mémorisés pour les prochaines slides
+      const mem = (await storeGet("play_diagrams")) || {};
+      mem[normTag(c.play)] = next.filter(e => e.slot).map(e => e.imageId).filter(Boolean);
+      await storeSet("play_diagrams", mem);
+    }
+  }
+  async function saveTemplate() {
+    const t = (await storeGet("slide_templates")) || {};
+    t[slide.kind] = { duration: slide.duration, bg: slide.bg, elements: els.map(e => (e.slot ? { ...e, imageId: null } : e)), ctx: { lang: c.lang, side: c.side, diagrams: c.diagrams } };
+    await storeSet("slide_templates", t);
+    await storeSet("slide_last_ctx", { myTeam: c.myTeam, opponent: c.opponent, obsTeam: c.obsTeam, game: c.game, games: c.games, lang: c.lang, fbMatch: c.fbMatch });
+    setSaved("Saved: new “" + slideKindLabel(slide.kind) + "” slides will start from this layout.");
+  }
+  async function resetLayout() {
+    const d = defaultSlide(slide.kind, c);
+    onChange({ elements: d.elements, bg: d.bg });
+    setSelId(null);
+  }
+  function moveZ(id, d) {
+    const i = els.findIndex(e => e.id === id), j = i + d;
+    if (i < 0 || j < 0 || j >= els.length) return;
+    const a = [...els]; [a[i], a[j]] = [a[j], a[i]]; onChange({ elements: a });
+  }
+  const tagSelect = (value, onPick, withPlay, catsOverride) => { const tagOptions = Object.entries(catsOverride || cats).filter(([, l]) => Array.isArray(l) && l.length); return (
+    <select value={value || ""} onChange={e => onPick(e.target.value)} style={sInp}>
+      <option value="">— Choose —</option>
+      {withPlay && <option value="@play">The slide's play</option>}
+      {tagOptions.map(([name, list]) => <optgroup key={name} label={name}>{list.map(t => <option key={t} value={t}>{t}</option>)}</optgroup>)}
+    </select>
+  ); };
+  const numIn = (label, key) => <SField label={label} w={74}><input type="number" value={sel[key] ?? 0} onChange={e => patchEl(sel.id, { [key]: Number(e.target.value) || 0 })} style={sInp} /></SField>;
+
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.86)", zIndex: 1000, overflow: "auto", padding: 12 }}>
+      <div style={{ background: INK, border: `1px solid ${LINE}`, borderRadius: 12, padding: 14, maxWidth: 1380, margin: "0 auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: PAPER }}>{slideKindLabel(slide.kind)}</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button onClick={saveTemplate} style={{ background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 8, color: AMBER, padding: "7px 12px", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>Save this layout as default for this type</button>
+            <button onClick={resetLayout} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 8, color: "#8B93A1", padding: "7px 12px", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>Reset layout</button>
+            <button onClick={onClose} style={{ ...btnPrimary, flex: "none", padding: "7px 16px", fontSize: 13 }}>Done</button>
+          </div>
+        </div>
+        {saved && <div style={{ fontSize: 12, color: TEAL, marginBottom: 8 }}>{saved}</div>}
+        <div style={{ display: "flex", gap: 14, flexWrap: "wrap", alignItems: "flex-start" }}>
+          <div style={{ flex: "1 1 640px", minWidth: 0 }}>
+            <ScaledSlide slide={slide} data={data} imgs={imgs} editable selectedId={selId} onSelect={setSelId} onPatch={patchEl} onEditImage={(id) => setPicker({ target: id })} />
+            <div style={{ fontSize: 11.5, color: "#5C6470", marginTop: 6 }}>Drag an element to move it, drag the green square to resize it, double-click an image frame to choose its picture.</div>
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 10 }}>
+              {[["Text", () => addEl(sText(400, 300, 480, 80, "Text", { size: 40 }))],
+                ["Logo", () => addEl(sEl("logo", 540, 260, 200, 200, { team: "opp" }))],
+                ["Photo in a frame", () => addEl(sEl("image", 440, 200, 400, 300, { imageId: null, fit: "cover", frame: true, frameColor: "#FFFFFF", frameWidth: 4, radius: 16 }))],
+                ["Stat block", () => addEl(sStat(440, 260, 320, 200, {}))],
+                ["Rectangle", () => addEl(sEl("rect", 440, 260, 400, 160, { color: "#FFFFFF", opacity: 0.12, radius: 16 }))]].map(([l, f]) => (
+                <button key={l} onClick={f} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, padding: "6px 12px", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}><Plus size={12} style={{ verticalAlign: "-2px" }} /> {l}</button>
+              ))}
+              {slide.kind !== "individual" && <button onClick={() => addEl(sEl("individual", 190, 30, 900, 660, { team: "", playerId: "" }))} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, padding: "6px 12px", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}><Plus size={12} style={{ verticalAlign: "-2px" }} /> Player card</button>}
+            </div>
+          </div>
+
+          <div style={{ flex: "1 1 330px", minWidth: 0, display: "flex", flexDirection: "column", gap: 12 }}>
+            <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470" }}>Data</div>
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <SField label="My team"><select value={c.myTeam || ""} onChange={e => pickMe(e.target.value)} style={sInp}><option value="">— Choose —</option>{teamNames.map(n => <option key={n} value={n}>{n}</option>)}</select></SField>
+                {!isFeedbackKind(slide.kind) && <SField label="Opponent"><select value={c.opponent || ""} onChange={e => pickOpp(e.target.value)} style={sInp}><option value="">— Choose —</option>{teamNames.map(n => <option key={n} value={n}>{n}</option>)}</select></SField>}
+              </div>
+              {isFeedbackKind(slide.kind) && (
+                <>
+                  <SField label="Match (my box scores & coded matches)">
+                    <select value={fbm ? fbm.key : ""} onChange={e => pickMatch(e.target.value)} style={sInp}>
+                      <option value="">— Choose —</option>
+                      {((data.mine && data.mine.list) || []).map(m => <option key={m.key} value={m.key}>{`${m.date} · ${m.opponent}${m.myScore !== null && m.oppScore !== null ? ` (${m.myScore}-${m.oppScore})` : ""}`}</option>)}
+                    </select>
+                    {data.mine && !data.mine.list.length && <div style={{ fontSize: 11.5, color: AMBER, marginTop: 4 }}>No imported match yet (Import match / Box score / FFBB sync).</div>}
+                  </SField>
+                  {fbm && (
+                    <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)", gap: 8 }}>
+                      <SField label="My score"><input type="number" value={fbm.myScore ?? ""} onChange={e => setFbScore("myScore", e.target.value)} style={sInp} /></SField>
+                      <SField label="Opp. score"><input type="number" value={fbm.oppScore ?? ""} onChange={e => setFbScore("oppScore", e.target.value)} style={sInp} /></SField>
+                      <SField label="Opponent name"><input value={c.opponent || ""} onChange={e => setCtx({ opponent: e.target.value })} style={sInp} /></SField>
+                    </div>
+                  )}
+                </>
+              )}
+              {(slide.kind === "presentation" || slide.kind === "side") && (
+                <>
+                  <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+                    <SField label="Match (FFBB)">
+                      <select value={game.id || ""} onChange={e => { const g = (c.games || []).find(x => x.id === e.target.value); if (g) setCtx({ game: g }); }} style={sInp}>
+                        {!(c.games || []).length && <option value="">{game.journee ? gameLabel(game) : "—"}</option>}
+                        {(c.games || []).map(g => <option key={g.id || g.dm} value={g.id}>{gameLabel(g)}</option>)}
+                      </select>
+                    </SField>
+                    <button disabled={fetching || !c.myTeam || !c.opponent} onClick={() => refreshGames(c.myTeam, c.opponent, true)} style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, padding: "7px 10px", cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>{fetching ? "…" : "Refresh"}</button>
+                  </div>
+                  {msg && <div style={{ fontSize: 11.5, color: msg.startsWith("No") || /unavailable|Fill/.test(msg) ? AMBER : TEAL }}>{msg}</div>}
+                  <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 92px 70px", gap: 8 }}>
+                    <SField label="Matchday"><input value={game.journee || ""} onChange={e => setGame({ journee: e.target.value })} style={sInp} placeholder="Journée 1, Group B" /></SField>
+                    <SField label="Date (dd/mm)"><input value={game.dm || ""} onChange={e => setGame({ dm: e.target.value })} style={sInp} placeholder="27/10" /></SField>
+                    <SField label="Time"><input value={game.time || ""} onChange={e => setGame({ time: e.target.value })} style={sInp} placeholder="20:00" /></SField>
+                  </div>
+                  <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 8 }}>
+                    <SField label="Venue"><input value={game.venue || ""} onChange={e => setGame({ venue: e.target.value })} style={sInp} /></SField>
+                    <SField label="City"><input value={game.city || ""} onChange={e => setGame({ city: e.target.value })} style={sInp} /></SField>
+                  </div>
+                </>
+              )}
+              {(slide.kind === "side" || slide.kind === "section" || slide.kind === "play" || slide.kind === "fb_section") && (
+                <SField label="Side"><select value={c.side || "off"} onChange={e => setCtx({ side: e.target.value })} style={sInp}><option value="off">Offense</option><option value="def">Defense</option></select></SField>
+              )}
+              {slide.kind === "play" && (
+                <>
+                  <SField label="Play">{tagSelect(c.play, pickPlay)}</SField>
+                  <SField label="Number of diagrams">
+                    <div style={{ display: "flex", gap: 6 }}>{[1, 2, 3, 4].map(n => <button key={n} onClick={() => setDiagrams(n)} style={{ flex: 1, padding: "6px 0", borderRadius: 6, cursor: "pointer", background: (c.diagrams || 2) === n ? AMBER : PANEL2, color: (c.diagrams || 2) === n ? "#1A1300" : PAPER, border: `1px solid ${LINE}`, fontWeight: 700 }}>{n}</button>)}</div>
+                  </SField>
+                </>
+              )}
+              {slide.kind === "individual" && (() => {
+                const ie = els.find(e => e.type === "individual");
+                if (!ie) return null;
+                const tm = ie.team || c.opponent || "";
+                return (
+                  <SField label="Scouted player">
+                    <select value={ie.playerId || ""} onChange={e => patchEl(ie.id, { playerId: e.target.value })} style={sInp}>
+                      <option value="">— Choose —</option>
+                      {((data.players?.[tm]?.list) || []).map(p => <option key={p.id} value={p.id}>{`${p.firstName || ""} ${p.lastName || ""}`.trim() || p.id}</option>)}
+                    </select>
+                    {!((data.players?.[tm]?.list) || []).length && <div style={{ fontSize: 11.5, color: AMBER, marginTop: 4 }}>No scouted player for this team yet (Scouting → Report).</div>}
+                  </SField>
+                );
+              })()}
+              {slide.kind !== "individual" && slide.kind !== "presentation" && !isFeedbackKind(slide.kind) && (
+                <SField label="Observation team (stats source)">
+                  <select value={c.obsTeam || ""} onChange={e => setCtx({ obsTeam: e.target.value || undefined })} style={sInp}>
+                    <option value="">Same as the opponent{c.opponent && !obsNames.some(k => normTag(k) === normTag(c.opponent)) ? " (not observed yet)" : ""}</option>
+                    {obsNames.map(n => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                </SField>
+              )}
+              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                <SField label="Date language" w={130}><select value={c.lang || "fr"} onChange={e => setCtx({ lang: e.target.value })} style={sInp}><option value="fr">Français</option><option value="en">English</option></select></SField>
+                <SField label="Duration (s)" w={96}><input type="number" min="1" step="0.5" value={slide.duration} onChange={e => onChange({ duration: Math.max(1, Number(e.target.value) || 1) })} style={sInp} /></SField>
+              </div>
+            </div>
+
+            <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470" }}>Background</div>
+              <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+                <SField label="Color 1" w={70}><input type="color" value={slide.bg?.c1 || "#0B1220"} onChange={e => setBg({ c1: e.target.value })} style={{ ...sInp, padding: 2, height: 34 }} /></SField>
+                <SField label="Color 2" w={70}><input type="color" value={slide.bg?.c2 || "#16233B"} onChange={e => setBg({ c2: e.target.value })} style={{ ...sInp, padding: 2, height: 34 }} /></SField>
+                <button onClick={() => setPicker({ target: "bg" })} style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, padding: "7px 10px", cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>{slide.bg?.imageId ? "Change photo" : "Background photo"}</button>
+                {slide.bg?.imageId && <button onClick={() => setBg({ imageId: null })} style={{ background: "none", border: "none", color: "#8B93A1", textDecoration: "underline", cursor: "pointer", fontSize: 12, fontFamily: "inherit" }}>Remove</button>}
+              </div>
+              {slide.bg?.imageId && <SField label={`Darkening: ${slide.bg.dark ?? 45}%`}><input type="range" min="0" max="90" value={slide.bg.dark ?? 45} onChange={e => setBg({ dark: Number(e.target.value) })} style={{ width: "100%" }} /></SField>}
+            </div>
+
+            <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12, display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470" }}>Elements</div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 150, overflow: "auto" }}>
+                {els.map((e, i) => (
+                  <div key={e.id} onClick={() => setSelId(e.id)} style={{ flexShrink: 0, cursor: "pointer", padding: "4px 8px", borderRadius: 6, fontSize: 12, background: selId === e.id ? PANEL2 : "transparent", border: `1px solid ${selId === e.id ? TEAL : "transparent"}`, color: PAPER, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+                    {i + 1}. {e.type === "text" ? `Text — ${String(e.content).slice(0, 28)}` : e.type === "stat" ? "Stat block" : e.type === "logo" ? `Logo — ${e.team === "me" ? "my team" : e.team === "opp" ? "opponent" : e.team}` : e.type === "image" ? (e.slot ? "Diagram" : "Photo") : e.type === "rect" ? "Rectangle" : "Player card"}
+                  </div>
+                ))}
+              </div>
+              {sel && (
+                <div style={{ borderTop: `1px solid ${LINE}`, paddingTop: 8, display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>{numIn("X", "x")}{numIn("Y", "y")}{numIn("Width", "w")}{numIn("Height", "h")}</div>
+                  <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                    <button onClick={() => moveZ(sel.id, 1)} style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 6, color: PAPER, padding: "4px 8px", cursor: "pointer", fontSize: 11.5, fontFamily: "inherit" }}>Bring forward</button>
+                    <button onClick={() => moveZ(sel.id, -1)} style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 6, color: PAPER, padding: "4px 8px", cursor: "pointer", fontSize: 11.5, fontFamily: "inherit" }}>Send back</button>
+                    <button onClick={() => { const d = { ...sel, id: uid(), x: sel.x + 24, y: sel.y + 24 }; addEl(d); }} style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 6, color: PAPER, padding: "4px 8px", cursor: "pointer", fontSize: 11.5, fontFamily: "inherit" }}>Duplicate</button>
+                    <button onClick={() => { onChange({ elements: els.filter(e => e.id !== sel.id) }); setSelId(null); }} style={{ background: "none", border: `1px solid ${RED}`, borderRadius: 6, color: RED, padding: "4px 8px", cursor: "pointer", fontSize: 11.5, fontFamily: "inherit" }}>Delete</button>
+                  </div>
+                  {sel.type === "text" && (
+                    <>
+                      <SField label="Text (variables: {opponent} {myTeam} {matchday} {date} {time} {dateTime} {venue} {city} {venueCity} {side} {play} {score} {myScore} {oppScore} {result})">
+                        <textarea value={sel.content || ""} onChange={e => patchEl(sel.id, { content: e.target.value })} rows={3} style={{ ...sInp, resize: "vertical" }} />
+                      </SField>
+                      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                        <SField label="Font"><select value={sel.font || "Oswald"} onChange={e => patchEl(sel.id, { font: e.target.value })} style={sInp}>{SLIDE_FONT_CHOICES.map(f => <option key={f} value={f}>{f}</option>)}</select></SField>
+                        <SField label="Size" w={74}><input type="number" value={sel.size || 32} onChange={e => patchEl(sel.id, { size: Math.max(8, Number(e.target.value) || 32) })} style={sInp} /></SField>
+                        <SField label="Color" w={60}><input type="color" value={sel.color || "#FFFFFF"} onChange={e => patchEl(sel.id, { color: e.target.value })} style={{ ...sInp, padding: 2, height: 34 }} /></SField>
+                      </div>
+                      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", fontSize: 12, color: PAPER }}>
+                        <select value={sel.align || "center"} onChange={e => patchEl(sel.id, { align: e.target.value })} style={{ ...sInp, width: "auto" }}><option value="left">Left</option><option value="center">Center</option><option value="right">Right</option></select>
+                        <label><input type="checkbox" checked={(sel.weight || 700) >= 700} onChange={e => patchEl(sel.id, { weight: e.target.checked ? 700 : 400 })} /> Bold</label>
+                        <label><input type="checkbox" checked={!!sel.italic} onChange={e => patchEl(sel.id, { italic: e.target.checked })} /> Italic</label>
+                        <label><input type="checkbox" checked={!!sel.upper} onChange={e => patchEl(sel.id, { upper: e.target.checked })} /> UPPERCASE</label>
+                        <label><input type="checkbox" checked={!!sel.shadow} onChange={e => patchEl(sel.id, { shadow: e.target.checked })} /> Shadow</label>
+                      </div>
+                    </>
+                  )}
+                  {sel.type === "logo" && (
+                    <SField label="Team">
+                      <select value={sel.team || "opp"} onChange={e => patchEl(sel.id, { team: e.target.value })} style={sInp}>
+                        <option value="me">My team</option><option value="opp">Opponent</option>
+                        {teamNames.map(n => <option key={n} value={n}>{n}</option>)}
+                      </select>
+                    </SField>
+                  )}
+                  {sel.type === "image" && (
+                    <>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                        <button onClick={() => setPicker({ target: sel.id })} style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, padding: "6px 10px", cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>{sel.imageId ? "Change image" : "Choose image"}</button>
+                        {sel.imageId && <button onClick={() => patchEl(sel.id, { imageId: null })} style={{ background: "none", border: "none", color: "#8B93A1", textDecoration: "underline", cursor: "pointer", fontSize: 12, fontFamily: "inherit" }}>Remove</button>}
+                        <select value={sel.fit || "contain"} onChange={e => patchEl(sel.id, { fit: e.target.value })} style={{ ...sInp, width: "auto" }}><option value="contain">Whole image</option><option value="cover">Fill (crop)</option></select>
+                      </div>
+                      <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap", fontSize: 12, color: PAPER }}>
+                        <label><input type="checkbox" checked={!!sel.frame} onChange={e => patchEl(sel.id, { frame: e.target.checked })} /> Frame</label>
+                        <SField label="Frame color" w={64}><input type="color" value={sel.frameColor || "#FFFFFF"} onChange={e => patchEl(sel.id, { frameColor: e.target.value })} style={{ ...sInp, padding: 2, height: 30 }} /></SField>
+                        <SField label="Thickness" w={70}><input type="number" min="0" value={sel.frameWidth ?? 3} onChange={e => patchEl(sel.id, { frameWidth: Number(e.target.value) || 0 })} style={sInp} /></SField>
+                        <SField label="Corners" w={70}><input type="number" min="0" value={sel.radius ?? 0} onChange={e => patchEl(sel.id, { radius: Number(e.target.value) || 0 })} style={sInp} /></SField>
+                      </div>
+                    </>
+                  )}
+                  {sel.type === "rect" && (
+                    <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+                      <SField label="Color" w={64}><input type="color" value={sel.color || "#FFFFFF"} onChange={e => patchEl(sel.id, { color: e.target.value })} style={{ ...sInp, padding: 2, height: 30 }} /></SField>
+                      <SField label={`Opacity ${Math.round((sel.opacity ?? 0.15) * 100)}%`}><input type="range" min="0" max="1" step="0.05" value={sel.opacity ?? 0.15} onChange={e => patchEl(sel.id, { opacity: Number(e.target.value) })} style={{ width: "100%" }} /></SField>
+                      <SField label="Corners" w={70}><input type="number" min="0" value={sel.radius ?? 0} onChange={e => patchEl(sel.id, { radius: Number(e.target.value) || 0 })} style={sInp} /></SField>
+                    </div>
+                  )}
+                  {sel.type === "stat" && (
+                    <>
+                      <SField label="Source">
+                        <select value={sel.source || "cmp"} onChange={e => patchEl(sel.id, { source: e.target.value })} style={sInp}>
+                          <option value="cmp">Scouting comparison (my team vs opponent)</option>
+                          <option value="obs">Scouting observation (opponent tendencies)</option>
+                          <option value="box">My team — box score stats</option>
+                          <option value="team">My team — Team Play (coded actions)</option>
+                        </select>
+                      </SField>
+                      {(sel.source === "box" || sel.source === "team") && (
+                        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 12, color: PAPER }}>
+                          <select value={sel.scope || (isFeedbackKind(slide.kind) ? "match" : "all")} onChange={e => patchEl(sel.id, { scope: e.target.value })} style={{ ...sInp, width: "auto" }}>
+                            <option value="match">This slide's match</option><option value="season">Current season</option><option value="all">All matches</option>
+                          </select>
+                          {sel.source === "box" && <label><input type="checkbox" checked={!!sel.compare} onChange={e => patchEl(sel.id, { compare: e.target.checked })} /> Compare with average</label>}
+                        </div>
+                      )}
+                      {sel.source === "box" ? (
+                        <SField label="Stat">
+                          <select value={sel.key || ""} onChange={e => patchEl(sel.id, { key: e.target.value })} style={sInp}>
+                            {BOX_STATS.map(b => <option key={b[0]} value={b[0]}>{b[1]}</option>)}
+                          </select>
+                        </SField>
+                      ) : sel.source === "team" ? (
+                        <>
+                          <SField label="Stat (tag)">{tagSelect(sel.tag, v => patchEl(sel.id, { tag: v }), true, currentTagCategories())}</SField>
+                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                            <SField label="Metric"><select value={sel.metric || "freq"} onChange={e => patchEl(sel.id, { metric: e.target.value })} style={sInp}>{OBS_METRICS.map(m => <option key={m[0]} value={m[0]}>{m[1]}</option>)}</select></SField>
+                            <SField label="Side"><select value={sel.obsSide || "slide"} onChange={e => patchEl(sel.id, { obsSide: e.target.value })} style={sInp}><option value="slide">Slide's side</option><option value="off">Offense</option><option value="def">Defense</option></select></SField>
+                          </div>
+                        </>
+                      ) : (sel.source || "cmp") === "cmp" ? (
+                        <>
+                          <SField label="Stat">
+                            <select value={sel.key || ""} onChange={e => patchEl(sel.id, { key: e.target.value })} style={sInp}>
+                              {Array.from(new Set(SCOUT_STAT_SCHEMA.map(s => s.group))).map(gr => <optgroup key={gr} label={gr}>{SCOUT_STAT_SCHEMA.filter(s => s.group === gr).map(s => <option key={s.key} value={s.key}>{s.label}</option>)}</optgroup>)}
+                            </select>
+                          </SField>
+                          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 12, color: PAPER }}>
+                            <select value={sel.mode || "vs"} onChange={e => patchEl(sel.id, { mode: e.target.value })} style={{ ...sInp, width: "auto" }}><option value="vs">Both teams</option><option value="me">My team only</option><option value="opp">Opponent only</option></select>
+                            <label><input type="checkbox" checked={!!sel.showRank} onChange={e => patchEl(sel.id, { showRank: e.target.checked })} /> Show rank</label>
+                          </div>
+                        </>
+                      ) : (
+                        <>
+                          <SField label="Stat (tag)">{tagSelect(sel.tag, v => patchEl(sel.id, { tag: v }), true)}</SField>
+                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                            <SField label="Metric"><select value={sel.metric || "freq"} onChange={e => patchEl(sel.id, { metric: e.target.value })} style={sInp}>{OBS_METRICS.map(m => <option key={m[0]} value={m[0]}>{m[1]}</option>)}</select></SField>
+                            <SField label="Side"><select value={sel.obsSide || "slide"} onChange={e => patchEl(sel.id, { obsSide: e.target.value })} style={sInp}><option value="slide">Slide's side</option><option value="off">Offense</option><option value="def">Defense</option></select></SField>
+                          </div>
+                          <SField label="Observed team"><select value={sel.obsTeam || ""} onChange={e => patchEl(sel.id, { obsTeam: e.target.value || undefined })} style={sInp}><option value="">Slide's</option>{obsNames.map(n => <option key={n} value={n}>{n}</option>)}</select></SField>
+                        </>
+                      )}
+                      <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
+                        <SField label="Custom label"><input value={sel.label || ""} onChange={e => patchEl(sel.id, { label: e.target.value })} style={sInp} placeholder="(automatic)" /></SField>
+                        <SField label="Color" w={60}><input type="color" value={sel.color || AMBER} onChange={e => patchEl(sel.id, { color: e.target.value })} style={{ ...sInp, padding: 2, height: 34 }} /></SField>
+                        <SField label="Font" w={130}><select value={sel.font || "Oswald"} onChange={e => patchEl(sel.id, { font: e.target.value })} style={sInp}>{SLIDE_FONT_CHOICES.map(f => <option key={f} value={f}>{f}</option>)}</select></SField>
+                        <SField label="Value size" w={80}><input type="number" value={sel.valueSize || ""} placeholder="auto" onChange={e => patchEl(sel.id, { valueSize: Number(e.target.value) || undefined })} style={sInp} /></SField>
+                      </div>
+                    </>
+                  )}
+                  {sel.type === "individual" && (
+                    <>
+                      <SField label="Scouted team">
+                        <select value={sel.team || ""} onChange={e => { patchEl(sel.id, { team: e.target.value, playerId: "" }); onDataRefresh && onDataRefresh(); }} style={sInp}>
+                          <option value="">Opponent ({c.opponent || "—"})</option>{teamNames.map(n => <option key={n} value={n}>{n}</option>)}
+                        </select>
+                      </SField>
+                      <SField label="Player">
+                        <select value={sel.playerId || ""} onChange={e => patchEl(sel.id, { playerId: e.target.value })} style={sInp}>
+                          <option value="">— Choose —</option>
+                          {((data.players?.[sel.team || c.opponent || ""]?.list) || []).map(p => <option key={p.id} value={p.id}>{`${p.firstName || ""} ${p.lastName || ""}`.trim() || p.id}</option>)}
+                        </select>
+                      </SField>
+                    </>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+      {picker && <SlideImagePicker onPick={pickImage} onClose={() => setPicker(null)} />}
+    </div>
+  );
+}
+
+function MontageSlideCard({ item, index, count, data, imgs, isCoach, onChange, onRemove, onMove, onEdit, onDuplicate, drag }) {
+  return (
+    <div onDragOver={drag.onDragOver} onDrop={drag.onDrop} style={{ display: "flex", flexDirection: "column", gap: 8, padding: 12, background: PANEL2, border: `1px solid ${AMBER_DIM}`, borderRadius: 10 }}>
+      <div style={{ display: "flex", gap: 10, alignItems: "center", justifyContent: "space-between", flexWrap: "wrap" }}>
+        <div style={{ fontSize: 13, color: PAPER, fontWeight: 600 }}>
+          <span style={{ color: AMBER, marginRight: 8 }}>{index + 1}</span>Slide · {slideTitle(item)}
+          <span style={{ color: "#5C6470", fontWeight: 400 }}> · {Number(item.duration || 0).toFixed(1)}s</span>
+        </div>
+        {isCoach && (
+          <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+            <span title="Drag to reorder" draggable onDragStart={drag.onDragStart} style={{ cursor: "grab", color: "#5C6470", fontSize: 16, lineHeight: 1 }}>⠿</span>
+            <button disabled={index === 0} onClick={() => onMove(-1)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", cursor: index === 0 ? "default" : "pointer", padding: "2px 8px", opacity: index === 0 ? 0.4 : 1 }}>↑</button>
+            <button disabled={index === count - 1} onClick={() => onMove(1)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", cursor: index === count - 1 ? "default" : "pointer", padding: "2px 8px", opacity: index === count - 1 ? 0.4 : 1 }}>↓</button>
+            <button onClick={onRemove} title="Remove from montage" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
+          </div>
+        )}
+      </div>
+      <ScaledSlide slide={item} data={data} imgs={imgs} maxWidth={520} />
+      {isCoach && (
+        <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
+          <button onClick={onEdit} style={{ padding: "8px 14px", background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 8, color: AMBER, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>Edit the slide</button>
+          <button onClick={onDuplicate} style={{ padding: "8px 14px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>Duplicate</button>
+          <div>
+            <label style={labelStyle}>Duration (s)</label>
+            <input type="number" min="1" step="0.5" value={item.duration} onChange={e => onChange({ duration: Math.max(1, Number(e.target.value) || 1) })} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 84 }} />
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function MontageTab({ isCoach }) {
+  const [montages, setMontages] = useState(null);
+  const [activeId, setActiveId] = useState(null);
+  const [ver, setVer] = useState(0); // incrémenté quand une vidéo est (ré)importée
+  const [newName, setNewName] = useState("");
+  const [renaming, setRenaming] = useState(false);
+  const [renameVal, setRenameVal] = useState("");
+  const [confirmDel, setConfirmDel] = useState(false);
+  const [playing, setPlaying] = useState(false);
+  const [dragFrom, setDragFrom] = useState(null);
+  const [exportMode, setExportMode] = useState("precise");
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [error, setError] = useState("");
+  const [resultUrl, setResultUrl] = useState(null);
+  const resultRef = useRef(null);
+  const runIdRef = useRef(0);
+  const busyRef = useRef(false);
+  busyRef.current = busy;
+  const saveTimer = useRef(null);
+  const montagesRef = useRef(null);
+  montagesRef.current = montages;
+
+  useEffect(() => { loadMontages().then(l => { setMontages(l); setActiveId(l.length ? l[0].id : null); }); }, []);
+  useEffect(() => () => {
+    clearTimeout(saveTimer.current);
+    if (resultRef.current) URL.revokeObjectURL(resultRef.current);
+    if (busyRef.current) { runIdRef.current++; resetFfmpeg(); }
+  }, []);
+
+  const active = (montages || []).find(m => m.id === activeId) || null;
+  const items = active ? active.items : [];
+  const sourceKeys = Array.from(new Set(items.filter(i => i.type === "clip").map(i => i.sourceKey)));
+  const urls = useSourceUrls(sourceKeys, ver);
+  const [editingId, setEditingId] = useState(null);
+  const slideItems = items.filter(i => i.type === "slide");
+  const slideNeeds = slideDataNeeds(slideItems);
+  const sdata = useSlideData(slideNeeds.names, slideNeeds.pteams, slideNeeds.mine, 0);
+  const simgs = useSlideImgs(Array.from(new Set(slideItems.flatMap(slideImageIds))));
+  const editingSlide = items.find(i => i.id === editingId && i.type === "slide") || null;
+
+  // Enregistrement : immédiat pour les actions ponctuelles, différé (600 ms) pour les curseurs.
+  function persist(next, soon) {
+    setMontages(next);
+    clearTimeout(saveTimer.current);
+    if (soon) saveTimer.current = setTimeout(() => storeSet("montages", montagesRef.current), 600);
+    else storeSet("montages", next);
+  }
+  const mapActive = (fn) => (montages || []).map(m => m.id === activeId ? fn(m) : m);
+  const updateItem = (id, patch, soon) => persist(mapActive(m => ({ ...m, items: m.items.map(i => i.id === id ? { ...i, ...patch } : i) })), soon);
+  const removeItem = (id) => persist(mapActive(m => ({ ...m, items: m.items.filter(i => i.id !== id) })));
+  function moveItem(from, to) {
+    if (to < 0 || to >= items.length || from === to) return;
+    persist(mapActive(m => { const a = [...m.items]; const [x] = a.splice(from, 1); a.splice(to, 0, x); return { ...m, items: a }; }));
+  }
+  function createMontage() {
+    const id = uid();
+    const next = [...(montages || []), { id, name: newName.trim() || `Montage ${(montages || []).length + 1}`, createdAt: Date.now(), items: [] }];
+    persist(next); setActiveId(id); setNewName("");
+  }
+  function importVideo(key, file) { CLIP_VIDEO_CACHE.set(key, file); setVer(v => v + 1); }
+  function importExternal(file) {
+    if (!file) return;
+    CLIP_VIDEO_CACHE.set(`ext::${file.name}::${file.size}`, file);
+    setVer(v => v + 1);
+  }
+  function addExternalClip(key) {
+    const f = CLIP_VIDEO_CACHE.get(key); if (!f) return;
+    let list = montages || [], id = activeId;
+    if (!list.find(m => m.id === id)) { id = uid(); list = [...list, { id, name: `Montage ${list.length + 1}`, createdAt: Date.now(), items: [] }]; setActiveId(id); }
+    const it = { id: uid(), type: "clip", external: true, label: f.name, sourceKey: key, sourceName: f.name, sourceLabel: "External video", start: 0, end: 10, trimStart: 0, trimEnd: 10 };
+    persist(list.map(m => m.id === id ? { ...m, items: [...m.items, it] } : m));
+  }
+  const externalKeys = Array.from(CLIP_VIDEO_CACHE.keys()).filter(k => k.startsWith("ext::"));
+  async function addSlide(kind) {
+    const prev = [...items].reverse().find(i => i.type === "slide");
+    const s = await newSlideFor(kind, prev ? prev.ctx : null);
+    let list = montagesRef.current || [], id = activeId;
+    if (!list.find(m => m.id === id)) { id = uid(); list = [...list, { id, name: `Montage ${list.length + 1}`, createdAt: Date.now(), items: [] }]; setActiveId(id); }
+    persist(list.map(m => m.id === id ? { ...m, items: [...m.items, s] } : m));
+    setEditingId(s.id);
+  }
+  function duplicateSlide(it) {
+    const copy = cloneSlideFresh(it);
+    persist(mapActive(m => { const a = [...m.items]; a.splice(a.findIndex(x => x.id === it.id) + 1, 0, copy); return { ...m, items: a }; }));
+  }
+  function closeSlideEditor() {
+    if (editingSlide) { const c = editingSlide.ctx || {}; storeSet("slide_last_ctx", { myTeam: c.myTeam, opponent: c.opponent, obsTeam: c.obsTeam, game: c.game, games: c.games, lang: c.lang, fbMatch: c.fbMatch }); }
+    setEditingId(null);
+  }
+
+  // Export en un seul fichier vidéo (ffmpeg.wasm, dans le navigateur — rien n'est envoyé nulle part).
+  // "precise" : chaque clip est ré-encodé et normalisé (1280×720, 30 i/s, audio 44,1 kHz) pour pouvoir être assemblé quelle que soit
+  // la vidéo d'origine ; "fast" : clips copiés sans ré-encodage (très rapide, mais la coupe se cale sur l'image clé la plus proche).
+  async function exportMontage() {
+    const segs = items.filter(i => i.type === "clip" || i.type === "slide");
+    const clips = segs.filter(i => i.type === "clip");
+    setError(""); setResultUrl(null);
+    if (!segs.length) { setError("Add at least one clip or slide first."); return; }
+    const missing = Array.from(new Set(clips.filter(c => !CLIP_VIDEO_CACHE.get(c.sourceKey)).map(c => c.sourceName)));
+    if (missing.length) { setError("Import the missing video(s) first: " + missing.join(", ")); return; }
+    const runId = ++runIdRef.current;
+    setBusy(true);
+    if (resultRef.current) { URL.revokeObjectURL(resultRef.current); resultRef.current = null; }
+    let ffmpeg = null; const mounts = [];
+    const hasSlides = segs.some(x => x.type === "slide");
+    try {
+      ffmpeg = await getFfmpeg();
+      const keys = Array.from(new Set(clips.map(c => c.sourceKey)));
+      const dirOf = {};
+      for (let k = 0; k < keys.length; k++) {
+        setProgress(`Reading video ${k + 1}/${keys.length}…`);
+        const mt = await mountVideoForFfmpeg(ffmpeg, CLIP_VIDEO_CACHE.get(keys[k]), k);
+        mounts.push(mt); dirOf[keys[k]] = mt.path;
+      }
+      // Slides : rendues une fois en image 1280×720, puis transformées en segment vidéo (image fixe + audio silencieux)
+      // aux mêmes paramètres que les clips en mode précis, pour pouvoir être assemblées sans ré-encodage.
+      for (let i = 0; i < segs.length; i++) {
+        if (segs[i].type !== "slide") continue;
+        setProgress(`Rendering slide ${i + 1}/${segs.length}…`);
+        const blob = await renderSlidePng(segs[i], sdata, simgs);
+        if (runId !== runIdRef.current) throw new Error("__cancelled");
+        await ffmpeg.writeFile(`s_${i}.png`, new Uint8Array(await blob.arrayBuffer()));
+      }
+      const cutAll = async (precise) => {
+        for (let i = 0; i < segs.length; i++) {
+          const c = segs[i];
+          setProgress(`${c.type === "slide" ? "Encoding slide" : "Cutting clip"} ${i + 1}/${segs.length}…`);
+          let args;
+          if (c.type === "slide") {
+            args = ["-loop", "1", "-framerate", "30", "-i", `s_${i}.png`, "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo", "-t", String(Math.max(1, c.duration || 1)),
+              "-vf", "scale=1280:720,format=yuv420p", "-r", "30", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "44100", "-ac", "2", `m_${i}.mp4`];
+          } else {
+            const d = Math.max(0.1, c.trimEnd - c.trimStart);
+            args = precise
+              ? ["-ss", String(c.trimStart), "-i", dirOf[c.sourceKey], "-t", String(d),
+                 "-vf", "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30",
+                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-ar", "44100", "-ac", "2", `m_${i}.mp4`]
+              : ["-ss", String(c.trimStart), "-i", dirOf[c.sourceKey], "-t", String(d), "-c", "copy", "-avoid_negative_ts", "make_zero", `m_${i}.mp4`];
+          }
+          const code = await ffmpeg.exec(args);
+          if (runId !== runIdRef.current) throw new Error("__cancelled");
+          if (code !== 0) throw new Error(`Could not ${c.type === "slide" ? "encode slide" : "cut clip"} ${i + 1}.`);
+        }
+      };
+      const assemble = async () => {
+        await ffmpeg.writeFile("concat.txt", segs.map((_, i) => `file 'm_${i}.mp4'`).join("\n"));
+        try { await ffmpeg.deleteFile("out.mp4"); } catch (e) {}
+        const code = await ffmpeg.exec(["-f", "concat", "-safe", "0", "-i", "concat.txt", "-c", "copy", "out.mp4"]);
+        if (runId !== runIdRef.current) throw new Error("__cancelled");
+        return code === 0;
+      };
+      const precise = exportMode === "precise" || hasSlides; // avec des slides, tout est ré-encodé aux mêmes paramètres
+      await cutAll(precise);
+      setProgress("Assembling the montage…");
+      let ok = await assemble();
+      if (!ok && !precise) {
+        setProgress("These videos have different formats — cutting again with re-encoding…");
+        await cutAll(true);
+        ok = await assemble();
+      }
+      if (!ok) throw new Error("Could not assemble the montage.");
+      const data = await ffmpeg.readFile("out.mp4");
+      const url = URL.createObjectURL(new Blob([data.buffer], { type: "video/mp4" }));
+      resultRef.current = url; setResultUrl(url); setProgress("");
+    } catch (e) {
+      if (runId !== runIdRef.current) return; // annulé : cancelExport() a déjà tout remis à zéro
+      setError(e.message || "Export failed."); setProgress("");
+    }
+    try {
+      if (ffmpeg && runId === runIdRef.current) {
+        for (let i = 0; i < segs.length; i++) { try { await ffmpeg.deleteFile(`m_${i}.mp4`); } catch (e) {} try { await ffmpeg.deleteFile(`s_${i}.png`); } catch (e) {} }
+        try { await ffmpeg.deleteFile("concat.txt"); } catch (e) {}
+        try { await ffmpeg.deleteFile("out.mp4"); } catch (e) {}
+        for (const mt of mounts) await unmountVideoForFfmpeg(ffmpeg, mt.dir);
+      }
+    } catch (e) { /* nettoyage au mieux */ }
+    if (runId === runIdRef.current) setBusy(false);
+  }
+  function cancelExport() {
+    runIdRef.current++; resetFfmpeg();
+    setBusy(false); setError(""); setProgress("Cancelled — you can start again.");
+  }
+
+  if (montages === null) return <EmptyState text="Loading…" />;
+  const clipCount = items.filter(i => i.type === "clip").length;
+  const slideCount = slideItems.length;
+  const totalSec = items.reduce((s, i) => s + (i.type === "clip" ? Math.max(0, i.trimEnd - i.trimStart) : i.type === "slide" ? Math.max(0, i.duration || 0) : 0), 0);
+  const sources = sourceKeys.map(k => items.find(i => i.sourceKey === k));
+  const sel = { ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "auto", minWidth: 200 };
+
+  return (
+    <div>
+      <SectionTitle eyebrow="Video" title="Montages" />
+      <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center", marginBottom: 16 }}>
+        <select value={activeId || ""} onChange={e => { setActiveId(e.target.value); setConfirmDel(false); setRenaming(false); setResultUrl(null); }} style={sel}>
+          {!montages.length && <option value="">No montage yet</option>}
+          {montages.map(m => <option key={m.id} value={m.id}>{m.name} ({m.items.length})</option>)}
+        </select>
+        {isCoach && (
+          <>
+            <input value={newName} onChange={e => setNewName(e.target.value)} placeholder="New montage name" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 190 }} />
+            <button onClick={createMontage} style={{ padding: "9px 14px", background: AMBER, border: "none", borderRadius: 8, color: "#1a1200", fontWeight: 700, cursor: "pointer", fontFamily: "inherit", fontSize: 13 }}><Plus size={13} style={{ verticalAlign: "-2px" }} /> New montage</button>
+            {active && !renaming && !confirmDel && (
+              <>
+                <button onClick={() => { setRenaming(true); setRenameVal(active.name); }} style={{ background: "none", border: "none", color: AMBER, cursor: "pointer", fontSize: 12, fontFamily: "inherit" }}>Rename</button>
+                <button onClick={() => setConfirmDel(true)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
+              </>
+            )}
+            {active && renaming && (
+              <>
+                <input value={renameVal} onChange={e => setRenameVal(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 190 }} />
+                <button onClick={() => { persist(mapActive(m => ({ ...m, name: renameVal.trim() || m.name }))); setRenaming(false); }} style={{ background: "none", border: "none", color: TEAL, cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>Save</button>
+                <button onClick={() => setRenaming(false)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>Cancel</button>
+              </>
+            )}
+            {active && confirmDel && (
+              <>
+                <span style={{ fontSize: 12, color: RED }}>Delete this montage?</span>
+                <button onClick={() => { const next = montages.filter(m => m.id !== activeId); persist(next); setActiveId(next.length ? next[0].id : null); setConfirmDel(false); }} style={{ background: RED, border: "none", borderRadius: 6, color: "#fff", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Yes</button>
+                <button onClick={() => setConfirmDel(false)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Cancel</button>
+              </>
+            )}
+          </>
+        )}
+      </div>
+
+      <div style={{ fontSize: 12, color: "#5C6470", lineHeight: 1.6, marginBottom: 16 }}>
+        Only the cuts and slides are saved — never the videos. When a video isn't available (after a reload, or on another device) the site asks you to import it again; it is then remembered until you close or reload the site.
+        {isCoach && " Add clips from the clip windows (Team, Players, Scouting) with the “Add to montage” button, or from an external video below."}
+      </div>
+
+      {!active ? (
+        <EmptyState text={isCoach ? "Create a montage to get started." : "No montage yet."} />
+      ) : (
+        <>
+          {sources.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, padding: 12, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, marginBottom: 16 }}>
+              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470" }}>Videos used by this montage</div>
+              {sources.map(s => (
+                <div key={s.sourceKey} style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 12.5 }}>
+                  {CLIP_VIDEO_CACHE.get(s.sourceKey)
+                    ? <span style={{ color: TEAL }}>✓ {s.sourceLabel} — {CLIP_VIDEO_CACHE.get(s.sourceKey).name}{CLIP_VIDEO_CACHE.get(s.sourceKey).name !== s.sourceName ? " (different file name — check it's the right video)" : ""}</span>
+                    : <>
+                        <span style={{ color: AMBER }}>Import needed: {s.sourceLabel} — {s.sourceName}</span>
+                        <input type="file" accept="video/*" onChange={e => { const f = e.target.files[0]; if (f) importVideo(s.sourceKey, f); }} style={{ color: "#8B93A1", fontSize: 12.5 }} />
+                      </>}
+                </div>
+              ))}
+            </div>
+          )}
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 18 }}>
+            {items.length === 0 && <EmptyState text="This montage is empty." />}
+            {items.map((it, i) => {
+              const drag = { onDragStart: () => setDragFrom(i), onDragOver: e => { if (isCoach) e.preventDefault(); }, onDrop: () => { if (isCoach && dragFrom !== null) moveItem(dragFrom, i); setDragFrom(null); } };
+              if (it.type === "clip") return (
+                <MontageClipCard key={it.id} item={it} index={i} count={items.length} url={urls[it.sourceKey]} isCoach={isCoach}
+                  onChange={patch => updateItem(it.id, patch, true)} onRemove={() => removeItem(it.id)} onMove={d => moveItem(i, i + d)} onImport={importVideo} drag={drag} />
+              );
+              if (it.type === "slide") return (
+                <MontageSlideCard key={it.id} item={it} index={i} count={items.length} data={sdata} imgs={simgs} isCoach={isCoach}
+                  onChange={patch => updateItem(it.id, patch, true)} onRemove={() => removeItem(it.id)} onMove={d => moveItem(i, i + d)}
+                  onEdit={() => setEditingId(it.id)} onDuplicate={() => duplicateSlide(it)} drag={drag} />
+              );
+              return null;
+            })}
+          </div>
+
+          {isCoach && (
+            <div style={{ padding: 12, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, marginBottom: 18 }}>
+              {[["scouting", "Add a slide — Scouting"], ["feedback", "Add a slide — Feedback"]].map(([fam, title]) => (
+                <div key={fam} style={{ marginBottom: 10 }}>
+                  <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 8 }}>{title}</div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    {SLIDE_KINDS.filter(k => k.family === fam).map(k => (
+                      <button key={k.id} onClick={() => addSlide(k.id)} style={{ background: PANEL2, border: `1px solid ${AMBER_DIM}`, borderRadius: 8, color: AMBER, cursor: "pointer", fontSize: 12.5, padding: "7px 12px", fontFamily: "inherit" }}><Plus size={12} style={{ verticalAlign: "-2px" }} /> {k.label}</button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              <div style={{ fontSize: 11.5, color: "#5C6470", marginTop: 8 }}>Slides are saved with the montage (layout, data links, images). A new slide starts from the layout you saved as default for its type, with the teams and match of the previous slide.</div>
+            </div>
+          )}
+
+          {isCoach && (
+            <div style={{ padding: 12, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, marginBottom: 18 }}>
+              <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 8 }}>External video</div>
+              <input type="file" accept="video/*" onChange={e => { importExternal(e.target.files[0]); e.target.value = ""; }} style={{ color: "#8B93A1", fontSize: 12.5 }} />
+              {externalKeys.map(k => (
+                <div key={k} style={{ display: "flex", gap: 10, alignItems: "center", marginTop: 8, fontSize: 12.5, color: TEAL, flexWrap: "wrap" }}>
+                  ✓ {CLIP_VIDEO_CACHE.get(k).name}
+                  <button onClick={() => addExternalClip(k)} style={{ background: "none", border: `1px solid ${AMBER}`, borderRadius: 6, color: AMBER, cursor: "pointer", fontSize: 12, padding: "3px 10px", fontFamily: "inherit" }}>Add a clip from this video</button>
+                </div>
+              ))}
+              <div style={{ fontSize: 11.5, color: "#5C6470", marginTop: 8 }}>An external video is kept only while the site stays open; after a reload you'll be asked for it again.</div>
+            </div>
+          )}
+
+          {(clipCount > 0 || slideCount > 0) && (
+            <div style={{ padding: 14, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, display: "flex", flexDirection: "column", gap: 12 }}>
+              <div style={{ fontSize: 13, color: PAPER }}>{clipCount} clip{clipCount !== 1 ? "s" : ""}{slideCount > 0 ? ` · ${slideCount} slide${slideCount !== 1 ? "s" : ""}` : ""} · {fmtClock(totalSec)} total</div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                <button onClick={() => setPlaying(true)} style={{ ...btnPrimary, flex: "none", background: PANEL2, color: PAPER, border: `1px solid ${LINE}` }}>Play the montage</button>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: PAPER }}>
+                  <input type="radio" name="montageMode" checked={exportMode === "precise"} disabled={busy} onChange={() => setExportMode("precise")} /> Precise cut (slower, exact trims)
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: PAPER }}>
+                  <input type="radio" name="montageMode" checked={exportMode === "fast" && !slideCount} disabled={busy || slideCount > 0} onChange={() => setExportMode("fast")} /> Fast cut (may be a second off)
+                </label>
+              </div>
+              <div style={{ display: "flex", gap: 10, flexWrap: "wrap", alignItems: "center" }}>
+                <button disabled={busy} onClick={exportMontage} style={{ ...btnPrimary, flex: "none", opacity: busy ? 0.6 : 1 }}>{busy ? (progress || "Processing…") : "Export as a video file"}</button>
+                {busy && <button onClick={cancelExport} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 8, color: "#8B93A1", cursor: "pointer", fontSize: 12, padding: "6px 12px", fontFamily: "inherit" }}>Cancel</button>}
+              </div>
+              {error && <div style={{ color: RED, fontSize: 12.5 }}>{error}</div>}
+              {!busy && progress && <div style={{ color: TEAL, fontSize: 12.5 }}>{progress}</div>}
+              {resultUrl && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  <video controls src={resultUrl} style={{ width: "100%", borderRadius: 10, background: "#000" }} />
+                  <a href={resultUrl} download={`${active.name.replace(/\s+/g, "_")}.mp4`} style={{ ...btnPrimary, textAlign: "center", textDecoration: "none", display: "block", boxSizing: "border-box" }}>Save the montage to my device</a>
+                </div>
+              )}
+            </div>
+          )}
+        </>
+      )}
+      {playing && <MontagePlayer items={items} urls={urls} slideEnv={{ data: sdata, imgs: simgs }} onClose={() => setPlaying(false)} />}
+      {editingSlide && <SlideEditor slide={editingSlide} data={sdata} imgs={simgs} onChange={patch => updateItem(editingSlide.id, patch, true)} onClose={closeSlideEditor} />}
     </div>
   );
 }
@@ -3191,12 +4812,9 @@ function computeWeightedPlayerPercentages(entries) {
   return { pct2, pct3, pctFT, efg, usagePct };
 }
 
-function useTeamAdvancedStats(filterKeys) {
-  const [data, setData] = useState({ perMatch: [], columns: {}, loading: true });
-
-  useEffect(() => { load(); }, [filterKeys]);
-
-  async function load() {
+// Calcul des stats d'équipe par match (sans état React) — utilisé par le hook ci-dessous ET par les slides du montage.
+async function loadTeamAdvancedStats(filterKeys) {
+  {
     const idx = (await storeGet("boxscore_index")) || [];
     const matches = [];
     let allLabels = [];
@@ -3309,9 +4927,13 @@ function useTeamAdvancedStats(filterKeys) {
     };
     const missing = Object.entries(derivedOk).filter(([, ok]) => !ok).map(([k]) => k);
 
-    setData({ perMatch, columns, missing, rawLabels: uniqueLabels, loading: false });
+    return { perMatch, columns, missing, rawLabels: uniqueLabels, loading: false };
   }
+}
 
+function useTeamAdvancedStats(filterKeys) {
+  const [data, setData] = useState({ perMatch: [], columns: {}, loading: true });
+  useEffect(() => { loadTeamAdvancedStats(filterKeys).then(setData); }, [filterKeys]);
   return data;
 }
 
@@ -4515,6 +6137,12 @@ export default function App() {
             You don't have the permission to see this.
           </div>
         )}
+        {tab === "montage" && (session.role === "coach" || visibility.tabs.montage) && <MontageTab isCoach={session.role === "coach"} />}
+        {tab === "montage" && session.role === "player" && !visibility.tabs.montage && (
+          <div style={{ padding: 30, textAlign: "center", color: "#5C6470", border: `1px dashed ${LINE}`, borderRadius: 12, fontSize: 13.5 }}>
+            You don't have the permission to see this.
+          </div>
+        )}
         {tab === "planning" && (session.role === "coach" || visibility.tabs.planning) && <PlanningTab isCoach={session.role === "coach"} team={team} roster={roster} playerName={session.role === "player" ? session.name : null} />}
         {tab === "planning" && session.role === "player" && !visibility.tabs.planning && (
           <div style={{ padding: 30, textAlign: "center", color: "#5C6470", border: `1px dashed ${LINE}`, borderRadius: 12, fontSize: 13.5 }}>
@@ -5038,7 +6666,7 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
           <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 8 }}>Visible to players</div>
           {visibility && (
             <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 16 }}>
-              {[["players", "Players tab"], ["team", "Team tab"], ["scouting", "Scouting tab"], ["planning", "Planning tab"], ["draw", "Draw tab (read-only)"]].map(([key, label]) => (
+              {[["players", "Players tab"], ["team", "Team tab"], ["scouting", "Scouting tab"], ["planning", "Planning tab"], ["draw", "Draw tab (read-only)"], ["montage", "Montage tab (read-only)"]].map(([key, label]) => (
                 <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
                   <input type="checkbox" checked={visibility.tabs[key]} onChange={() => toggleTab(key)} /> {label}
                 </label>
@@ -5695,6 +7323,7 @@ function BottomTabBar({ tab, setTab, isCoach, visibility }) {
     ...(isCoach || v.tabs.team ? [{ id: "team", label: "Team", icon: LayoutGrid }] : []),
     ...(isCoach || v.tabs.scouting ? [{ id: "scouting", label: "Scouting", icon: Search }] : []),
     ...(isCoach || v.tabs.draw ? [{ id: "draw", label: "Draw", icon: Pencil }] : []),
+    ...(isCoach || v.tabs.montage ? [{ id: "montage", label: "Montage", icon: Film }] : []),
     ...(isCoach ? [{ id: "backup", label: "Backup", icon: Download }] : []),
     ...(isCoach ? [{ id: "settings", label: "Settings", icon: ClipboardList }] : []),
   ];
@@ -8692,7 +10321,7 @@ const MENTAL_CRITERIA = [
 // ---------------------------------------------------------------------------
 
 const DEFAULT_VISIBILITY = {
-  tabs: { players: true, team: true, scouting: true, planning: true, draw: false },
+  tabs: { players: true, team: true, scouting: true, planning: true, draw: false, montage: true },
   playerDetail: { stats: true, objectives: true, training: true, mental: true, wellness: true, role: true, meetings: true },
   team: { standings: true, teamPlay: true, advanced: true, resources: true, reboundContest: true, shootingGrid: true },
   // Demandé par l'utilisateur : Comparison / Scouting Report / Observation, chacune
@@ -12094,9 +13723,12 @@ function ScoutingComparison({ teams }) {
         </div>
       </div>
 
-      <SectionTitle eyebrow="Zoom" title="Four Factors, ratings & % 3pts" />
+      {[["Four Factors, ratings & % 3pts", ["efg", "pctbp", "pctro", "ftafga", "ortg", "drtg", "pct3"]],
+        ["Opponents — what each team allows", ["oRo", "oPctro", "dEfg", "dPct2", "dPct3", "dPctbp", "dFtafga", "oRt"]]].map(([zoomTitle, zoomKeys]) => zoomKeys.some(k => a?.stats[k] !== undefined || b?.stats[k] !== undefined) && (
+      <React.Fragment key={zoomTitle}>
+      <SectionTitle eyebrow="Zoom" title={zoomTitle} />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 26 }}>
-        {["efg", "pctbp", "pctro", "ftafga", "ortg", "drtg", "pct3"].map(key => {
+        {zoomKeys.map(key => {
           const schema = SCOUT_STAT_SCHEMA.find(s => s.key === key);
           const va = a?.stats[key], vb = b?.stats[key];
           if (va === undefined && vb === undefined) return null;
@@ -12125,6 +13757,8 @@ function ScoutingComparison({ teams }) {
           );
         })}
       </div>
+      </React.Fragment>
+      ))}
 
       {radarData.length > 0 && (
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, marginBottom: 24 }}>
@@ -13282,7 +14916,75 @@ async function fetchNm1ClassicTeams() {
     const v = allowed[normTag(t.name)];
     if (typeof v === "number" && !isNaN(v)) t.stats = withAllowedDerived({ ...t.stats, ptse: v });
   });
+  // Stats des adversaires (ce que chaque équipe encaisse) : si la lecture échoue, le reste de la synchro continue.
+  try {
+    const opp = computeOpponentStats(await syncLeagueGames());
+    teams.forEach(t => { const o = opp[normTag(t.name)]; if (o) t.stats = { ...t.stats, ...o }; });
+  } catch { /* pas bloquant */ }
   return teams;
+}
+
+// ---------------------------------------------------------------------------
+// Stats des ADVERSAIRES de chaque équipe (ce qu'elle encaisse) : tous les matchs joués de la ligue sont lus
+// sur nm1.ffbb.com (fonction ffbb-nm1-matches, modes league / leaguematch). Les totaux de chaque match sont
+// gardés en mémoire (clé league_games) : une synchro ne relit que les NOUVEAUX matchs. Pour chaque équipe,
+// on additionne les totaux de ses adversaires puis on divise par le nombre de matchs.
+// ---------------------------------------------------------------------------
+const OPP_TOT_KEYS = ["pts", "r2", "t2", "r3", "t3", "lfr", "lft", "ro", "rd", "rt", "pd", "in", "bp", "ct", "fte"];
+async function syncLeagueGames() {
+  const store = (await storeGet("league_games")) || { games: {} };
+  const games = store.games || {};
+  const res = await fetch("/.netlify/functions/ffbb-nm1-matches?mode=league");
+  const list = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(list.error || "FFBB league matches unavailable (" + res.status + ").");
+  const queue = (list.matches || []).filter(m => !games[m.id]);
+  let added = 0;
+  await Promise.all([0, 1, 2, 3, 4].map(async () => {
+    while (queue.length) {
+      const m = queue.shift();
+      try {
+        const r = await fetch("/.netlify/functions/ffbb-nm1-matches?mode=leaguematch&match=" + encodeURIComponent(m.id + "-" + m.slug));
+        if (!r.ok) continue;
+        const d = await r.json();
+        if (!d || !d.teams || d.teams.length < 2) continue;
+        games[m.id] = { date: d.date, teams: d.teams.slice(0, 2).map(t => ({ name: t.name, t: Object.fromEntries(OPP_TOT_KEYS.map(k => [k, Number(t.total?.[k]) || 0])) })) };
+        added++;
+      } catch { /* feuille indisponible : au prochain passage */ }
+    }
+  }));
+  if (added) await storeSet("league_games", { games, updatedAt: Date.now() });
+  return games;
+}
+// -> { [nom normalisé]: stats "encaissées" par match }
+function computeOpponentStats(games) {
+  const acc = {};
+  Object.values(games).forEach(g => {
+    if (!g.teams || g.teams.length < 2) return;
+    [[0, 1], [1, 0]].forEach(([a, b]) => {
+      const key = normTag(g.teams[a].name);
+      const o = g.teams[b].t, me = g.teams[a].t;
+      const s = acc[key] || (acc[key] = { n: 0, o: {}, ownRd: 0 });
+      s.n++; s.ownRd += me.rd;
+      OPP_TOT_KEYS.forEach(k => { s.o[k] = (s.o[k] || 0) + o[k]; });
+    });
+  });
+  const out = {};
+  Object.entries(acc).forEach(([key, { n, o, ownRd }]) => {
+    if (!n) return;
+    const fga = o.t2 + o.t3, poss = fga - o.ro + o.bp + 0.44 * o.lft;
+    const st = {
+      oR2: o.r2 / n, oT2: o.t2 / n, oR3: o.r3 / n, oT3: o.t3 / n, oLfr: o.lfr / n, oLft: o.lft / n,
+      oRo: o.ro / n, oRd: o.rd / n, oRt: o.rt / n, oPd: o.pd / n, oIn: o.in / n, oBp: o.bp / n, oCt: o.ct / n, oFte: o.fte / n,
+    };
+    if (o.ro + ownRd > 0) st.oPctro = (100 * o.ro) / (o.ro + ownRd);
+    if (o.t2 > 0) st.dPct2 = (100 * o.r2) / o.t2;
+    if (o.t3 > 0) st.dPct3 = (100 * o.r3) / o.t3;
+    if (fga > 0) { st.dEfg = (100 * (o.r2 + 1.5 * o.r3)) / fga; st.dFtafga = o.lft / fga; }
+    if (poss > 0) st.dPctbp = (100 * o.bp) / poss;
+    Object.keys(st).forEach(k => { st[k] = Math.round(st[k] * 100) / 100; });
+    out[key] = st;
+  });
+  return out;
 }
 
 // Logos des clubs : lus sur la FFBB (fonction Netlify ffbb-nm1-logos), convertis du SVG en PNG,
