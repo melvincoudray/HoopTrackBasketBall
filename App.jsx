@@ -13545,6 +13545,55 @@ function ScoutingStaffPanel({ teamName, isCoach }) {
   );
 }
 
+// Onglet "Stats" du Scouting Report : forces (rang 1 à 5 de la ligue) et faiblesses (rang 20 à 26) statistiques d'une équipe.
+// Rang calculé parmi toutes les équipes de Scouting ; une stat "moins = mieux" (balles perdues, points encaissés…) est classée à l'envers.
+const SCOUT_SW_KEYS = ["pts", "ptse", "pctv", "pct2", "pct3", "pctlf", "efg", "ts", "ftafga", "ro", "rd", "rt", "pctro", "pctrd", "pd", "bp", "pctbp", "padbp", "ct", "int", "fte",
+  "ortg", "drtg", "nrtg", "dPct2", "dPct3", "dEfg", "dPctbp", "dFtafga", "oPctro", "oRo", "oRt", "oBp", "poss"];
+function ScoutingStatsPanel({ teamName, teams }) {
+  const t = teams[teamName];
+  if (!t) return <EmptyState text="Select a team." />;
+  const total = Object.values(teams).length;
+  const strongMax = 5, weakMin = Math.max(strongMax + 1, Math.min(20, total - 5));
+  const rows = SCOUT_SW_KEYS.map(key => {
+    const schema = SCOUT_STAT_SCHEMA.find(s => s.key === key);
+    const v = t.stats[key];
+    if (!schema || v === undefined || v === null || isNaN(v)) return null;
+    const r = leagueRank(teams, key, teamName);
+    if (!r) return null;
+    return { key, label: schema.label, pct: schema.pct, group: schema.group, v, rank: r.rank, total: r.total };
+  }).filter(Boolean);
+  const strengths = rows.filter(r => r.rank <= strongMax).sort((a, b) => a.rank - b.rank);
+  const weaknesses = rows.filter(r => r.rank >= weakMin).sort((a, b) => b.rank - a.rank);
+  const fmt = (r) => (r.pct ? r.v.toFixed(1) + "%" : Number.isInteger(r.v) ? String(r.v) : r.v.toFixed(1));
+  const col = (title, list, color, empty) => (
+    <div style={{ flex: "1 1 320px", minWidth: 0, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16 }}>
+      <div style={{ fontSize: 15, fontWeight: 800, color, marginBottom: 10 }}>{title} <span style={{ color: "#5C6470", fontWeight: 500, fontSize: 12 }}>· {list.length}</span></div>
+      {list.length === 0 && <div style={{ fontSize: 12.5, color: "#5C6470" }}>{empty}</div>}
+      {list.map(r => (
+        <div key={r.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "7px 0", borderTop: `1px solid ${LINE}` }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 13, color: PAPER }}>{r.label}</div>
+            <div style={{ fontSize: 10.5, color: "#5C6470" }}>{r.group}</div>
+          </div>
+          <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 16, color }}>{fmt(r)}</div>
+          <div style={{ fontSize: 11.5, color: "#8B93A1", width: 54, textAlign: "right" }}>#{r.rank}/{r.total}</div>
+        </div>
+      ))}
+    </div>
+  );
+  return (
+    <div>
+      <div style={{ fontSize: 12, color: "#5C6470", marginBottom: 12 }}>
+        Rank among the {total} teams in Scouting · strengths: rank 1 to {strongMax} · weaknesses: rank {weakMin} to {total}. Stats where lower is better (turnovers, points allowed…) are ranked the other way round.
+      </div>
+      <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+        {col("Strengths", strengths, TEAL, "No stat ranked in the top 5.")}
+        {col("Weaknesses", weaknesses, RED, "No stat ranked in the bottom of the league.")}
+      </div>
+    </div>
+  );
+}
+
 function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, initialTeam }) {
   const [selectedTeam, setSelectedTeam] = useState(initialTeam || "");
   const [exportReport, setExportReport] = useState(null);
@@ -13680,7 +13729,7 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
       ) : (
         <>
       <div style={{ display: "flex", gap: 8, marginBottom: 20, borderBottom: `1px solid ${LINE}`, paddingBottom: 10 }}>
-        {[["collectif", "Collective"], ["individuel", "Individual"], ["staff", "Staff"]].map(([id, label]) => (
+        {[["collectif", "Collective"], ["individuel", "Individual"], ["staff", "Staff"], ["stats", "Stats"]].map(([id, label]) => (
           <button key={id} onClick={() => setSubtab(id)} style={{
             padding: "7px 12px", borderRadius: 7, border: "none", cursor: "pointer", fontSize: 13, fontWeight: 600, fontFamily: "inherit",
             background: subtab === id ? PANEL2 : "transparent", color: subtab === id ? AMBER : "#8B93A1"
@@ -13821,6 +13870,7 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
             </div>
           )}
           {subtab === "staff" && <ScoutingStaffPanel teamName={selectedTeam} isCoach={isCoach} />}
+          {subtab === "stats" && <ScoutingStatsPanel teamName={selectedTeam} teams={scoutingTeams || {}} />}
         </>
       )}
         </>
