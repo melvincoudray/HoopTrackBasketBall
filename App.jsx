@@ -673,6 +673,7 @@ const SCOUT_STAT_SCHEMA = [
   { key: "rd", label: "Def. rebounds", group: "Rebounds & Ball" },
   { key: "rt", label: "Total rebounds", group: "Rebounds & Ball" },
   { key: "pctro", label: "% Off. rebounds", pct: true, group: "Rebounds & Ball" },
+  { key: "pctrd", label: "% Def. rebounds", pct: true, group: "Rebounds & Ball" },
   { key: "pd", label: "Assists", group: "Rebounds & Ball" },
   { key: "bp", label: "Turnovers", lowerBetter: true, group: "Rebounds & Ball" },
   { key: "padbp", label: "Assists/Turnovers", group: "Rebounds & Ball" },
@@ -13955,7 +13956,7 @@ function ScoutingComparison({ teams }) {
         </div>
       </div>
 
-      {[["Four Factors, ratings & % 3pts", ["efg", "pctbp", "pctro", "ftafga", "ortg", "drtg", "pct3"]],
+      {[["Four Factors, ratings & % 3pts", ["efg", "pctbp", "pctro", "pctrd", "ftafga", "ortg", "drtg", "pct3"]],
         ["Opponents — what each team allows", ["oRo", "oPctro", "dEfg", "dPct2", "dPct3", "dPctbp", "dFtafga", "oRt"]]].map(([zoomTitle, zoomKeys]) => zoomKeys.some(k => a?.stats[k] !== undefined || b?.stats[k] !== undefined) && (
       <React.Fragment key={zoomTitle}>
       <SectionTitle eyebrow="Zoom" title={zoomTitle} />
@@ -15237,7 +15238,7 @@ function computeOpponentStats(games) {
       oR2: o.r2 / n, oT2: o.t2 / n, oR3: o.r3 / n, oT3: o.t3 / n, oLfr: o.lfr / n, oLft: o.lft / n,
       oRo: o.ro / n, oRd: o.rd / n, oRt: o.rt / n, oPd: o.pd / n, oIn: o.in / n, oBp: o.bp / n, oCt: o.ct / n, oFte: o.fte / n,
     };
-    if (o.ro + ownRd > 0) st.oPctro = (100 * o.ro) / (o.ro + ownRd);
+    if (o.ro + ownRd > 0) { st.oPctro = (100 * o.ro) / (o.ro + ownRd); st.pctrd = (100 * ownRd) / (ownRd + o.ro); } // % reb déf. = RD / (RD + RO adverse)
     if (o.t2 > 0) st.dPct2 = (100 * o.r2) / o.t2;
     if (o.t3 > 0) st.dPct3 = (100 * o.r3) / o.t3;
     if (fga > 0) { st.dEfg = (100 * (o.r2 + 1.5 * o.r3)) / fga; st.dFtafga = o.lft / fga; }
