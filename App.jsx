@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
 import { createRoot } from "react-dom/client";
 import * as XLSX from "xlsx";
 import initSqlJs from "sql.js";
@@ -2573,9 +2573,30 @@ function SlideStatBlock({ el, slide, data }) {
   const vs = Math.round(el.valueSize || Math.min(el.h * 0.36, (el.w - 28) / (n * (maxLen * 0.55 + 0.5)), 110));
   const ls = Math.round(el.labelSize || Math.max(13, Math.min(el.h * 0.12, 26)));
   const font = `'${el.font || "Oswald"}', sans-serif`;
+  // La valeur chiffrée passe toujours en priorité : le nom du système (libellé) se réduit pour tenir dans la place restante,
+  // et disparaît seulement s'il ne tient pas du tout, même réduit au minimum.
+  const outerRef = useRef(null), labelRef = useRef(null), bodyRef = useRef(null);
+  const fitKey = [info.label, info.note, el.w, el.h, ls, vs, n, maxLen, el.font].join("|");
+  useLayoutEffect(() => {
+    const fit = () => {
+      const o = outerRef.current, l = labelRef.current, b = bodyRef.current;
+      if (!o || !l || !b) return;
+      const avail = o.clientHeight - 20 - b.offsetHeight - 6;
+      l.style.visibility = "visible"; l.style.display = "block";
+      let size = ls;
+      l.style.fontSize = size + "px";
+      while (l.scrollHeight > avail + 1 && size > 9) { size -= 1; l.style.fontSize = size + "px"; }
+      if (l.scrollHeight > avail + 1 || avail < 8) l.style.display = "none";
+    };
+    fit();
+    let off = false;
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (!off) fit(); }).catch(() => {});
+    return () => { off = true; };
+  }, [fitKey]);
   return (
-    <div style={{ width: "100%", height: "100%", boxSizing: "border-box", background: el.bg || "#1B2A44", border: `2px solid ${accent}`, borderRadius: el.radius ?? 18, padding: "10px 14px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: font, overflow: "hidden" }}>
-      <div style={{ fontSize: ls, color: accent, textTransform: "uppercase", letterSpacing: 2, fontWeight: 700, textAlign: "center", lineHeight: 1.1, marginBottom: 6 }}>{info.label}</div>
+    <div ref={outerRef} style={{ width: "100%", height: "100%", boxSizing: "border-box", background: el.bg || "#1B2A44", border: `2px solid ${accent}`, borderRadius: el.radius ?? 18, padding: "10px 14px", display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", fontFamily: font, overflow: "hidden" }}>
+      <div ref={labelRef} style={{ fontSize: ls, color: accent, textTransform: "uppercase", letterSpacing: 0.5, fontWeight: 700, textAlign: "center", lineHeight: 1.1, marginBottom: 6, maxWidth: "100%", flex: "0 0 auto" }}>{info.label}</div>
+      <div ref={bodyRef} style={{ display: "flex", flexDirection: "column", alignItems: "center", width: "100%", flex: "0 0 auto" }}>
       <div style={{ display: "flex", gap: Math.round(vs * 0.5), alignItems: "flex-start", justifyContent: "center", width: "100%" }}>
         {info.items.map((it, i) => (
           <div key={i} style={{ textAlign: "center", minWidth: 0 }}>
@@ -2585,6 +2606,7 @@ function SlideStatBlock({ el, slide, data }) {
         ))}
       </div>
       {info.note && <div style={{ fontSize: Math.max(11, Math.round(ls * 0.7)), color: "#8B93A1", marginTop: 6 }}>{info.note}</div>}
+      </div>
     </div>
   );
 }
@@ -2612,16 +2634,40 @@ function SlideIndividual({ el, slide, data }) {
     </div>
   );
 }
+// Texte de slide qui ne déborde jamais : si le texte est trop large (titre sur une ligne) ou trop haut (bloc de plusieurs lignes)
+// pour son cadre, la taille de police est réduite jusqu'à ce qu'il tienne. Le même calcul s'applique à l'écran et à l'export vidéo,
+// donc plus de titre coupé ou renvoyé à la ligne à l'export.
+function SlideTextBox({ el, vars }) {
+  const ref = useRef(null), spanRef = useRef(null);
+  const raw = slideText(el.content, vars);
+  const text = raw.replace(/ — /g, "\u00A0— "); // le tiret reste collé au mot qui le précède
+  const base = el.size || 32;
+  const single = !/\n/.test(text) && (el.h || 0) < base * 2.4; // titre d'une seule ligne : jamais de retour à la ligne
+  const just = el.align === "left" ? "flex-start" : el.align === "right" ? "flex-end" : "center";
+  useLayoutEffect(() => {
+    const n = ref.current; if (!n || !n.parentNode) return;
+    const box = n.parentNode;
+    const fit = () => {
+      if (!ref.current) return;
+      n.style.fontSize = base + "px";
+      const over = () => (single ? (spanRef.current ? spanRef.current.offsetWidth : 0) > box.clientWidth * 0.97 : n.scrollHeight > box.clientHeight - 2);
+      let s = 1, guard = 0;
+      while (over() && s > 0.3 && guard++ < 60) { s *= 0.95; n.style.fontSize = (base * s) + "px"; }
+    };
+    fit();
+    let off = false;
+    if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { if (!off) fit(); }).catch(() => {});
+    return () => { off = true; };
+  }, [text, base, el.font, el.weight, el.spacing, el.upper, el.w, el.h, single]);
+  return (
+    <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: just, overflow: "visible" }}>
+      <div ref={ref} style={{ width: "100%", textAlign: el.align || "center", fontFamily: `'${el.font || "Oswald"}', sans-serif`, fontSize: base, fontWeight: el.weight || 700, fontStyle: el.italic ? "italic" : "normal", color: el.color || "#FFFFFF", lineHeight: 1.12, letterSpacing: el.spacing || 0, textTransform: el.upper ? "uppercase" : "none", whiteSpace: single ? "nowrap" : "pre-wrap", textShadow: el.shadow ? "0 3px 14px rgba(0,0,0,0.65)" : "none" }}>{single ? <span ref={spanRef} style={{ display: "inline-block", verticalAlign: "top" }}>{text}</span> : text}</div>
+    </div>
+  );
+}
 function SlideElementView({ el, slide, data, imgs, editable }) {
   const vars = slideVars(slide);
-  if (el.type === "text") {
-    const just = el.align === "left" ? "flex-start" : el.align === "right" ? "flex-end" : "center";
-    return (
-      <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: just, overflow: "hidden" }}>
-        <div style={{ width: "100%", textAlign: el.align || "center", fontFamily: `'${el.font || "Oswald"}', sans-serif`, fontSize: el.size || 32, fontWeight: el.weight || 700, fontStyle: el.italic ? "italic" : "normal", color: el.color || "#FFFFFF", lineHeight: 1.12, letterSpacing: el.spacing || 0, textTransform: el.upper ? "uppercase" : "none", whiteSpace: "pre-wrap", textShadow: el.shadow ? "0 3px 14px rgba(0,0,0,0.65)" : "none" }}>{slideText(el.content, vars)}</div>
-      </div>
-    );
-  }
+  if (el.type === "text") return <SlideTextBox el={el} vars={vars} />;
   if (el.type === "logo") {
     const name = resolveLogoName(el, slide);
     const src = name ? data.logos?.[name] : null;
