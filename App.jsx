@@ -2212,9 +2212,14 @@ async function logoClean(url) {
       const corners = [px(0, 0), px(W - 1, 0), px(0, H - 1), px(W - 1, H - 1)];
       const isLightOpaque = (i) => d[i + 3] > 200 && d[i] > 225 && d[i + 1] > 225 && d[i + 2] > 225;
       const isClear = (i) => d[i + 3] < 12;
-      if (corners.every(i => isLightOpaque(i) || isClear(i))) {
+      const isDarkOpaque = (i) => d[i + 3] > 200 && d[i] < 40 && d[i + 1] < 40 && d[i + 2] < 40;
+      // fond uni (blanc ou noir) aux 4 coins → retiré ; un fond coloré est considéré comme faisant partie du logo
+      const darkMode = corners.every(i => isDarkOpaque(i) || isClear(i)) && corners.some(isDarkOpaque);
+      if (darkMode || corners.every(i => isLightOpaque(i) || isClear(i))) {
+        const bgPx = darkMode ? (i) => d[i + 3] > 40 && d[i] < 58 && d[i + 1] < 58 && d[i + 2] < 58 : (i) => d[i + 3] > 40 && d[i] > 205 && d[i + 1] > 205 && d[i + 2] > 205;
+        const fringe = darkMode ? (i) => d[i] < 95 && d[i + 1] < 95 && d[i + 2] < 95 : (i) => d[i] > 235 && d[i + 1] > 235 && d[i + 2] > 235;
         const seen = new Uint8Array(W * H), stack = [];
-        const push = (x, y) => { if (x < 0 || y < 0 || x >= W || y >= H) return; const p = y * W + x; if (seen[p]) return; const i = p * 4; if (isClear(i) || (d[i + 3] > 40 && d[i] > 205 && d[i + 1] > 205 && d[i + 2] > 205)) { seen[p] = 1; stack.push(p); } };
+        const push = (x, y) => { if (x < 0 || y < 0 || x >= W || y >= H) return; const p = y * W + x; if (seen[p]) return; const i = p * 4; if (isClear(i) || bgPx(i)) { seen[p] = 1; stack.push(p); } };
         for (let x = 0; x < W; x++) { push(x, 0); push(x, H - 1); }
         for (let y = 0; y < H; y++) { push(0, y); push(W - 1, y); }
         while (stack.length) { const p = stack.pop(), x = p % W, y = (p - x) / W; push(x + 1, y); push(x - 1, y); push(x, y + 1); push(x, y - 1); }
@@ -2222,7 +2227,7 @@ async function logoClean(url) {
         // liseré : pixels clairs semi-transparents collés au fond retiré -> atténués
         for (let y = 1; y < H - 1; y++) for (let x = 1; x < W - 1; x++) {
           const p = y * W + x; if (seen[p]) continue;
-          if (seen[p - 1] || seen[p + 1] || seen[p - W] || seen[p + W]) { const i = p * 4; if (d[i] > 235 && d[i + 1] > 235 && d[i + 2] > 235) d[i + 3] = 0; }
+          if (seen[p - 1] || seen[p + 1] || seen[p - W] || seen[p + W]) { const i = p * 4; if (fringe(i)) d[i + 3] = 0; }
         }
         g.putImageData(im, 0, 0);
       }
