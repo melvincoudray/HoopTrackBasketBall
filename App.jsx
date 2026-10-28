@@ -2849,6 +2849,23 @@ async function fetchFfbbGames(myTeam, opponent) {
 }
 const gameLabel = (g) => `${g.journee || "?"} · ${g.dm || "?"} ${g.time || ""} · ${g.home} – ${g.away}${g.played ? " (played)" : ""}`;
 
+// Champ texte "tamponné" : on tape dans un état local (fluide) et la slide n'est mise à jour qu'après une courte pause,
+// au lieu de recalculer tout le montage à chaque lettre (ce qui rendait la saisie très lente).
+function BufferedText({ value, onCommit, multiline, delay, ...rest }) {
+  const [v, setV] = useState(value ?? "");
+  const focused = useRef(false), timer = useRef(null), last = useRef(value ?? ""), vref = useRef(value ?? ""), cb = useRef(onCommit);
+  cb.current = onCommit;
+  useEffect(() => { if (!focused.current) { setV(value ?? ""); vref.current = value ?? ""; last.current = value ?? ""; } }, [value]);
+  const flush = () => { clearTimeout(timer.current); if (vref.current !== last.current) { last.current = vref.current; cb.current(vref.current); } };
+  useEffect(() => () => flush(), []);
+  const common = {
+    ...rest, value: v,
+    onFocus: () => { focused.current = true; },
+    onBlur: () => { focused.current = false; flush(); },
+    onChange: e => { vref.current = e.target.value; setV(e.target.value); clearTimeout(timer.current); timer.current = setTimeout(flush, delay || 300); },
+  };
+  return multiline ? <textarea {...common} /> : <input {...common} />;
+}
 // Choix d'un tag avec recherche : on tape les premières lettres, la liste se filtre (au lieu d'une longue liste déroulante).
 function SlideTagPicker({ value, onPick, withPlay, groups }) {
   const [q, setQ] = useState("");
@@ -3032,7 +3049,7 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
       <div style={{ background: INK, border: `1px solid ${LINE}`, borderRadius: 12, padding: 14, maxWidth: 1380, margin: "0 auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
           {slide.kind === "custom"
-            ? <input value={slide.name || ""} onChange={e => onChange({ name: e.target.value })} placeholder="Slide name (e.g. End Screen)" style={{ ...sInp, width: 260, fontSize: 14, fontWeight: 700 }} />
+            ? <BufferedText value={slide.name || ""} onCommit={v => onChange({ name: v })} placeholder="Slide name (e.g. End Screen)" style={{ ...sInp, width: 260, fontSize: 14, fontWeight: 700 }} />
             : <div style={{ fontSize: 14, fontWeight: 700, color: PAPER }}>{slideKindLabel(slide.kind, slide)}</div>}
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
             <button onClick={saveTemplate} style={{ background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 8, color: AMBER, padding: "7px 12px", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>{slide.kind === "custom" ? "Save this slide by name" : "Save this layout as default for this type"}</button>
@@ -3090,7 +3107,7 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
                     <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)", gap: 8 }}>
                       <SField label="My score"><input type="number" value={fbm.myScore ?? ""} onChange={e => setFbScore("myScore", e.target.value)} style={sInp} /></SField>
                       <SField label="Opp. score"><input type="number" value={fbm.oppScore ?? ""} onChange={e => setFbScore("oppScore", e.target.value)} style={sInp} /></SField>
-                      <SField label="Opponent name"><input value={c.opponent || ""} onChange={e => setCtx({ opponent: e.target.value })} style={sInp} /></SField>
+                      <SField label="Opponent name"><BufferedText value={c.opponent || ""} onCommit={v => setCtx({ opponent: v })} style={sInp} /></SField>
                     </div>
                   )}
                 </>
@@ -3108,13 +3125,13 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
                   </div>
                   {msg && <div style={{ fontSize: 11.5, color: msg.startsWith("No") || /unavailable|Fill/.test(msg) ? AMBER : TEAL }}>{msg}</div>}
                   <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) 92px 70px", gap: 8 }}>
-                    <SField label="Matchday"><input value={game.journee || ""} onChange={e => setGame({ journee: e.target.value })} style={sInp} placeholder="Journée 1, Group B" /></SField>
-                    <SField label="Date (dd/mm)"><input value={game.dm || ""} onChange={e => setGame({ dm: e.target.value })} style={sInp} placeholder="27/10" /></SField>
-                    <SField label="Time"><input value={game.time || ""} onChange={e => setGame({ time: e.target.value })} style={sInp} placeholder="20:00" /></SField>
+                    <SField label="Matchday"><BufferedText value={game.journee || ""} onCommit={v => setGame({ journee: v })} style={sInp} placeholder="Journée 1, Group B" /></SField>
+                    <SField label="Date (dd/mm)"><BufferedText value={game.dm || ""} onCommit={v => setGame({ dm: v })} style={sInp} placeholder="27/10" /></SField>
+                    <SField label="Time"><BufferedText value={game.time || ""} onCommit={v => setGame({ time: v })} style={sInp} placeholder="20:00" /></SField>
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "minmax(0,1fr) minmax(0,1fr)", gap: 8 }}>
-                    <SField label="Venue"><input value={game.venue || ""} onChange={e => setGame({ venue: e.target.value })} style={sInp} /></SField>
-                    <SField label="City"><input value={game.city || ""} onChange={e => setGame({ city: e.target.value })} style={sInp} /></SField>
+                    <SField label="Venue"><BufferedText value={game.venue || ""} onCommit={v => setGame({ venue: v })} style={sInp} /></SField>
+                    <SField label="City"><BufferedText value={game.city || ""} onCommit={v => setGame({ city: v })} style={sInp} /></SField>
                   </div>
                 </>
               )}
@@ -3199,7 +3216,7 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
                   {sel.type === "text" && (
                     <>
                       <SField label="Text (variables: {opponent} {myTeam} {matchday} {date} {time} {dateTime} {venue} {city} {venueCity} {side} {play} {score} {myScore} {oppScore} {result})">
-                        <textarea value={sel.content || ""} onChange={e => patchEl(sel.id, { content: e.target.value })} rows={3} style={{ ...sInp, resize: "vertical" }} />
+                        <BufferedText multiline key={sel.id} value={sel.content || ""} onCommit={v => patchEl(sel.id, { content: v })} rows={3} style={{ ...sInp, resize: "vertical" }} />
                       </SField>
                       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                         <SField label="Font"><select value={sel.font || "Oswald"} onChange={e => patchEl(sel.id, { font: e.target.value })} style={sInp}>{fontChoices.map(f => <option key={f} value={f}>{f}</option>)}</select></SField>
@@ -3300,7 +3317,7 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
                         </>
                       )}
                       <div style={{ display: "flex", gap: 8, alignItems: "flex-end", flexWrap: "wrap" }}>
-                        <SField label="Custom label"><input value={sel.label || ""} onChange={e => patchEl(sel.id, { label: e.target.value })} style={sInp} placeholder="(automatic)" /></SField>
+                        <SField label="Custom label"><BufferedText key={sel.id} value={sel.label || ""} onCommit={v => patchEl(sel.id, { label: v })} style={sInp} placeholder="(automatic)" /></SField>
                         <SField label="Color" w={60}><input type="color" value={sel.color || AMBER} onChange={e => patchEl(sel.id, { color: e.target.value })} style={{ ...sInp, padding: 2, height: 34 }} /></SField>
                         <SField label="Font" w={130}><select value={sel.font || "Oswald"} onChange={e => patchEl(sel.id, { font: e.target.value })} style={sInp}>{fontChoices.map(f => <option key={f} value={f}>{f}</option>)}</select></SField>
                         <SField label="Value size" w={80}><input type="number" value={sel.valueSize || ""} placeholder="auto" onChange={e => patchEl(sel.id, { valueSize: Number(e.target.value) || undefined })} style={sInp} /></SField>
