@@ -12058,7 +12058,7 @@ function ScoutingCollective({ collective, onSave, isCoach }) {
   );
 }
 
-function ScoutingPlayerForm({ initial, onSave, onCancel, busy }) {
+function ScoutingPlayerForm({ initial, onSave, onCancel, busy, teamName }) {
   const [firstName, setFirstName] = useState(initial?.firstName || "");
   const [lastName, setLastName] = useState(initial?.lastName || "");
   const [jersey, setJersey] = useState(initial?.jersey || "");
@@ -12088,6 +12088,25 @@ function ScoutingPlayerForm({ initial, onSave, onCancel, busy }) {
     e.target.value = "";
   }
 
+  // Ajoute un badge à partir d'une stat du Box Score FFBB (Observation) du joueur, arrondie à l'unité
+  const [fbBusy, setFbBusy] = useState(false);
+  const [fbErr, setFbErr] = useState("");
+  const [fbStats, setFbStats] = useState(initial?.ffbbStats || null);
+  async function addFfbbStat(label) {
+    if (!label) return;
+    const def = FFBB_BOX_DEFS.find(d => d[0] === label); if (!def) return;
+    setFbErr(""); let st = fbStats;
+    if (!st) {
+      setFbBusy(true);
+      try { st = await loadFfbbStatsForPlayer(teamName, { ...initial, firstName, lastName, jersey }, false); setFbStats(st); }
+      catch (e) { setFbErr(e.message || "FFBB stats unavailable."); setFbBusy(false); return; }
+      setFbBusy(false);
+    }
+    const v = def[1](st);
+    if (v === null || v === undefined || isNaN(v)) { setFbErr("No value for this stat."); return; }
+    const isPct = /^%/.test(label) || /usage/i.test(label);
+    setHighlights(h => [...h, { label: label.replace(/^% /, "% ").replace("Theoretical Possessions", "Poss."), value: Math.round(v) + (isPct ? "%" : "") }]);
+  }
   function addHighlight() { setHighlights(h => [...h, { label: "", value: "" }]); }
   function updateHighlight(i, field, v) { setHighlights(h => h.map((x, j) => j === i ? { ...x, [field]: v } : x)); }
   function removeHighlight(i) { setHighlights(h => h.filter((_, j) => j !== i)); }
@@ -12158,6 +12177,15 @@ function ScoutingPlayerForm({ initial, onSave, onCancel, busy }) {
 
       <div style={{ marginBottom: 14 }}>
         <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: "#5C6470", marginBottom: 8 }}>Stats to highlight (e.g. "9.0" / "Pts")</div>
+        {teamName && (
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 8, flexWrap: "wrap" }}>
+            <select value="" disabled={fbBusy} onChange={e => { const v = e.target.value; e.target.value = ""; addFfbbStat(v); }} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 260 }}>
+              <option value="">{fbBusy ? "Loading FFBB stats…" : "+ Add a Box Score stat (rounded)"}</option>
+              {FFBB_BOX_DEFS.filter(d => d[0] !== "Games played").map(d => <option key={d[0]} value={d[0]}>{d[0]}</option>)}
+            </select>
+            {fbErr && <span style={{ fontSize: 11.5, color: RED }}>{fbErr}</span>}
+          </div>
+        )}
         {highlights.map((h, i) => (
           <div key={i} style={{ marginBottom: 10, padding: "8px 10px", background: PANEL2, borderRadius: 8 }}>
             <div style={{ display: "flex", gap: 8, marginBottom: 6, alignItems: "center" }}>
@@ -13858,6 +13886,7 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
               )}
               {editing && (
                 <ScoutingPlayerForm
+                  teamName={selectedTeam}
                   initial={editing === "new" ? null : editing}
                   busy={busy}
                   onCancel={() => setEditing(null)}
@@ -14297,6 +14326,34 @@ async function loadFfbbStatsForPlayer(observedTeamName, player, canSave) {
   return st;
 }
 
+// Définitions des stats du Box Score FFBB (affichage des encadrés + choix d'une stat pour un badge de la fiche joueur)
+const ffbbF1 = v => (v === null || v === undefined ? "–" : Number(v).toFixed(1));
+const ffbbPctOf = (m, a) => (a > 0 ? (100 * m / a) : null);
+const ffbbPct = v => (v === null || v === undefined ? "–" : v.toFixed(1) + "%");
+const FFBB_BOX_DEFS = [
+    ["Time", s => s.min, v => (v == null ? "–" : ffbbF1(v) + " min"), "teal"],
+    ["Pts", s => s.pts, ffbbF1, "amber"],
+    ["Reb Def", s => s.rd, ffbbF1, "teal"],
+    ["Reb Off", s => s.ro, ffbbF1, "teal"],
+    ["Reb Tot", s => s.reb, ffbbF1, "teal"],
+    ["Assists", s => s.ast, ffbbF1, "teal"],
+    ["Steals", s => s.stl, ffbbF1, "teal"],
+    ["Blocks", s => s.blk, ffbbF1, "teal"],
+    ["2Pts Made", s => s.r2, ffbbF1, "teal"],
+    ["2Pts Attempted", s => s.t2, ffbbF1, "teal"],
+    ["% 2Pts", s => ffbbPctOf(s.r2, s.t2), ffbbPct, "teal"],
+    ["3Pts Made", s => s.r3, ffbbF1, "teal"],
+    ["3Pts Attempted", s => s.t3, ffbbF1, "teal"],
+    ["% 3Pts", s => ffbbPctOf(s.r3, s.t3), ffbbPct, "teal"],
+    ["FT Made", s => s.lfr, ffbbF1, "teal"],
+    ["FT Attempted", s => s.lft, ffbbF1, "teal"],
+    ["% FT", s => ffbbPctOf(s.lfr, s.lft), ffbbPct, "teal"],
+    ["Eff", s => s.eff, ffbbF1, "amber"],
+    ["Theoretical Possessions", s => s.theoPoss, ffbbF1, "teal"],
+    ["% Usage", s => s.usage, ffbbPct, "teal"],
+    ["Games played", s => s.mj, v => (v == null ? "–" : String(v)), "amber"],
+];
+
 // Blocs "Box Score" d'un joueur adverse, à partir des moyennes de saison lues sur le site FFBB NM1
 // (enregistrées dans sa fiche par "Sync roster (FFBB)"). Mêmes encadrés, même ordre que le Box
 // Score de nos joueurs ; ceux que la FFBB ne fournit pas (+/-, fautes, usage…) sont omis.
@@ -14307,29 +14364,7 @@ function FfbbBoxScoreTiles({ stats, loading, error, teammates }) {
   const pctOf = (m, a) => (a > 0 ? (100 * m / a) : null);
   const pct = v => (v === null || v === undefined ? "–" : v.toFixed(1) + "%");
   // [libellé, valeur numérique (pour le classement), affichage, couleur]
-  const defs = [
-    ["Time", s => s.min, v => (v == null ? "–" : f1(v) + " min"), "teal"],
-    ["Pts", s => s.pts, f1, "amber"],
-    ["Reb Def", s => s.rd, f1, "teal"],
-    ["Reb Off", s => s.ro, f1, "teal"],
-    ["Reb Tot", s => s.reb, f1, "teal"],
-    ["Assists", s => s.ast, f1, "teal"],
-    ["Steals", s => s.stl, f1, "teal"],
-    ["Blocks", s => s.blk, f1, "teal"],
-    ["2Pts Made", s => s.r2, f1, "teal"],
-    ["2Pts Attempted", s => s.t2, f1, "teal"],
-    ["% 2Pts", s => pctOf(s.r2, s.t2), pct, "teal"],
-    ["3Pts Made", s => s.r3, f1, "teal"],
-    ["3Pts Attempted", s => s.t3, f1, "teal"],
-    ["% 3Pts", s => pctOf(s.r3, s.t3), pct, "teal"],
-    ["FT Made", s => s.lfr, f1, "teal"],
-    ["FT Attempted", s => s.lft, f1, "teal"],
-    ["% FT", s => pctOf(s.lfr, s.lft), pct, "teal"],
-    ["Eff", s => s.eff, f1, "amber"],
-    ["Theoretical Possessions", s => s.theoPoss, f1, "teal"],
-    ["% Usage", s => s.usage, pct, "teal"],
-    ["Games played", s => s.mj, v => (v == null ? "–" : String(v)), "amber"],
-  ];
+  const defs = FFBB_BOX_DEFS;
   // Classement dans l'équipe (même format que le Box Score de nos joueurs : "#N of M team"),
   // parmi les joueurs de l'équipe qui ont des stats FFBB ; ex-aequo = même rang.
   const pool = (teammates || []).filter(Boolean);
