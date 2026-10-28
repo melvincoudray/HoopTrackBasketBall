@@ -12561,11 +12561,14 @@ const DRAW_OWN = "__own__"; // valeur de "club" pour notre propre équipe
 const DRAW_TOP = 64, DRAW_SIDE = 64, DRAW_BOT = 64;
 // Un joueur (rond ≈ 21 de rayon à l'export, plus l'anneau du porteur) trop près d'un bord serait coupé
 // par le cadre : le schéma passe alors en version "avec marges".
-const drawItemOut = (i) => i.x < 32 || i.x > 468 || i.y < 32 || i.y > 438;
-const drawOut = (q) => q.y < 4 || q.x < 4 || q.x > 496 || q.y > 466;
+// Hauteur du terrain : 470 = demi-terrain, 940 = terrain entier (fr.full)
+const drawH = (fr) => (fr && fr.full ? 940 : 470);
+const drawItemOut = (i, H) => i.x < 32 || i.x > 468 || i.y < 32 || i.y > (H || 470) - 32;
+const drawOut = (q, H) => q.y < 4 || q.x < 4 || q.x > 496 || q.y > (H || 470) - 4;
 function drawVB(fr, force) {
-  const used = force || (fr && ((fr.items || []).some(drawItemOut) || (fr.lines || []).some(l => drawPts(l).some(drawOut))));
-  return used ? `-${DRAW_SIDE} -${DRAW_TOP} ${500 + 2 * DRAW_SIDE} ${470 + DRAW_TOP + DRAW_BOT}` : "0 0 500 470";
+  const H = drawH(fr);
+  const used = force || (fr && ((fr.items || []).some(i => drawItemOut(i, H)) || (fr.lines || []).some(l => drawPts(l).some(q => drawOut(q, H)))));
+  return used ? `-${DRAW_SIDE} -${DRAW_TOP} ${500 + 2 * DRAW_SIDE} ${H + DRAW_TOP + DRAW_BOT}` : `0 0 500 ${H}`;
 }
 function drawF(n) { return Math.round(n * 10) / 10; }
 function drawEsc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
@@ -12573,14 +12576,14 @@ function drawClone(o) { return JSON.parse(JSON.stringify(o)); }
 
 // Terrain : panier en haut, ligne médiane en bas. 3 points = vrai demi-cercle (rayon 220)
 // raccordé en douceur aux lignes de coin.
-function drawCourtSvg(p, margin) {
-  const l = p.line;
+function drawCourtSvg(p, margin, full) {
+  const l = p.line, CH = full ? 940 : 470;
   // Export : le cadre épais est dessiné DANS le schéma (et non en bordure CSS, qui se rendait de façon
   // inégale selon les côtés dans le PDF : trait plus épais en haut et à gauche).
-  const x0 = margin ? -DRAW_SIDE : 0, y0 = margin ? -DRAW_TOP : 0, w = margin ? 500 + 2 * DRAW_SIDE : 500, h = margin ? 470 + DRAW_TOP + DRAW_BOT : 470, T = 7;
+  const x0 = margin ? -DRAW_SIDE : 0, y0 = margin ? -DRAW_TOP : 0, w = margin ? 500 + 2 * DRAW_SIDE : 500, h = margin ? CH + DRAW_TOP + DRAW_BOT : CH, T = 7;
   const frame = p.big ? `<rect x="${x0 + T / 2}" y="${y0 + T / 2}" width="${w - T}" height="${h - T}" fill="none" stroke="${l}" stroke-width="${T}"/>` : "";
-  const court = (p.big && !margin) ? "" : `<rect x="1" y="1" width="498" height="469" fill="none" stroke="${l}" stroke-width="2"/>`;
-  return `<rect x="-80" y="-80" width="660" height="640" fill="${p.court}"/>` + court +
+  const court = (p.big && !margin) ? "" : `<rect x="1" y="1" width="498" height="${CH - 1}" fill="none" stroke="${l}" stroke-width="2"/>`;
+  const half =
     `<rect x="168" y="1" width="164" height="192" fill="none" stroke="${l}" stroke-width="1.5"/>` +
     `<path d="M190 193 A60 60 0 0 0 310 193" fill="none" stroke="${l}" stroke-width="1.5"/>` +
     `<path d="M190 193 A60 60 0 0 1 310 193" fill="none" stroke="${l}" stroke-width="1.2" stroke-dasharray="6 5"/>` +
@@ -12588,7 +12591,10 @@ function drawCourtSvg(p, margin) {
     `<path d="M208 52 A42 42 0 0 0 292 52" fill="none" stroke="${l}" stroke-width="1.5"/>` +
     `<line x1="220" y1="40" x2="280" y2="40" stroke="${l}" stroke-width="2.4"/>` +
     `<circle cx="250" cy="52" r="8" fill="none" stroke="${l}" stroke-width="1.6"/>` +
-    `<path d="M190 470 A60 60 0 0 1 310 470" fill="none" stroke="${l}" stroke-width="1.5"/>` + frame;
+    `<path d="M190 470 A60 60 0 0 1 310 470" fill="none" stroke="${l}" stroke-width="1.5"/>`;
+  // terrain entier : 2e moitié = symétrie verticale de la première + ligne médiane
+  const second = full ? `<g transform="translate(0 940) scale(1 -1)">${half}</g><line x1="0" y1="470" x2="500" y2="470" stroke="${l}" stroke-width="1.5"/>` : "";
+  return `<rect x="-80" y="-80" width="660" height="${CH + 160}" fill="${p.court}"/>` + court + half + second + frame;
 }
 
 // Géométrie des lignes : suite de points ; chaque point intermédiaire est soit un angle franc, soit
@@ -12670,7 +12676,7 @@ function drawLast(l) { const P = drawPts(l); return P[P.length - 1]; }
 // (ex. poser un écran puis repartir), on la rattache au même joueur et il finit au bout de la dernière.
 // Pass : le receveur (l'attaquant le plus proche du bout de la flèche) devient porteur du ballon ;
 // le ballon et le rond "porteur" le suivent, et le ballon accompagne aussi un dribble.
-function drawAdvance(items, lines) {
+function drawAdvance(items, lines, full) {
   const out = drawClone(items).filter(it => it.t !== "dho");
   const byId = id => out.find(i => i.id === id);
   const orig = {}, cur = {}; out.forEach(i => { orig[i.id] = { x: i.x, y: i.y }; cur[i.id] = { x: i.x, y: i.y }; });
@@ -12686,7 +12692,11 @@ function drawAdvance(items, lines) {
   (lines || []).forEach(l => {
     const P = drawPts(l), end = P[P.length - 1];
     if (l.kind === "cut" || l.kind === "dribble" || l.kind === "screen") {
-      const m = l.from != null && byId(l.from) ? byId(l.from) : (() => { const n = near(P[0], at(people, cur), 30); return n ? byId(n.id) : null; })();
+      // écran : c'est le porteur de l'écran (attaquant) qui avance, jamais un défenseur
+      const pick = (list, r) => { const n = near(P[0], at(list, cur), r) || near(P[0], at(list, orig), r); return n ? byId(n.id) : null; };
+      let m = l.from != null && byId(l.from) ? byId(l.from) : null;
+      if (l.kind === "screen") { if (!m || m.t !== "o") m = pick(att, 60) || m; }
+      else if (!m) m = pick(people, 30);
       if (m) cur[m.id] = { x: end.x, y: end.y };
     } else if (l.kind === "pass") {
       const passer = l.from != null ? byId(l.from) : (() => { const n = near(P[0], at(att, cur), 32); return n ? byId(n.id) : null; })();
@@ -12701,7 +12711,7 @@ function drawAdvance(items, lines) {
   if (hadRing && H) { out.forEach(i => { if (i.t === "o") delete i.h; }); H.h = true; }
   if (ball && H) {
     const o = off0 && Math.hypot(off0.x, off0.y) >= 6 && Math.hypot(off0.x, off0.y) <= 40 ? off0 : { x: 14, y: -14 };
-    ball.x = Math.max(-DRAW_SIDE + 34, Math.min(500 + DRAW_SIDE - 34, H.x + o.x)); ball.y = Math.max(-DRAW_TOP + 34, Math.min(470 + DRAW_BOT - 34, H.y + o.y));
+    ball.x = Math.max(-DRAW_SIDE + 34, Math.min(500 + DRAW_SIDE - 34, H.x + o.x)); ball.y = Math.max(-DRAW_TOP + 34, Math.min(drawH({ full }) + DRAW_BOT - 34, H.y + o.y));
   }
   return out;
 }
@@ -12733,7 +12743,7 @@ function drawFrameSvg(fr, pal, extra) {
       if (best) items = items.map(i => i === best ? { ...i, h: true } : i);
     }
   }
-  return drawCourtSvg(pal, pal.big && drawVB(fr) !== "0 0 500 470") + (fr.lines || []).map(l => drawLineSvg(l, pal)).join("") + items.map(it => drawItemSvg(it, pal)).join("") + (extra || "");
+  return drawCourtSvg(pal, pal.big && drawVB(fr) !== `0 0 500 ${drawH(fr)}`, !!fr.full) + (fr.lines || []).map(l => drawLineSvg(l, pal)).join("") + items.map(it => drawItemSvg(it, pal)).join("") + (extra || "");
 }
 function DrawThumb({ frame, pal, style }) {
   return <svg viewBox={drawVB(frame)} style={{ width: "100%", height: "auto", display: "block", ...style }} dangerouslySetInnerHTML={{ __html: drawFrameSvg(frame, pal || DRAW_PAL_EDIT) }} />;
@@ -12758,7 +12768,7 @@ function drawBuildPages(book, title, colsSetting, logoUrl) {
   const gs = drawGroupsOf(book);
   gs.forEach(g => {
     g.cols = colsSetting === "auto" ? Math.min(3, Math.max(1, ...g.plays.map(o => o.p.frames.length))) : Number(colsSetting);
-    g.rpp = g.cols === 1 ? 4 : 3;
+    g.rpp = g.plays.some(o => o.p.frames.some(f => f.full)) ? 2 : g.cols === 1 ? 4 : 3;
     g.rows = [];
     g.plays.forEach(o => {
       o.row = g.rows.length;
@@ -12926,7 +12936,7 @@ function DrawExportPanel({ book, teamLogo, scoutingTeams, onSetClub, onClose }) 
 // ---------------------------------------------------------------------------
 
 function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault }) {
-  const S = useRef({ tool: "sel", frames: [{ items: [], lines: [], cap: "" }], fi: 0, items: [], lines: [], nid: 100, undo: [], draft: null, drag: null, dragH: null, sel: -1, curved: false }).current;
+  const S = useRef({ full: false, tool: "sel", frames: [{ items: [], lines: [], cap: "" }], fi: 0, items: [], lines: [], nid: 100, undo: [], draft: null, drag: null, dragH: null, sel: -1, curved: false }).current;
   const svgRef = useRef();
   const [, bump] = useState(0);
   const redraw = () => bump(x => x + 1);
@@ -12937,12 +12947,12 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
   const [msg, setMsg] = useState("");
 
   function loadFrame(i, frames) {
-    if (frames) S.frames = frames;
+    if (frames) { S.frames = frames; S.full = !!(frames[0] && frames[0].full); }
     S.fi = i; const f = S.frames[i] || { items: [], lines: [], cap: "" };
     S.items = f.items; S.lines = f.lines; S.undo = []; S.sel = -1; S.nid = 100;
     setCap(f.cap || ""); redraw();
   }
-  function syncFrame() { S.frames[S.fi] = { items: S.items, lines: S.lines, cap }; }
+  function syncFrame() { S.frames[S.fi] = { items: S.items, lines: S.lines, cap, full: S.full }; }
   useEffect(() => {
     if (initial) {
       setName(initial.name); setGroup(initial.group || "Plays");
@@ -12968,8 +12978,8 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
     const svg = svgRef.current, m = svg.getScreenCTM();
     let x, y;
     if (m) { const q = svg.createSVGPoint(); q.x = e.clientX; q.y = e.clientY; const r = q.matrixTransform(m.inverse()); x = r.x; y = r.y; }
-    else { const r = svg.getBoundingClientRect(); x = -DRAW_SIDE + (e.clientX - r.left) / r.width * (500 + 2 * DRAW_SIDE); y = -DRAW_TOP + (e.clientY - r.top) / r.height * (470 + DRAW_TOP + DRAW_BOT); }
-    return { x: Math.max(-DRAW_SIDE + 34, Math.min(500 + DRAW_SIDE - 34, x)), y: Math.max(-DRAW_TOP + 34, Math.min(470 + DRAW_BOT - 34, y)) };
+    else { const r = svg.getBoundingClientRect(); x = -DRAW_SIDE + (e.clientX - r.left) / r.width * (500 + 2 * DRAW_SIDE); y = -DRAW_TOP + (e.clientY - r.top) / r.height * (drawH({ full: S.full }) + DRAW_TOP + DRAW_BOT); }
+    return { x: Math.max(-DRAW_SIDE + 34, Math.min(500 + DRAW_SIDE - 34, x)), y: Math.max(-DRAW_TOP + 34, Math.min(drawH({ full: S.full }) + DRAW_BOT - 34, y)) };
   }
 
   const hitItem = (p, r) => { let best = null, bd = r || 18; S.items.forEach(it => { const d = Math.hypot(it.x - p.x, it.y - p.y); if (d <= bd) { bd = d; best = it; } }); return best; };
@@ -13051,10 +13061,10 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
 
   function addFrame(keep) {
     syncFrame();
-    const cur = S.frames[S.fi], nf = { items: [], lines: [], cap: "" };
+    const cur = S.frames[S.fi], nf = { items: [], lines: [], cap: "", full: S.full };
     if (keep) {
       // étape suivante : les flèches sont "jouées" (déplacements, passes → nouveau porteur du ballon), puis effacées
-      nf.items = drawAdvance(cur.items, cur.lines);
+      nf.items = drawAdvance(cur.items, cur.lines, S.full);
     }
     S.frames.splice(S.fi + 1, 0, nf); loadFrame(S.fi + 1);
   }
@@ -13063,6 +13073,7 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
 
   function currentPlay() {
     syncFrame();
+    S.frames.forEach(f => { f.full = S.full; });
     return { name: name.trim() || "Untitled play", group: group.trim() || "Plays", frames: drawClone(S.frames) };
   }
   const hasContent = () => S.frames.some((f, i) => (i === S.fi ? S.items.length || S.lines.length : (f.items.length || f.lines.length)));
@@ -13106,6 +13117,7 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
         <button className="draw-tool" onClick={() => { S.curved = !S.curved; redraw(); }} style={toolBtn(S.curved)}>
           <span style={{ display: "inline-flex" }} dangerouslySetInnerHTML={{ __html: '<svg viewBox="0 0 22 14"><path d="M2 12 Q8 0 20 5" stroke="currentColor" stroke-width="1.8" fill="none"/></svg>' }} />Curved
         </button>
+        <button onClick={() => { S.full = !S.full; if (!S.full) { const H = 470; S.items.forEach(it => { if (it.y > H) it.y = H - 20; }); S.lines.forEach(l => drawPts(l).forEach(q => { if (q.y > H) q.y = H - 4; })); } syncFrame(); redraw(); }} style={toolBtn(S.full)} title="Switch between half court and full court">{S.full ? "Full court" : "Half court"}</button>
         <button onClick={undo} style={smallBtn}>Undo</button>
         <button onClick={clearAll} style={{ ...smallBtn, color: "#8B93A1", background: "transparent" }}>Clear</button>
       </div>
@@ -13116,9 +13128,9 @@ function DrawEditor({ books, loadKey, initial, onSave, onInsert, bookIdxDefault 
         {S.frames.length > 1 && <button onClick={delFrame} style={{ ...smallBtn, color: "#8B93A1", background: "transparent" }}>Delete diagram</button>}
       </div>
       <div style={{ background: "#1D232C", border: `1px solid ${LINE}`, borderRadius: 8, padding: 6, touchAction: "none" }}>
-        <svg ref={svgRef} viewBox={drawVB(null, true)} style={{ display: "block", width: "100%", height: "auto", maxHeight: 560, cursor: "crosshair", userSelect: "none" }}
+        <svg ref={svgRef} viewBox={drawVB({ full: S.full }, true)} style={{ display: "block", width: "100%", height: "auto", maxHeight: 560, cursor: "crosshair", userSelect: "none" }}
           onPointerDown={onDown} onPointerMove={onMove} onPointerUp={onUp} onPointerCancel={onUp} onDoubleClick={onDbl}
-          dangerouslySetInnerHTML={{ __html: drawFrameSvg({ items: S.items, lines: S.lines }, DRAW_PAL_EDIT, extra) }} />
+          dangerouslySetInnerHTML={{ __html: drawFrameSvg({ items: S.items, lines: S.lines, full: S.full }, DRAW_PAL_EDIT, extra) }} />
       </div>
       <div style={{ fontSize: 12, color: "#8B93A1", lineHeight: 1.5 }}>{DRAW_HINTS[S.tool]}</div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10 }}>
