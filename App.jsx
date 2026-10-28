@@ -2333,9 +2333,9 @@ function obsTagStat(plays, label, cats) {
   const pts = matching.reduce((s, p) => s + playPoints(p.tags), 0);
   let denom = plays.length;
   if (lists[0]) denom = lists[0].reduce((s, l) => s + plays.filter(p => tagIsSet(p.tags, l)).length, 0);
-  return { count: matching.length, freq: denom ? (100 * matching.length) / denom : 0, pppp: matching.length ? pts / matching.length : 0, open: openPct(matching) };
+  return { count: matching.length, freq: denom ? (100 * matching.length) / denom : 0, pppp: matching.length ? pts / matching.length : 0, open: openPct(matching), tov: tovPct(matching) };
 }
-const OBS_METRICS = [["freq", "Frequency"], ["pppp", "PPPP"], ["open", "Open %"], ["count", "Actions"]];
+const OBS_METRICS = [["freq", "Frequency"], ["pppp", "PPPP"], ["open", "Open %"], ["tov", "% TOV"], ["count", "Actions"]];
 // Stats d'équipe issues de MES box scores (même calcul que l'onglet Team) : [clé, libellé, décimales, "%"?]
 const BOX_STATS = [
   ["pts", "Points", 0], ["oppPts", "Points allowed", 0], ["ortg", "ORTG", 1], ["drtg", "DRTG", 1], ["poss", "Possessions", 0],
@@ -2399,7 +2399,7 @@ function slideStatInfo(el, slide, data) {
     const plays = data.mine.plays.filter(p => keys.has(p._key)).filter(side === "def" ? isDefense : isOffense);
     const st = obsTagStat(plays, tag, currentTagCategories());
     let text = "–";
-    if (st.count || metric === "count") text = metric === "freq" ? `${st.freq.toFixed(0)}%` : metric === "pppp" ? st.pppp.toFixed(2) : metric === "open" ? (st.open === null ? "–" : `${st.open.toFixed(0)}%`) : String(st.count);
+    if (st.count || metric === "count") text = metric === "freq" ? `${st.freq.toFixed(0)}%` : metric === "pppp" ? st.pppp.toFixed(2) : metric === "open" ? (st.open === null ? "–" : `${st.open.toFixed(0)}%`) : metric === "tov" ? (st.tov === null ? "–" : `${st.tov.toFixed(0)}%`) : String(st.count);
     return { label, items: [{ text, color: el.color || AMBER }], note: st.count ? `${st.count} action${st.count > 1 ? "s" : ""} · ${side === "def" ? "defense" : "offense"} · ${SCOPE_LABELS[scope]}` : (plays.length ? "" : "no coded match") };
   }
   if (el.source === "obs") {
@@ -2415,7 +2415,7 @@ function slideStatInfo(el, slide, data) {
     const st = obsTagStat(sidePlays, tag, currentObservationTagCategories());
     let text = "–";
     if (st.count || metric === "count") {
-      text = metric === "freq" ? `${st.freq.toFixed(0)}%` : metric === "pppp" ? st.pppp.toFixed(2) : metric === "open" ? (st.open === null ? "–" : `${st.open.toFixed(0)}%`) : String(st.count);
+      text = metric === "freq" ? `${st.freq.toFixed(0)}%` : metric === "pppp" ? st.pppp.toFixed(2) : metric === "open" ? (st.open === null ? "–" : `${st.open.toFixed(0)}%`) : metric === "tov" ? (st.tov === null ? "–" : `${st.tov.toFixed(0)}%`) : String(st.count);
     }
     return { label, items: [{ text, color: el.color || AMBER }], note: st.count ? `${st.count} action${st.count > 1 ? "s" : ""} · ${side === "def" ? "defense" : "offense"}` : "" };
   }
@@ -3666,6 +3666,11 @@ function isMake(tags) {
 function isTOV(tags) {
   return !!tags["TOV"];
 }
+// % des actions de ce tag qui se terminent par une perte de balle (tag TOV)
+function tovPct(matching) {
+  if (!matching.length) return null;
+  return (100 * matching.filter(p => isTOV(p.tags)).length) / matching.length;
+}
 function isOffense(p) { return /offense/i.test(p.button); }
 function isDefense(p) { return /defense/i.test(p.button); }
 
@@ -3702,11 +3707,11 @@ function topBucket(plays, labels, n, withOther) {
   const categoryTotal = raw.reduce((s, g) => s + g.count, 0);
   const normalized = raw.map(g => ({ ...g, freq: categoryTotal ? (100 * g.count) / categoryTotal : 0 }));
   const items = normalized.sort((a, b) => b.count - a.count).slice(0, n);
-  const top = items.map(i => ({ name: i.label, value: i.count, freq: i.freq, pppp: i.pppp, open: i.open }));
+  const top = items.map(i => ({ name: i.label, value: i.count, freq: i.freq, pppp: i.pppp, open: i.open, tov: i.tov }));
   if (withOther) {
     const used = top.reduce((s, i) => s + i.value, 0);
     const other = categoryTotal - used;
-    if (other > 0) top.push({ name: "Autres", value: other, freq: categoryTotal ? (100 * other) / categoryTotal : 0, pppp: null, open: null });
+    if (other > 0) top.push({ name: "Autres", value: other, freq: categoryTotal ? (100 * other) / categoryTotal : 0, pppp: null, open: null, tov: null });
   }
   return top;
 }
@@ -3733,7 +3738,7 @@ function computeSpacingScreenDefenseBreakdown(plays, cats) {
     const playsWithSpacing = plays.filter(p => tagIsSet(p.tags, spacing));
     const breakdown = categoryBreakdown(playsWithSpacing, screenDefLabels)
       .sort((a, b) => b.count - a.count)
-      .map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open }));
+      .map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open, tov: g.tov }));
     return { spacing, total: playsWithSpacing.length, breakdown };
   }).filter(s => s.total > 0);
 }
@@ -3742,7 +3747,7 @@ function topCategoryBucket(plays, labels, n) {
   return categoryBreakdown(plays, labels)
     .sort((a, b) => b.count - a.count)
     .slice(0, n)
-    .map(i => ({ name: i.label, value: i.count, freq: i.freq, pppp: i.pppp, open: i.open }));
+    .map(i => ({ name: i.label, value: i.count, freq: i.freq, pppp: i.pppp, open: i.open, tov: i.tov }));
 }
 
 // Répartition "Shooting Selection" : Ouvert vs Contesté/Perte de balle — mêmes catégories
@@ -3820,6 +3825,7 @@ function groupBreakdown(plays, labels) {
       freq: plays.length ? (100 * matching.length) / plays.length : 0,
       pppp: matching.length ? pts / matching.length : 0,
       open: openPct(matching),
+      tov: tovPct(matching),
     };
   }).filter(g => g.count > 0);
 }
@@ -4134,7 +4140,7 @@ function DonutChart({ data, size = 150, unit = "actions" }) {
   );
 }
 
-function DonutLegend({ data }) {
+function DonutLegend({ data, onItemClick }) {
   const total = data.reduce((s, d) => s + d.value, 0) || 1;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -4145,9 +4151,10 @@ function DonutLegend({ data }) {
         // forment une partition complète à 100%).
         const pct = d.freq !== undefined && d.freq !== null ? d.freq : (100 * d.value) / total;
         return (
-          <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5 }}>
+          <div key={i} onClick={onItemClick && d.name !== "Autres" ? () => onItemClick(d.name) : undefined} title={onItemClick && d.name !== "Autres" ? "View video clips" : undefined} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: onItemClick && d.name !== "Autres" ? "pointer" : "default" }}>
             <span className="keep-color" style={{ width: 9, height: 9, borderRadius: 3, background: d.color || CHART_COLORS[i % CHART_COLORS.length], flexShrink: 0 }} />
             <span style={{ color: "#8B93A1", flex: 1 }}>{d.name}</span>
+            {onItemClick && d.name !== "Autres" && <Video size={12} color="#5C6470" />}
             <span style={{ fontFamily: "ui-monospace, monospace", color: PAPER }}>{d.value}</span>
             <span style={{ fontFamily: "ui-monospace, monospace", color: "#5C6470", width: 38, textAlign: "right" }}>{pct.toFixed(0)}%</span>
           </div>
@@ -4191,16 +4198,16 @@ function BreakdownChart({ title, data }) {
 // misc." (PPPP, ex. paniers marqués) ou "Shot selection" (Open, ex. Open/Contested), quel(s)
 // tag(s) combiner avec celui de la ligne — car "paniers marqués" n'est pas un tag unique mais
 // plusieurs (2PT+, 3PT+, FT+…), et le coach doit pouvoir choisir lesquels inclure.
-function MetricBarList({ title, items, color = AMBER, onItemClick, onPpppClick, onOpenClick }) {
+function MetricBarList({ title, items, color = AMBER, onItemClick, onPpppClick, onOpenClick, onTovClick }) {
   if (!items.length) return null;
   return (
     <div data-no-split="true" style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, flex: "1 1 320px" }}>
       <div style={{ fontSize: 13, fontWeight: 700, color: PAPER, marginBottom: 4 }}>{title}</div>
-      <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 0.55fr 0.55fr", padding: "8px 0 6px", fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.05em", color: "#5C6470", borderBottom: `1px solid ${LINE}` }}>
-        <div>Name</div><div>Frequency</div><div>PPPP</div><div>Open</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 0.55fr 0.55fr 0.55fr", padding: "8px 0 6px", fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.05em", color: "#5C6470", borderBottom: `1px solid ${LINE}` }}>
+        <div>Name</div><div>Frequency</div><div>PPPP</div><div>Open</div><div>% TOV</div>
       </div>
       {items.map((it, i) => (
-        <div key={i} style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 0.55fr 0.55fr", padding: "9px 0", alignItems: "center", borderBottom: i < items.length - 1 ? `1px solid ${LINE}` : "none", fontSize: 13 }}>
+        <div key={i} style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 0.55fr 0.55fr 0.55fr", padding: "9px 0", alignItems: "center", borderBottom: i < items.length - 1 ? `1px solid ${LINE}` : "none", fontSize: 13 }}>
           <div onClick={onItemClick ? () => onItemClick(it.name) : undefined} title={onItemClick ? "View video clips for this play" : undefined} style={{ color: it.name === "Autres" ? "#8B93A1" : PAPER, display: "flex", alignItems: "center", gap: 6, cursor: onItemClick ? "pointer" : "default" }}>
             {it.name}
             {onItemClick && <Video size={12} color="#5C6470" />}
@@ -4211,6 +4218,7 @@ function MetricBarList({ title, items, color = AMBER, onItemClick, onPpppClick, 
           </div>
           <div onClick={onPpppClick ? () => onPpppClick(it.name) : undefined} title={onPpppClick ? "Choose which made-basket tags to include, then view clips" : undefined} style={{ fontFamily: "ui-monospace, monospace", color, fontWeight: 700, cursor: onPpppClick ? "pointer" : "default" }}>{it.pppp !== null && it.pppp !== undefined ? it.pppp.toFixed(2) : "–"}</div>
           <div onClick={onOpenClick ? () => onOpenClick(it.name) : undefined} title={onOpenClick ? "Choose Open/Contested tags to include, then view clips" : undefined} style={{ fontFamily: "ui-monospace, monospace", color: it.open !== null && it.open !== undefined ? TEAL : "#5C6470", cursor: onOpenClick ? "pointer" : "default" }}>{it.open !== null && it.open !== undefined ? it.open.toFixed(0) + "%" : "–"}</div>
+          <div onClick={onTovClick && it.tov > 0 ? () => onTovClick(it.name) : undefined} title={onTovClick && it.tov > 0 ? "View clips of these actions that end in a turnover" : undefined} style={{ fontFamily: "ui-monospace, monospace", color: it.tov !== null && it.tov !== undefined && it.tov > 0 ? RED : "#5C6470", cursor: onTovClick && it.tov > 0 ? "pointer" : "default" }}>{it.tov !== null && it.tov !== undefined ? it.tov.toFixed(0) + "%" : "–"}</div>
         </div>
       ))}
     </div>
@@ -4236,13 +4244,13 @@ function SimpleBarChart({ title, data, color = AMBER }) {
   );
 }
 
-function DonutCard({ title, data, note, unit }) {
+function DonutCard({ title, data, note, unit, onItemClick }) {
   return (
     <div data-no-split="true" style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, display: "flex", gap: 18, alignItems: "center", flex: "1 1 280px" }}>
       <DonutChart data={data} unit={unit} />
       <div style={{ flex: 1 }}>
         <div style={{ fontSize: 12, color: "#5C6470", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>{title}</div>
-        {data.length ? <DonutLegend data={data} /> : <span style={{ fontSize: 12.5, color: "#5C6470" }}>{note || "Not enough data."}</span>}
+        {data.length ? <DonutLegend data={data} onItemClick={onItemClick} /> : <span style={{ fontSize: 12.5, color: "#5C6470" }}>{note || "Not enough data."}</span>}
       </div>
     </div>
   );
@@ -4260,7 +4268,7 @@ function tagBreakdown(source) {
     });
   });
   return Object.entries(map)
-    .map(([tag, v]) => ({ tag, count: v.count, freq: source.length ? (100 * v.count) / source.length : 0, pppp: v.count ? v.pts / v.count : 0, open: openPct(v.plays) }))
+    .map(([tag, v]) => ({ tag, count: v.count, freq: source.length ? (100 * v.count) / source.length : 0, pppp: v.count ? v.pts / v.count : 0, open: openPct(v.plays), tov: tovPct(v.plays) }))
     .sort((a, b) => b.count - a.count);
 }
 
@@ -4286,7 +4294,12 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
   // uniquement) mais TOUTES les valeurs de la catégorie, pour rester valable même si le coach
   // en ajoute dans Settings. secondaryPicker ouvre ce choix ; une fois confirmé, il devient un
   // clipModal classique avec extraTags rempli.
-  const [secondaryPicker, setSecondaryPicker] = useState(null); // { name, side, category } | null
+  const [secondaryPicker, setSecondaryPicker] = useState(null); // { name, side, category, within? } | null
+  const clipOff = enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined;
+  const clipDef = enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined;
+  // % TOV : clips des seules actions de ce tag qui finissent en perte de balle
+  const tovClickOff = enableClipExport ? (name) => setClipModal({ name, side: "off", extraTags: ["TOV"] }) : undefined;
+  const tovClickDef = enableClipExport ? (name) => setClipModal({ name, side: "def", extraTags: ["TOV"] }) : undefined;
   const ppppClickOff = enableClipExport ? (name) => setSecondaryPicker({ name, side: "off", category: "Results & misc." }) : undefined;
   const openClickOff = enableClipExport ? (name) => setSecondaryPicker({ name, side: "off", category: "Shot selection" }) : undefined;
   const ppppClickDef = enableClipExport ? (name) => setSecondaryPicker({ name, side: "def", category: "Results & misc." }) : undefined;
@@ -4297,7 +4310,7 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
   // après une modification des catégories de tags dans Settings. Concerne en réalité TOUTES
   // ces répartitions (Plays, Playtypes, Shooting Selection, Screen defense, Spacing), pas
   // seulement les erreurs défensives — juste plus visible pour cette catégorie précise.
-  const offPlaysDonut = useMemo(() => categoryBreakdown(off, PLAYS_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open })), [off, cats]);
+  const offPlaysDonut = useMemo(() => categoryBreakdown(off, PLAYS_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open, tov: g.tov })), [off, cats]);
   // Demandé par l'utilisateur : Plays et Playtypes affichaient tous les deux un "top N" tronqué
   // (9 pour les Plays, 8 pour les Playtypes) — il veut voir l'efficacité sur TOUS les
   // plays/playtypes, sans troncature, aussi bien pour son équipe que pour le Scouting (cette
@@ -4324,12 +4337,12 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
 
   // Screen defense subie (attaque : quelle couverture l'adversaire utilise contre nos
   // écrans) et défense d'écran pratiquée (défense : quelle couverture on utilise nous-mêmes).
-  const offScreenDef = useMemo(() => categoryBreakdown(off, SCREEN_DEFENSE_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open })), [off, cats]);
-  const defScreenDef = useMemo(() => categoryBreakdown(def, SCREEN_DEFENSE_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open })), [def, cats]);
+  const offScreenDef = useMemo(() => categoryBreakdown(off, SCREEN_DEFENSE_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open, tov: g.tov })), [off, cats]);
+  const defScreenDef = useMemo(() => categoryBreakdown(def, SCREEN_DEFENSE_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open, tov: g.tov })), [def, cats]);
 
   // Spacing joué au moment des écrans, attaque et défense.
-  const offSpacing = useMemo(() => categoryBreakdown(off, SPACING_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open })), [off, cats]);
-  const defSpacing = useMemo(() => categoryBreakdown(def, SPACING_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open })), [def, cats]);
+  const offSpacing = useMemo(() => categoryBreakdown(off, SPACING_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open, tov: g.tov })), [off, cats]);
+  const defSpacing = useMemo(() => categoryBreakdown(def, SPACING_LIST(cats)).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open, tov: g.tov })), [def, cats]);
 
   // Demandé par l'utilisateur, en plus des répartitions ci-dessus : défense d'écran utilisée
   // selon le Spacing d'écran, attaque et défense — dynamique (toute nouvelle valeur de Spacing
@@ -4352,20 +4365,20 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
       <SectionTitle eyebrow="Source: coding file" title="Offense — how the ball is played" />
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 26 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-          <DonutCard title="Plays (game entries)" data={offPlaysDonut.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} />
-          <MetricBarList title="Efficiency by play" items={offPlaysList} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} />
+          <DonutCard title="Plays (game entries)" data={offPlaysDonut.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} onItemClick={clipOff} />
+          <MetricBarList title="Efficiency by play" items={offPlaysList} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} onTovClick={tovClickOff} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
           <DonutCard title="Shooting Selection" data={offShooting} note="Open/Contested tags not present yet." />
-          <MetricBarList title="Efficiency by playtype" items={offPlaytypesList} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} />
+          <MetricBarList title="Efficiency by playtype" items={offPlaytypesList} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} onTovClick={tovClickOff} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-          <DonutCard title="Screen defense faced (opponent coverage)" data={offScreenDef.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag detected." />
-          <MetricBarList title="Efficiency by coverage faced" items={offScreenDef} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} />
+          <DonutCard title="Screen defense faced (opponent coverage)" data={offScreenDef.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag detected." onItemClick={clipOff} />
+          <MetricBarList title="Efficiency by coverage faced" items={offScreenDef} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} onTovClick={tovClickOff} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-          <DonutCard title="Spacing played on screens" data={offSpacing.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No spacing tag detected." />
-          <MetricBarList title="Efficiency by spacing" items={offSpacing} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} />
+          <DonutCard title="Spacing played on screens" data={offSpacing.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No spacing tag detected." onItemClick={clipOff} />
+          <MetricBarList title="Efficiency by spacing" items={offSpacing} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} onTovClick={tovClickOff} />
         </div>
         {/* Catégories personnalisées (créées dans Settings, au-delà des 4 intégrées ci-dessus)
             — intégrées directement ici, dans la même grille, sans section "Custom"/"Other"
@@ -4374,8 +4387,8 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
           const style = chartStyleFor(c.name);
           return (
             <div key={"off-" + c.name} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-              {(style === "simple" || style === "both") && <DonutCard title={c.name} data={c.items.map((it, i) => ({ ...it, color: CHART_COLORS[i % CHART_COLORS.length] }))} />}
-              {(style === "detailed" || style === "both") && <MetricBarList title={c.name} items={c.items} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} />}
+              {(style === "simple" || style === "both") && <DonutCard title={c.name} data={c.items.map((it, i) => ({ ...it, color: CHART_COLORS[i % CHART_COLORS.length] }))} onItemClick={clipOff} />}
+              {(style === "detailed" || style === "both") && <MetricBarList title={c.name} items={c.items} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} onTovClick={tovClickOff} />}
             </div>
           );
         })}
@@ -4385,26 +4398,26 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
       <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 26 }}>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
           <DonutCard title="Shooting Selection (defense)" data={defShooting} note="Open/Contested tags not present yet." />
-          <MetricBarList title="Playtypes defended — efficiency" items={defPlaytypesList} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} />
+          <MetricBarList title="Playtypes defended — efficiency" items={defPlaytypesList} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} onTovClick={tovClickDef} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-          <DonutCard title="Defensive mistakes" data={defMistakes} note="No defensive mistake tag detected." />
-          <MetricBarList title="Plays defended — efficiency" items={defPlaysList} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} />
+          <DonutCard title="Defensive mistakes" data={defMistakes} note="No defensive mistake tag detected." onItemClick={clipDef} />
+          <MetricBarList title="Plays defended — efficiency" items={defPlaysList} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} onTovClick={tovClickDef} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-          <DonutCard title="Screen defense played" data={defScreenDef.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag detected." />
-          <MetricBarList title="Efficiency by coverage used" items={defScreenDef} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} />
+          <DonutCard title="Screen defense played" data={defScreenDef.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag detected." onItemClick={clipDef} />
+          <MetricBarList title="Efficiency by coverage used" items={defScreenDef} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} onTovClick={tovClickDef} />
         </div>
         <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-          <DonutCard title="Spacing faced on screens" data={defSpacing.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No spacing tag detected." />
-          <MetricBarList title="Efficiency by spacing faced" items={defSpacing} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} />
+          <DonutCard title="Spacing faced on screens" data={defSpacing.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No spacing tag detected." onItemClick={clipDef} />
+          <MetricBarList title="Efficiency by spacing faced" items={defSpacing} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} onTovClick={tovClickDef} />
         </div>
         {customDef.filter(c => c.items.length).map(c => {
           const style = chartStyleFor(c.name);
           return (
             <div key={"def-" + c.name} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-              {(style === "simple" || style === "both") && <DonutCard title={c.name} data={c.items.map((it, i) => ({ ...it, color: CHART_COLORS[i % CHART_COLORS.length] }))} />}
-              {(style === "detailed" || style === "both") && <MetricBarList title={c.name} items={c.items} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} />}
+              {(style === "simple" || style === "both") && <DonutCard title={c.name} data={c.items.map((it, i) => ({ ...it, color: CHART_COLORS[i % CHART_COLORS.length] }))} onItemClick={clipDef} />}
+              {(style === "detailed" || style === "both") && <MetricBarList title={c.name} items={c.items} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} onTovClick={tovClickDef} />}
             </div>
           );
         })}
@@ -4428,8 +4441,8 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 20 }}>
                 {offSpacingScreenDef.map(s => (
                   <div key={"off-spacing-" + s.spacing} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-                    <DonutCard title={s.spacing} data={s.breakdown.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag on these plays." />
-                    <MetricBarList title={`${s.spacing} — efficiency by coverage`} items={s.breakdown} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} />
+                    <DonutCard title={s.spacing} data={s.breakdown.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag on these plays." onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off", within: s.spacing }) : undefined} />
+                    <MetricBarList title={`${s.spacing} — efficiency by coverage`} items={s.breakdown} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off", within: s.spacing }) : undefined} onPpppClick={enableClipExport ? (name) => setSecondaryPicker({ name, side: "off", category: "Results & misc.", within: s.spacing }) : undefined} onOpenClick={enableClipExport ? (name) => setSecondaryPicker({ name, side: "off", category: "Shot selection", within: s.spacing }) : undefined} onTovClick={enableClipExport ? (name) => setClipModal({ name, side: "off", extraTags: ["TOV"], within: s.spacing }) : undefined} />
                   </div>
                 ))}
               </div>
@@ -4441,8 +4454,8 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
               <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 26 }}>
                 {defSpacingScreenDef.map(s => (
                   <div key={"def-spacing-" + s.spacing} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-                    <DonutCard title={s.spacing} data={s.breakdown.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag on these plays." />
-                    <MetricBarList title={`${s.spacing} — efficiency by coverage`} items={s.breakdown} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} />
+                    <DonutCard title={s.spacing} data={s.breakdown.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag on these plays." onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def", within: s.spacing }) : undefined} />
+                    <MetricBarList title={`${s.spacing} — efficiency by coverage`} items={s.breakdown} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def", within: s.spacing }) : undefined} onPpppClick={enableClipExport ? (name) => setSecondaryPicker({ name, side: "def", category: "Results & misc.", within: s.spacing }) : undefined} onOpenClick={enableClipExport ? (name) => setSecondaryPicker({ name, side: "def", category: "Shot selection", within: s.spacing }) : undefined} onTovClick={enableClipExport ? (name) => setClipModal({ name, side: "def", extraTags: ["TOV"], within: s.spacing }) : undefined} />
                   </div>
                 ))}
               </div>
@@ -4469,7 +4482,7 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
           cats={cats}
           onClose={() => setSecondaryPicker(null)}
           onConfirm={(extraTags) => {
-            setClipModal({ name: secondaryPicker.name, side: secondaryPicker.side, extraTags });
+            setClipModal({ name: secondaryPicker.name, side: secondaryPicker.side, extraTags, within: secondaryPicker.within });
             setSecondaryPicker(null);
           }}
         />
@@ -4477,9 +4490,9 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
 
       {enableClipExport && clipModal && (
         <ClipExportModal
-          playName={clipModal.extraTags && clipModal.extraTags.length ? `${clipModal.name} + (${clipModal.extraTags.join(" / ")})` : clipModal.name}
+          playName={(clipModal.extraTags && clipModal.extraTags.length ? `${clipModal.name} + (${clipModal.extraTags.join(" / ")})` : clipModal.name) + (clipModal.within ? ` — ${clipModal.within}` : "")}
           sideLabel={clipModal.side === "off" ? "Offense" : "Defense"}
-          plays={(clipModal.side === "off" ? off : def).filter(p => tagIsSet(p.tags, clipModal.name) && (!clipModal.extraTags || clipModal.extraTags.length === 0 || clipModal.extraTags.some(t => tagIsSet(p.tags, t))))}
+          plays={(clipModal.side === "off" ? off : def).filter(p => tagIsSet(p.tags, clipModal.name) && (!clipModal.within || tagIsSet(p.tags, clipModal.within)) && (!clipModal.extraTags || clipModal.extraTags.length === 0 || clipModal.extraTags.some(t => tagIsSet(p.tags, t))))}
           onClose={() => setClipModal(null)}
           grouping={clipGrouping}
         />
@@ -9420,12 +9433,12 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
 function TagTable({ stats }) {
   return (
     <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
-      <div style={{ display: "grid", gridTemplateColumns: "1.3fr 0.6fr 0.9fr 0.6fr 0.6fr", padding: "10px 16px", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: "#5C6470", borderBottom: `1px solid ${LINE}` }}>
-        <div>Tag</div><div>Occurrences</div><div>Frequency</div><div>PPPP</div><div>Open</div>
+      <div style={{ display: "grid", gridTemplateColumns: "1.3fr 0.6fr 0.9fr 0.6fr 0.6fr 0.6fr", padding: "10px 16px", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: "#5C6470", borderBottom: `1px solid ${LINE}` }}>
+        <div>Tag</div><div>Occurrences</div><div>Frequency</div><div>PPPP</div><div>Open</div><div>% TOV</div>
       </div>
       {stats.length === 0 && <div style={{ padding: 20, color: "#5C6470", fontSize: 13 }}>Not enough data yet for a breakdown.</div>}
       {stats.slice(0, 40).map(t => (
-        <div key={t.tag} style={{ display: "grid", gridTemplateColumns: "1.3fr 0.6fr 0.9fr 0.6fr 0.6fr", padding: "10px 16px", alignItems: "center", borderBottom: `1px solid ${LINE}`, fontSize: 13.5 }}>
+        <div key={t.tag} style={{ display: "grid", gridTemplateColumns: "1.3fr 0.6fr 0.9fr 0.6fr 0.6fr 0.6fr", padding: "10px 16px", alignItems: "center", borderBottom: `1px solid ${LINE}`, fontSize: 13.5 }}>
           <div>{t.tag}</div>
           <div style={{ fontFamily: "ui-monospace, monospace", color: "#8B93A1" }}>{t.count}</div>
           <div>
@@ -9436,6 +9449,7 @@ function TagTable({ stats }) {
           </div>
           <div style={{ fontFamily: "ui-monospace, monospace", color: AMBER, fontWeight: 700 }}>{t.pppp.toFixed(2)}</div>
           <div style={{ fontFamily: "ui-monospace, monospace", color: t.open !== null ? TEAL : "#5C6470" }}>{t.open !== null ? t.open.toFixed(0) + "%" : "–"}</div>
+          <div style={{ fontFamily: "ui-monospace, monospace", color: t.tov > 0 ? RED : "#5C6470" }}>{t.tov !== null && t.tov !== undefined ? t.tov.toFixed(0) + "%" : "–"}</div>
         </div>
       ))}
     </div>
