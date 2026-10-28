@@ -5564,10 +5564,10 @@ function OnlineStatus({ lastSeenAt }) {
   return <span style={{ fontSize: 11, color: "#5C6470" }}>Last seen {label}</span>;
 }
 
-// Code couleur du chiffre selon le rang dans l'équipe ("#N of M team") : 1-3 vert foncé, 4-5 vert clair, 6-8 jaune, 9-10 orange, 11+ rouge.
+// Code couleur du chiffre selon le rang dans l'équipe ("#N of M team") : 1-4 vert, 5-7 jaune, 8+ rouge.
 function rankColor(rank) {
   if (!rank || rank < 1) return null;
-  return rank <= 3 ? "#16A34A" : rank <= 5 ? "#86D96B" : rank <= 8 ? "#FACC15" : rank <= 10 ? "#FB923C" : "#EF4444";
+  return rank <= 4 ? "#22C55E" : rank <= 7 ? "#FACC15" : "#EF4444";
 }
 function StatPill({ label, value, sub, tone = "amber" }) {
   const rk = typeof sub === "string" ? sub.match(/^#(\d+) of \d+/) : null;
