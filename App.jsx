@@ -4836,7 +4836,9 @@ function computeTeamPossessionsFromStats(statsObj) {
   const made3 = get(STAT_PATTERNS.made3), missed3 = get(STAT_PATTERNS.missed3);
   const fga = get(STAT_PATTERNS.fga) ?? ((made2 !== undefined || missed2 !== undefined || made3 !== undefined || missed3 !== undefined)
     ? (made2 || 0) + (missed2 || 0) + (made3 || 0) + (missed3 || 0) : undefined);
-  const fta = get(STAT_PATTERNS.fta);
+  const madeFT = get(STAT_PATTERNS.madeFT), missedFT = get(STAT_PATTERNS.missedFT);
+  // Sans colonne "LF tentés" (cas des box scores synchronisés depuis la FFBB : LF Réussi / LF Manqué), on additionne les deux.
+  const fta = get(STAT_PATTERNS.fta) ?? ((madeFT !== undefined || missedFT !== undefined) ? (madeFT || 0) + (missedFT || 0) : undefined);
   const tov = get(STAT_PATTERNS.tov);
   const oreb = get(STAT_PATTERNS.oreb);
   if (fga === undefined || fta === undefined || tov === undefined) return null;
@@ -5440,10 +5442,15 @@ function useAllBoxScores(filterKeys) {
       if (filterKeys && !filterKeys.has(matchKey(m.date, m.opponent))) continue;
       const data = await storeGet("boxscore:" + m.id);
       if (!data) continue;
+      // Possessions de l'équipe et durée du match (comme dans useBoxScore) : nécessaires aux possessions théoriques et au %usage.
+      const teamPoss = computeTeamPossessionsFromStats(data.teamRow ? data.teamRow.stats : sumRowStats(data.rows));
+      const playerRows = data.rows.filter(r => r !== data.teamRow);
       data.rows.forEach(row => {
         if (isDnpRow(row)) return; // DNP : pas un match joué
         if (!map[row.player]) map[row.player] = [];
-        map[row.player].push({ date: m.date, opponent: m.opponent, season: m.season || null, stats: { ...row.stats, ...derivedMatchStats(row.stats) } });
+        const minCol = findStatCol(Object.keys(row.stats), STAT_PATTERNS.minutes);
+        const totMin = minCol ? sumStat(playerRows, minCol) : null;
+        map[row.player].push({ date: m.date, opponent: m.opponent, season: m.season || null, stats: { ...row.stats, ...derivedMatchStats(row.stats, teamPoss, totMin ? totMin / 5 : null) } });
       });
     }
     const result = {};
@@ -5557,8 +5564,14 @@ function OnlineStatus({ lastSeenAt }) {
   return <span style={{ fontSize: 11, color: "#5C6470" }}>Last seen {label}</span>;
 }
 
+// Code couleur du chiffre selon le rang dans l'équipe ("#N of M team") : 1-3 vert foncé, 4-5 vert clair, 6-8 jaune, 9-10 orange, 11+ rouge.
+function rankColor(rank) {
+  if (!rank || rank < 1) return null;
+  return rank <= 3 ? "#16A34A" : rank <= 5 ? "#86D96B" : rank <= 8 ? "#FACC15" : rank <= 10 ? "#FB923C" : "#EF4444";
+}
 function StatPill({ label, value, sub, tone = "amber" }) {
-  const color = tone === "amber" ? AMBER : tone === "teal" ? TEAL : tone === "red" ? RED : PAPER;
+  const rk = typeof sub === "string" ? sub.match(/^#(\d+) of \d+/) : null;
+  const color = (rk && rankColor(Number(rk[1]))) || (tone === "amber" ? AMBER : tone === "teal" ? TEAL : tone === "red" ? RED : PAPER);
   return (
     <div style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, padding: "14px 16px", minWidth: 120 }}>
       <div className="keep-color" style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 26, fontWeight: 700, color }}>{value}</div>
@@ -5707,7 +5720,7 @@ async function loadBadgeData(roster) {
       for (const o of objectives) {
         if (o.startDate && g.date < o.startDate) continue;
         // Objectif en saisie manuelle : une seule valeur "actuelle", donc évalué uniquement sur le dernier match.
-        const v = o.linkedStat ? g.stats[o.linkedStat] : (gi === evalGames.length - 1 ? o.manualCurrent : undefined);
+        const v = o.linkedStat ? g.stats[resolveStatKey(g.stats, o.linkedStat)] : (gi === evalGames.length - 1 ? o.manualCurrent : undefined);
         if (typeof v !== "number" || isNaN(v)) continue;
         tot++;
         if (o.direction === "down" ? v <= o.targetValue : v >= o.targetValue) ok++;
@@ -9145,7 +9158,7 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
         const fmt = v => v === null || v === undefined ? "–" : (Number.isInteger(v) ? v : v.toFixed(1));
         if (!objectives.length) return <p>No objective defined for this player.</p>;
         return objectives.map(o => {
-          const current = o.linkedStat ? (linkableStats[o.linkedStat] ?? null) : o.manualCurrent;
+          const current = o.linkedStat ? (linkableStats[resolveStatKey(linkableStats, o.linkedStat)] ?? null) : o.manualCurrent;
           return (
             <div key={o.id} style={{ border: `1px solid ${LINE}`, borderRadius: 8, padding: 10, marginBottom: 8 }}>
               <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>{o.description}</div>
@@ -9907,6 +9920,15 @@ function buildCodingStatOptions(off, def, cats) {
   return out;
 }
 
+// Un objectif lié à "% LF" / "% FT" (ancienne importation) doit retrouver "% LF (calculated)" (box score FFBB, sans colonne de pourcentage) :
+// on retrouve la stat par son nom, sans "(calculated)" et en tenant LF = FT.
+function resolveStatKey(map, label) {
+  if (!label || !map || label in map) return label;
+  const base = (x) => normTag(String(x).replace(/\(calculated\)/i, "").replace(/\bFT\b/gi, "LF"));
+  const b = base(label);
+  const hit = Object.keys(map).find(k => base(k) === b);
+  return hit !== undefined ? hit : label;
+}
 function useObjectives(playerName) {
   const [objectives, setObjectives] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -9981,7 +10003,7 @@ function useObjectives(playerName) {
 function ObjectiveForm({ initial, linkableStats, reboundContestKeys = [], onSave, onCancel, busy }) {
   const [description, setDescription] = useState(initial?.description || "");
   const [direction, setDirection] = useState(initial?.direction || "up");
-  const [linkedStat, setLinkedStat] = useState(initial?.linkedStat || "");
+  const [linkedStat, setLinkedStat] = useState(resolveStatKey(linkableStats, initial?.linkedStat) || "");
   const [targetValue, setTargetValue] = useState(initial?.targetValue ?? "");
   const [manualCurrent, setManualCurrent] = useState(initial?.manualCurrent ?? "");
   const [startValue, setStartValue] = useState(initial?.startValue ?? "");
@@ -10020,7 +10042,7 @@ function ObjectiveForm({ initial, linkableStats, reboundContestKeys = [], onSave
             <option value="">— Manual entry —</option>
             {boxKeys.length > 0 && (
               <optgroup label="Box score">
-                {boxKeys.map(l => <option key={l} value={l}>{l}</option>)}
+                {boxKeys.map(l => <option key={l} value={l}>{l.replace(/^% LF/, "% FT")}</option>)}
               </optgroup>
             )}
             {codingKeys.length > 0 && (
@@ -10129,7 +10151,7 @@ function ObjectiveCard({ objective, currentValue, isCoach, onEdit, onDelete }) {
             {delta >= 0 ? "+" : ""}{delta.toFixed(1)} depuis le départ
           </div>
         )}
-        <div style={{ fontSize: 11, color: "#5C6470" }}>{objective.startDate ? `depuis le ${objective.startDate}` : ""} · {objective.direction === "down" ? "goal: decrease" : "goal: increase"}{objective.linkedStat ? ` · linked to "${objective.linkedStat}"` : " · manual entry"}</div>
+        <div style={{ fontSize: 11, color: "#5C6470" }}>{objective.startDate ? `depuis le ${objective.startDate}` : ""} · {objective.direction === "down" ? "goal: decrease" : "goal: increase"}{objective.linkedStat ? ` · linked to "${String(objective.linkedStat).replace(/^% LF/, "% FT")}"` : " · manual entry"}</div>
       </div>
       <ObjectiveTrack startValue={objective.startValue} currentValue={currentValue} targetValue={objective.targetValue} progressPct={progressPct} color={barColor === "#5C6470" ? AMBER : barColor} />
       {progressPct !== null && <div style={{ fontSize: 10.5, color: "#5C6470", marginTop: -14 }}>{progressPct.toFixed(0)}% du chemin parcouru vers l'objectif</div>}
@@ -10168,12 +10190,22 @@ function ObjectivesPanel({ playerName, isCoach, box, off, def, matchFilter }) {
     if (stats.total?.possible > 0) out["% Rebound Contest (total)"] = Math.round(stats.total.pct);
     return out;
   }, [rcLoading, rcIndex, rcSessions, rcCategories, playerName, matchFilter]);
-  const linkableStats = useMemo(() => ({ ...box.averages, ...codingStats, ...reboundContestStats }), [box.averages, codingStats, reboundContestStats]);
+  // Tirs TENTÉS (2pts, 3pts, LF) : le box score ne donne que réussis / manqués — on les additionne pour pouvoir lier un objectif.
+  const attemptStats = useMemo(() => {
+    const out = {};
+    [["2Pts Attempted", "made2", "missed2"], ["3Pts Attempted", "made3", "missed3"], ["FT Attempted", "madeFT", "missedFT"]].forEach(([name, mk, xk]) => {
+      const ml = findStatCol(box.statLabels || [], STAT_PATTERNS[mk] || [], mk), xl = findStatCol(box.statLabels || [], STAT_PATTERNS[xk] || [], xk);
+      const m = ml !== undefined ? box.averages[ml] : undefined, x = xl !== undefined ? box.averages[xl] : undefined;
+      if (m !== undefined && m !== null && x !== undefined && x !== null && !(name in box.averages)) out[name] = m + x;
+    });
+    return out;
+  }, [box.averages, box.statLabels]);
+  const linkableStats = useMemo(() => ({ ...box.averages, ...attemptStats, ...codingStats, ...reboundContestStats }), [box.averages, attemptStats, codingStats, reboundContestStats]);
 
   if (loading) return <EmptyState text="Loading…" />;
 
   function currentValueFor(obj) {
-    if (obj.linkedStat) { const v = linkableStats[obj.linkedStat]; return v !== undefined ? v : null; }
+    if (obj.linkedStat) { const v = linkableStats[resolveStatKey(linkableStats, obj.linkedStat)]; return v !== undefined ? v : null; }
     return obj.manualCurrent;
   }
 
