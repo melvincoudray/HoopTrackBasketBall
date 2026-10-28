@@ -2038,9 +2038,10 @@ const SLIDE_KINDS = [
   { id: "fb_match", family: "feedback", label: "Match (score & logos)", duration: 5 },
   { id: "fb_section", family: "feedback", label: "Part announcement (stats)", duration: 6 },
   { id: "photo", family: "photo", label: "Photo", duration: 5 },
+  { id: "custom", family: "custom", label: "Custom slide", duration: 5 },
 ];
 const isFeedbackKind = (k) => String(k).startsWith("fb_");
-const slideKindLabel = (k) => { const x = SLIDE_KINDS.find(y => y.id === k) || SLIDE_KINDS[0]; return (x.family === "feedback" ? "Feedback — " : "") + x.label; };
+const slideKindLabel = (k, s) => { const x = SLIDE_KINDS.find(y => y.id === k) || SLIDE_KINDS[0]; if (k === "custom") return "Custom — " + ((s && s.name) || "untitled"); return (x.family === "feedback" ? "Feedback — " : "") + x.label; };
 const SLIDE_FONT_CHOICES = ["Arial", "Georgia", "Impact", "Trebuchet MS", "Verdana", "Courier New", "Times New Roman", "Anton", "Bebas Neue", "Oswald", "Montserrat", "Playfair Display", "Roboto Condensed", "Teko"];
 const SLIDE_GFONTS_URL = "https://fonts.googleapis.com/css2?family=Anton&family=Bebas+Neue&family=Montserrat:wght@400;700;800&family=Oswald:wght@400;700&family=Playfair+Display:wght@700&family=Roboto+Condensed:wght@400;700&family=Teko:wght@500;700&display=swap";
 function ensureSlideFonts() {
@@ -2128,7 +2129,7 @@ function slideVars(slide) {
     myTeam: c.myTeam || "", opponent: c.opponent || "",
     matchday: n ? L.matchday(n) : (g.journee || ""), date, time, dateTime: [date, time].filter(Boolean).join(" · "),
     venue: g.venue || "", city: g.city || "", venueCity: [g.venue, g.city].filter(Boolean).join(" — "),
-    side: c.side === "def" ? "DEFENSE" : "OFFENSE", play: c.play || "",
+    side: c.side === "def" ? "DEFENSE" : "OFFENSE", play: c.playName || (c.playbook && c.playbook.name) || c.play || "",
     myScore: ms === null ? "–" : String(ms), oppScore: os === null ? "–" : String(os), score: ms === null || os === null ? "– – –" : `${ms} - ${os}`, result,
   };
 }
@@ -2454,9 +2455,11 @@ function playDiagramRects(n) {
   return [{ x: 60, y: T, w: 570, h: 260 }, { x: 650, y: T, w: 570, h: 260 }, { x: 60, y: T + 280, w: 570, h: 260 }, { x: 650, y: T + 280, w: 570, h: 260 }];
 }
 const sSlot = (r, imageId) => sEl("image", r.x, r.y, r.w, r.h, { imageId: imageId || null, slot: true, fit: "contain", frame: true, frameColor: "#FFFFFF", frameWidth: 3, radius: 14 });
-function applyDiagramLayout(elements, n) {
+function applyDiagramLayout(elements, n, saved) {
   const slots = elements.filter(e => e.slot);
-  const rects = playDiagramRects(n);
+  // organisation enregistrée pour ce nombre de schémas (positions/tailles réglées à la main), sinon celle par défaut
+  const sv = saved && saved[n];
+  const rects = Array.isArray(sv) && sv.length === n ? sv : playDiagramRects(n);
   const next = rects.map((r, i) => (slots[i] ? { ...slots[i], ...r } : sSlot(r)));
   return [...next, ...elements.filter(e => !e.slot)];
 }
@@ -2539,17 +2542,22 @@ async function newSlideFor(kind, prevCtx) {
     if (f) inherit.myTeam = f;
   }
   const t = tpls[kind];
+  const withPlayLayout = async (s) => { // slide Play : organisation des schémas mémorisée pour ce nombre
+    if (kind !== "play") return s;
+    try { const lay = (await storeGet("slide_play_layouts")) || {}; s.elements = applyDiagramLayout(s.elements, (s.ctx || {}).diagrams || 2, lay); } catch (e) { /* ignoré */ }
+    return s;
+  };
   if (t) {
     const s = cloneSlideFresh({ ...defaultSlide(kind), ...t, type: "slide", kind });
     s.ctx = { ...(t.ctx || {}), ...inherit };
-    return s;
+    return withPlayLayout(s);
   }
-  return defaultSlide(kind, inherit);
+  return withPlayLayout(defaultSlide(kind, inherit));
 }
 function slideTitle(s) {
   const c = s.ctx || {};
-  const extra = s.kind === "play" ? c.play : s.kind === "side" ? (c.side === "def" ? "Defense" : "Offense") : s.kind === "fb_section" ? ((s.elements || []).find(e => e.type === "text") || {}).content : c.opponent;
-  return `${slideKindLabel(s.kind)}${extra ? " — " + extra : ""}`;
+  const extra = s.kind === "play" ? (c.playName || (c.playbook && c.playbook.name) || c.play) : s.kind === "side" ? (c.side === "def" ? "Defense" : "Offense") : s.kind === "fb_section" ? ((s.elements || []).find(e => e.type === "text") || {}).content : c.opponent;
+  return `${slideKindLabel(s.kind, s)}${extra ? " — " + extra : ""}`;
 }
 
 // --- Rendu d'une slide ---------------------------------------------------------------------------------------
@@ -2841,12 +2849,50 @@ async function fetchFfbbGames(myTeam, opponent) {
 }
 const gameLabel = (g) => `${g.journee || "?"} · ${g.dm || "?"} ${g.time || ""} · ${g.home} – ${g.away}${g.played ? " (played)" : ""}`;
 
+// Choix d'un tag avec recherche : on tape les premières lettres, la liste se filtre (au lieu d'une longue liste déroulante).
+function SlideTagPicker({ value, onPick, withPlay, groups }) {
+  const [q, setQ] = useState("");
+  const [open, setOpen] = useState(false);
+  const shown = value === "@play" ? "The slide's play" : (value || "");
+  const nq = normTag(q);
+  const rows = [];
+  (groups || []).forEach(([cat, list]) => {
+    const hits = list.filter(t => !nq || normTag(t).includes(nq)).sort((a, b) => (normTag(b).startsWith(nq) ? 1 : 0) - (normTag(a).startsWith(nq) ? 1 : 0));
+    if (hits.length) rows.push([cat, hits]);
+  });
+  const flat = rows.flatMap(([, l]) => l);
+  const pick = (v) => { onPick(v); setOpen(false); setQ(""); };
+  return (
+    <div>
+      <input value={open ? q : shown} placeholder="— Choose — (type the first letters)" style={sInp}
+        onFocus={e => { setOpen(true); setQ(""); }} onChange={e => setQ(e.target.value)} onBlur={() => setTimeout(() => setOpen(false), 150)}
+        onKeyDown={e => { if (e.key === "Enter" && flat.length) { e.preventDefault(); pick(flat[0]); } else if (e.key === "Escape") setOpen(false); }} />
+      {open && (
+        <div style={{ maxHeight: 240, overflowY: "auto", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 6, marginTop: 4 }}>
+          {!q && <button onMouseDown={e => { e.preventDefault(); pick(""); }} style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", color: "#8B93A1", padding: "6px 10px", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>— None —</button>}
+          {withPlay && (!nq || normTag("The slide's play").includes(nq)) && <button onMouseDown={e => { e.preventDefault(); pick("@play"); }} style={{ display: "block", width: "100%", textAlign: "left", background: "none", border: "none", color: AMBER, padding: "6px 10px", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>The slide's play</button>}
+          {rows.map(([cat, list]) => (
+            <div key={cat}>
+              <div style={{ fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", padding: "6px 10px 2px" }}>{cat}</div>
+              {list.map(t => <button key={cat + t} onMouseDown={e => { e.preventDefault(); pick(t); }} style={{ display: "block", width: "100%", textAlign: "left", background: t === value ? PANEL2 : "none", border: "none", color: PAPER, padding: "5px 10px", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>{t}</button>)}
+            </div>
+          ))}
+          {!rows.length && <div style={{ padding: "8px 10px", fontSize: 12, color: "#8B93A1" }}>No tag starting with “{q}”.</div>}
+        </div>
+      )}
+    </div>
+  );
+}
 function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
   const [selId, setSelId] = useState(null);
   const [picker, setPicker] = useState(null); // { target: "bg" | elementId }
   const [msg, setMsg] = useState("");
   const [fetching, setFetching] = useState(false);
   const [saved, setSaved] = useState("");
+  // Organisation des schémas mémorisée pour chaque nombre (1 à 4) : réutilisée à chaque nouveau play inséré
+  const [playLayouts, setPlayLayouts] = useState({});
+  const playLayoutsReady = useRef(false);
+  useEffect(() => { (async () => { try { setPlayLayouts((await storeGet("slide_play_layouts")) || {}); } catch (e) { /* ignoré */ } playLayoutsReady.current = true; })(); }, []);
   const [drawPlays, setDrawPlays] = useState([]); // plays dessinés (Draw) : playbooks + plays envoyées au Staff de l'adversaire
   useEffect(() => {
     let off = false;
@@ -2859,6 +2905,19 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
     })();
     return () => { off = true; };
   }, [(slide.ctx || {}).opponent]);
+  const slotGeom = slide.kind === "play" ? JSON.stringify((slide.elements || []).filter(e => e.slot).map(e => [e.x, e.y, e.w, e.h])) : "";
+  useEffect(() => {
+    if (slide.kind !== "play" || !playLayoutsReady.current) return;
+    const slots = (slide.elements || []).filter(e => e.slot), n = (slide.ctx || {}).diagrams || 2;
+    if (slots.length !== n) return;
+    const rects = slots.map(e => ({ x: e.x, y: e.y, w: e.w, h: e.h }));
+    if (JSON.stringify(playLayouts[n] || null) === JSON.stringify(rects)) return;
+    const tm = setTimeout(async () => {
+      const lib = (await storeGet("slide_play_layouts")) || {}; lib[n] = rects;
+      await storeSet("slide_play_layouts", lib); setPlayLayouts(lib);
+    }, 500);
+    return () => clearTimeout(tm);
+  }, [slotGeom, (slide.ctx || {}).diagrams]);
   const [customFonts, setCustomFonts] = useState([]);
   const [fontMsg, setFontMsg] = useState("");
   const refreshFonts = async () => setCustomFonts(await loadCustomSlideFonts());
@@ -2907,17 +2966,17 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
   const setFbScore = (k, v) => setCtx({ fbMatch: { ...(fbm || {}), [k]: v === "" ? "" : Number(v) } });
   function pickOpp(v) { setCtx({ opponent: v, obsTeam: undefined }); if (c.myTeam) refreshGames(c.myTeam, v); }
   async function setDiagrams(n) {
-    onChange({ ctx: { ...c, diagrams: n }, elements: applyDiagramLayout(els, n) });
+    onChange({ ctx: { ...c, diagrams: n }, elements: applyDiagramLayout(els, n, playLayouts) });
   }
   // Choisit un play dessiné : ses diagrammes (images du playbook) remplissent les emplacements, 4 maximum.
   function playbookPatch(e) {
-    if (!e) return { ctx: { ...c, playbook: undefined }, elements: els };
+    if (!e) return { ctx: { ...c, playbook: undefined, playName: undefined }, elements: els };
     const n = Math.max(1, Math.min(4, e.frames.length));
-    return { ctx: { ...c, playbook: { key: e.key, name: e.name, frames: e.frames }, diagrams: n, play: c.play || e.name }, elements: applyDiagramLayout(els, n).map(x => (x.slot ? { ...x, imageId: null } : x)) };
+    return { ctx: { ...c, playbook: { key: e.key, name: e.name, frames: e.frames }, diagrams: n, play: c.play || e.name, playName: e.name }, elements: applyDiagramLayout(els, n, playLayouts).map(x => (x.slot ? { ...x, imageId: null } : x)) };
   }
   const pickDrawPlay = (key) => onChange(playbookPatch(drawPlays.find(x => x.key === key) || null));
   async function pickPlay(tag) {
-    if (!c.playbook) { const hit = drawPlays.find(x => normTag(x.name) === normTag(tag)); if (hit) { onChange({ ...playbookPatch(hit), ctx: { ...playbookPatch(hit).ctx, play: tag } }); return; } }
+    if (!c.playbook) { const hit = drawPlays.find(x => normTag(x.name) === normTag(tag)); if (hit) { const pp = playbookPatch(hit); onChange({ ...pp, ctx: { ...pp.ctx, play: tag } }); return; } }
     const mem = ((await storeGet("play_diagrams")) || {})[normTag(tag)] || [];
     const slots = els.filter(e => e.slot);
     let next = els;
@@ -2940,11 +2999,20 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
     }
   }
   async function saveTemplate() {
+    if (slide.kind === "custom") { // slide personnalisée : enregistrée sous son nom dans la bibliothèque
+      const nm = (slide.name || "").trim();
+      if (!nm) { setSaved("Give this slide a name first (top left)."); return; }
+      const lib = (await storeGet("slide_custom")) || {};
+      lib[nm] = { duration: slide.duration, bg: slide.bg, elements: els.map(e => (e.slot ? { ...e, imageId: null } : e)), ctx: { lang: c.lang, side: c.side, diagrams: c.diagrams } };
+      await storeSet("slide_custom", lib);
+      setSaved("Saved as “" + nm + "” — you can add it again from “Add a slide — Custom”.");
+      return;
+    }
     const t = (await storeGet("slide_templates")) || {};
     t[slide.kind] = { duration: slide.duration, bg: slide.bg, elements: els.map(e => (e.slot ? { ...e, imageId: null } : e)), ctx: { lang: c.lang, side: c.side, diagrams: c.diagrams } };
     await storeSet("slide_templates", t);
     await storeSet("slide_last_ctx", { myTeam: c.myTeam, opponent: c.opponent, obsTeam: c.obsTeam, game: c.game, games: c.games, lang: c.lang, fbMatch: c.fbMatch });
-    setSaved("Saved: new “" + slideKindLabel(slide.kind) + "” slides will start from this layout.");
+    setSaved("Saved: new “" + slideKindLabel(slide.kind, slide) + "” slides will start from this layout.");
   }
   async function resetLayout() {
     const d = defaultSlide(slide.kind, c);
@@ -2956,22 +3024,18 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
     if (i < 0 || j < 0 || j >= els.length) return;
     const a = [...els]; [a[i], a[j]] = [a[j], a[i]]; onChange({ elements: a });
   }
-  const tagSelect = (value, onPick, withPlay, catsOverride) => { const tagOptions = Object.entries(catsOverride || cats).filter(([, l]) => Array.isArray(l) && l.length); return (
-    <select value={value || ""} onChange={e => onPick(e.target.value)} style={sInp}>
-      <option value="">— Choose —</option>
-      {withPlay && <option value="@play">The slide's play</option>}
-      {tagOptions.map(([name, list]) => <optgroup key={name} label={name}>{list.map(t => <option key={t} value={t}>{t}</option>)}</optgroup>)}
-    </select>
-  ); };
+  const tagSelect = (value, onPick, withPlay, catsOverride) => <SlideTagPicker value={value} onPick={onPick} withPlay={withPlay} groups={Object.entries(catsOverride || cats).filter(([, l]) => Array.isArray(l) && l.length)} />;
   const numIn = (label, key) => <SField label={label} w={74}><input type="number" value={sel[key] ?? 0} onChange={e => patchEl(sel.id, { [key]: Number(e.target.value) || 0 })} style={sInp} /></SField>;
 
   return (
     <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.86)", zIndex: 1000, overflow: "auto", padding: 12 }}>
       <div style={{ background: INK, border: `1px solid ${LINE}`, borderRadius: 12, padding: 14, maxWidth: 1380, margin: "0 auto" }}>
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
-          <div style={{ fontSize: 14, fontWeight: 700, color: PAPER }}>{slideKindLabel(slide.kind)}</div>
+          {slide.kind === "custom"
+            ? <input value={slide.name || ""} onChange={e => onChange({ name: e.target.value })} placeholder="Slide name (e.g. End Screen)" style={{ ...sInp, width: 260, fontSize: 14, fontWeight: 700 }} />
+            : <div style={{ fontSize: 14, fontWeight: 700, color: PAPER }}>{slideKindLabel(slide.kind, slide)}</div>}
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            <button onClick={saveTemplate} style={{ background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 8, color: AMBER, padding: "7px 12px", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>Save this layout as default for this type</button>
+            <button onClick={saveTemplate} style={{ background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 8, color: AMBER, padding: "7px 12px", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>{slide.kind === "custom" ? "Save this slide by name" : "Save this layout as default for this type"}</button>
             <button onClick={resetLayout} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 8, color: "#8B93A1", padding: "7px 12px", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>Reset layout</button>
             <button onClick={onClose} style={{ ...btnPrimary, flex: "none", padding: "7px 16px", fontSize: 13 }}>Done</button>
           </div>
@@ -3069,7 +3133,7 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
                     {c.playbook && c.playbook.frames.length > 4 && <div style={{ fontSize: 11.5, color: AMBER, marginTop: 4 }}>This play has {c.playbook.frames.length} diagrams: the first 4 are shown.</div>}
                     {!drawPlays.length && <div style={{ fontSize: 11.5, color: AMBER, marginTop: 4 }}>Draw and save a play in a playbook first (Draw tab). Diagrams are then used automatically, on a white background like the PDF export.</div>}
                   </SField>
-                  <SField label="Play tag (name shown + observation stats)">{tagSelect(c.play, pickPlay)}</SField>
+                  <SField label={c.playName || c.playbook ? "Play tag (observation stats)" : "Play tag (name shown + observation stats)"}>{tagSelect(c.play, pickPlay)}</SField>
                   <SField label="Number of diagrams">
                     <div style={{ display: "flex", gap: 6 }}>{[1, 2, 3, 4].map(n => <button key={n} onClick={() => setDiagrams(n)} style={{ flex: 1, padding: "6px 0", borderRadius: 6, cursor: "pointer", background: (c.diagrams || 2) === n ? AMBER : PANEL2, color: (c.diagrams || 2) === n ? "#1A1300" : PAPER, border: `1px solid ${LINE}`, fontWeight: 700 }}>{n}</button>)}</div>
                   </SField>
@@ -3387,6 +3451,26 @@ function MontageTab({ isCoach }) {
       persist(list.map(m => m.id === id ? { ...m, items: [...m.items, s] } : m));
     } catch (x) { alert(x.message || "Photo import failed."); }
   }
+  // Slides personnalisées : bibliothèque nommée (slide_custom), ex. "End Screen"
+  const [customTpls, setCustomTpls] = useState({});
+  const [customName, setCustomName] = useState("");
+  const loadCustomTpls = async () => { try { setCustomTpls((await storeGet("slide_custom")) || {}); } catch (e) { /* ignoré */ } };
+  useEffect(() => { loadCustomTpls(); }, []);
+  async function addCustomSlide(name, tpl) {
+    const prev = [...items].reverse().find(i => i.type === "slide");
+    const inherit = {};
+    if (prev) ["myTeam", "opponent", "obsTeam", "game", "games", "lang", "fbMatch"].forEach(k => { if (prev.ctx && prev.ctx[k] !== undefined) inherit[k] = prev.ctx[k]; });
+    let s;
+    if (tpl) { s = cloneSlideFresh({ ...defaultSlide("custom"), ...tpl, type: "slide", kind: "custom", name }); s.ctx = { ...(tpl.ctx || {}), ...inherit }; }
+    else { s = defaultSlide("custom", inherit); s.name = name; s.elements = [sText(60, 270, 1160, 180, name.toUpperCase(), { font: "Anton", size: 120, weight: 400, upper: true, shadow: true })]; }
+    let list = montagesRef.current || [], id = activeId;
+    if (!list.find(m => m.id === id)) { id = uid(); list = [...list, { id, name: `Montage ${list.length + 1}`, createdAt: Date.now(), items: [] }]; setActiveId(id); }
+    persist(list.map(m => m.id === id ? { ...m, items: [...m.items, s] } : m));
+    setEditingId(s.id);
+  }
+  async function deleteCustomTpl(name) {
+    const lib = (await storeGet("slide_custom")) || {}; delete lib[name]; await storeSet("slide_custom", lib); setCustomTpls(lib);
+  }
   async function addSlide(kind) {
     const prev = [...items].reverse().find(i => i.type === "slide");
     const s = await newSlideFor(kind, prev ? prev.ctx : null);
@@ -3401,7 +3485,7 @@ function MontageTab({ isCoach }) {
   }
   function closeSlideEditor() {
     if (editingSlide) { const c = editingSlide.ctx || {}; storeSet("slide_last_ctx", { myTeam: c.myTeam, opponent: c.opponent, obsTeam: c.obsTeam, game: c.game, games: c.games, lang: c.lang, fbMatch: c.fbMatch }); }
-    setEditingId(null);
+    setEditingId(null); loadCustomTpls();
   }
 
   // Export en un seul fichier vidéo (ffmpeg.wasm, dans le navigateur — rien n'est envoyé nulle part).
@@ -3600,6 +3684,20 @@ function MontageTab({ isCoach }) {
                   </div>
                 </div>
               ))}
+              <div style={{ marginBottom: 10 }}>
+                <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 8 }}>Add a slide — Custom (saved by name)</div>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  {Object.keys(customTpls).map(n => (
+                    <span key={n} style={{ display: "inline-flex", alignItems: "center", background: PANEL2, border: `1px solid ${AMBER_DIM}`, borderRadius: 8 }}>
+                      <button onClick={() => addCustomSlide(n, customTpls[n])} style={{ background: "none", border: "none", color: AMBER, cursor: "pointer", fontSize: 12.5, padding: "7px 4px 7px 12px", fontFamily: "inherit" }}><Plus size={12} style={{ verticalAlign: "-2px" }} /> {n}</button>
+                      <button title="Delete this saved slide" onClick={() => { if (window.confirm("Delete the saved slide “" + n + "”?")) deleteCustomTpl(n); }} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", padding: "7px 8px" }}><X size={12} /></button>
+                    </span>
+                  ))}
+                  <input value={customName} onChange={e => setCustomName(e.target.value)} placeholder="New slide name (e.g. End Screen)" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 240, padding: "6px 10px", fontSize: 12.5 }} />
+                  <button disabled={!customName.trim()} onClick={() => { const n = customName.trim(); setCustomName(""); addCustomSlide(n, customTpls[n]); }} style={{ background: PANEL2, border: `1px solid ${AMBER_DIM}`, borderRadius: 8, color: AMBER, cursor: customName.trim() ? "pointer" : "default", opacity: customName.trim() ? 1 : 0.5, fontSize: 12.5, padding: "7px 12px", fontFamily: "inherit" }}><Plus size={12} style={{ verticalAlign: "-2px" }} /> Create</button>
+                </div>
+                <div style={{ fontSize: 11.5, color: "#5C6470", marginTop: 6 }}>Design the slide, then click “Save this slide by name” in the editor: it appears here and can be added to any montage.</div>
+              </div>
               <div style={{ fontSize: 11.5, color: "#5C6470", marginTop: 8 }}>Slides are saved with the montage (layout, data links, images). A new slide starts from the layout you saved as default for its type, with the teams and match of the previous slide.</div>
             </div>
           )}
