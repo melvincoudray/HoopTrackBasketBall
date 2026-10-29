@@ -12429,14 +12429,35 @@ function StatShapeBadge({ label, value, size = 74, fontScale = 1, color = TEAL }
     triangle: <polygon points={`${c},4 ${size - 5},${size - 8} 5,${size - 8}`} />,
     hexagon: <polygon points={`${c},2 ${size - 3},${c * 0.5} ${size - 3},${c * 1.5} ${c},${size - 2} 3,${c * 1.5} 3,${c * 0.5}`} />,
   };
+  // La police suit la taille réelle du badge (base calibrée pour 74px), puis se réduit encore
+  // jusqu'à ce que valeur + libellé tiennent dans la zone utile de la forme (le losange et le
+  // triangle ont moins de place que le carré) : la stat reste toujours visible en entier.
+  const innerRef = useRef(null), valRef = useRef(null), labRef = useRef(null);
+  const box = { circle: [0.72, 0.62], square: [0.84, 0.8], diamond: [0.6, 0.52], triangle: [0.5, 0.4], hexagon: [0.82, 0.74] }[shape];
+  const k = (size / 74) * fontScale;
+  useLayoutEffect(() => {
+    const inner = innerRef.current, v = valRef.current, l = labRef.current;
+    if (!inner || !v || !l) return;
+    let f = 1;
+    const apply = () => { v.style.fontSize = (14 * k * f) + "px"; l.style.fontSize = (8 * k * f) + "px"; };
+    apply();
+    for (let i = 0; i < 20; i++) {
+      const tooWide = inner.scrollWidth > inner.clientWidth + 0.5 || v.scrollWidth > inner.clientWidth + 0.5 || l.scrollWidth > inner.clientWidth + 0.5;
+      const tooTall = inner.scrollHeight > inner.clientHeight + 0.5;
+      if (!tooWide && !tooTall) break;
+      f *= 0.92; apply();
+    }
+  });
   return (
     <div style={{ position: "relative", width: size, height: size, flexShrink: 0 }}>
       <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} style={{ position: "absolute", inset: 0 }}>
         <g fill={color} stroke="#03231F" strokeWidth={1.5}>{shapes[shape]}</g>
       </svg>
-      <div style={{ position: "absolute", inset: 0, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center", padding: 6 }}>
-        <div style={{ fontWeight: 800, fontSize: 14 * fontScale, color: "#03231F", lineHeight: 1.1 }}>{value}</div>
-        <div style={{ fontSize: 8 * fontScale, fontWeight: 700, color: "#03231F", lineHeight: 1.1 }}>{label}</div>
+      <div style={{ position: "absolute", inset: 0, display: "flex", alignItems: shape === "triangle" ? "flex-end" : "center", justifyContent: "center", paddingBottom: shape === "triangle" ? size * 0.12 : 0 }}>
+        <div ref={innerRef} style={{ width: size * box[0], height: size * box[1], display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", textAlign: "center", overflow: "hidden" }}>
+          <div ref={valRef} style={{ fontWeight: 800, fontSize: 14 * k, color: "#03231F", lineHeight: 1.1, whiteSpace: "nowrap" }}>{value}</div>
+          <div ref={labRef} style={{ fontSize: 8 * k, fontWeight: 700, color: "#03231F", lineHeight: 1.1, overflowWrap: "anywhere" }}>{label}</div>
+        </div>
       </div>
     </div>
   );
