@@ -4061,6 +4061,118 @@ function useScreenContestTabName() {
   return { name, save };
 }
 
+// Lit le projet ".dnk" d'un Screen Contest : même logique que le CSV (une ligne = un événement,
+// bouton Offense/Defense, tags "Nom 0"/"Nom 1" = points du joueur) mais en plus avec le timestamp
+// de chaque événement, ce qui permet de retrouver les clips vidéo (clic sur un pourcentage).
+async function parseScreenContestDnk(arrayBuffer, roster, categories = DEFAULT_SCREEN_CONTEST_CATEGORIES) {
+  const SQL = await getSqlJs();
+  let db;
+  try { db = new SQL.Database(new Uint8Array(arrayBuffer)); } catch (e) { throw new Error("Unreadable .dnk file (not a valid project database)."); }
+  try {
+    const tableNames = new Set(db.exec("SELECT name FROM sqlite_master WHERE type='table'")[0]?.values.map(r => r[0]) || []);
+    for (const required of ["tag", "button", "timeline_entry", "timeline_entry_tag"]) {
+      if (!tableNames.has(required)) throw new Error(`Unrecognized .dnk file (missing "${required}" table).`);
+    }
+    let videoPathHint = null;
+    try {
+      const cfg = db.exec("SELECT value FROM configuration WHERE name = 'video_path'");
+      if (cfg.length && cfg[0].values.length) videoPathHint = String(cfg[0].values[0][0]).split(/[\\/]/).pop();
+    } catch (e) { /* non bloquant */ }
+    const tagName = new Map((db.exec("SELECT id, name FROM tag")[0]?.values || []).map(([id, name]) => [id, String(name)]));
+    const buttonName = new Map((db.exec("SELECT id, name FROM button")[0]?.values || []).map(([id, name]) => [id, String(name)]));
+    const tagsByEntry = new Map();
+    for (const [entryId, tagId] of (db.exec("SELECT timeline_entry_id, tag_id FROM timeline_entry_tag")[0]?.values || [])) {
+      if (!tagsByEntry.has(entryId)) tagsByEntry.set(entryId, []);
+      tagsByEntry.get(entryId).push(tagId);
+    }
+    const wordToKey = {};
+    for (const cat of categories) for (const w of cat.matchValues) wordToKey[String(w).trim().toUpperCase()] = cat.key;
+    const rosterNames = new Set(roster.map(p => p.name));
+    const unmatched = new Set();
+    const events = [];
+    const entries = db.exec("SELECT id, button_id, timestamp_start, timestamp_end FROM timeline_entry ORDER BY timestamp_start")[0]?.values || [];
+    for (const [entryId, buttonId, tStart, tEnd] of entries) {
+      const categoryKey = wordToKey[String(buttonName.get(buttonId) || "").trim().toUpperCase()];
+      if (!categoryKey) continue;
+      const scores = {};
+      for (const tagId of (tagsByEntry.get(entryId) || [])) {
+        const m = String(tagName.get(tagId) || "").match(/^(.+?)\s+([012])$/);
+        if (!m) continue;
+        const name = m[1].trim();
+        scores[name] = Number(m[2]);
+        if (!rosterNames.has(name)) unmatched.add(name);
+      }
+      if (Object.keys(scores).length > 0) events.push({ categoryKey, scores, timestampStart: tStart, timestampEnd: tEnd });
+    }
+    return { events, unmatchedColumns: [...unmatched], videoPathHint };
+  } finally {
+    db.close();
+  }
+}
+
+// Clips d'un Screen Contest : le coach clique sur un pourcentage (joueur + catégorie, ou le
+// total du joueur) ; on propose d'abord quels clips voir (réussis 1 pt, ratés 0 pt, ou tous),
+// puis la fenêtre habituelle (Precise cut / Fast cut / Clip by clip), une vidéo par session.
+function screenClipEvents(events, playerName, categoryKey) {
+  return events
+    .filter(ev => ev.scores && Object.prototype.hasOwnProperty.call(ev.scores, playerName) && (!categoryKey || ev.categoryKey === categoryKey))
+    .map(ev => ({ pts: ev.scores[playerName], categoryKey: ev.categoryKey, timestampStart: ev.timestampStart, timestampEnd: ev.timestampEnd, sessionId: ev.sessionId }));
+}
+function ScreenClipFlow({ title, events, index, categories, onClose }) {
+  const [outcome, setOutcome] = useState(null); // 1 | 0 | "all"
+  const infoById = new Map(index.map(s => [s.id, s]));
+  const hasTs = e => e.timestampStart !== undefined && e.timestampStart !== null && e.timestampEnd !== undefined && e.timestampEnd !== null;
+  const filterBy = o => events.filter(e => o === "all" || e.pts === o);
+  if (outcome !== null) {
+    const label = outcome === "all" ? "All" : outcome === 1 ? "Good (1 pt)" : "Not good (0 pt)";
+    return (
+      <ClipExportModal
+        playName={title}
+        sideLabel={label}
+        plays={filterBy(outcome)}
+        onClose={onClose}
+        grouping={{
+          keyOf: p => p.sessionId,
+          labelOf: p => infoById.get(p.sessionId)?.label || "Session",
+          sortKeyOf: p => infoById.get(p.sessionId)?.date || "",
+          noun: "Session",
+          missingTimestampHint: 'use "Replace file" in Import → Screen Contest to swap {article} CSV for the .dnk project and include {pronoun}.',
+          scopeNote: "currently selected sessions only.",
+        }}
+      />
+    );
+  }
+  const options = [[1, "Good (1 pt)", TEAL], [0, "Not good (0 pt)", RED], ["all", "All events", AMBER]];
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.6)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }}>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 14, padding: 24, maxWidth: 400, width: "100%" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 14 }}>
+          <div>
+            <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: AMBER, marginBottom: 4 }}>Video clips</div>
+            <div style={{ fontSize: 16, fontWeight: 700, color: PAPER }}>{title}</div>
+          </div>
+          <button onClick={onClose} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontSize: 20, lineHeight: 1 }}>×</button>
+        </div>
+        <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 14 }}>Which clips do you want to see?</div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+          {options.map(([o, label, color]) => {
+            const list = filterBy(o), withTs = list.filter(hasTs).length;
+            return (
+              <button key={String(o)} disabled={list.length === 0} onClick={() => setOutcome(o)} style={{
+                display: "flex", justifyContent: "space-between", alignItems: "center", padding: "11px 14px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 9,
+                color: list.length ? PAPER : "#5C6470", cursor: list.length ? "pointer" : "default", fontFamily: "inherit", fontSize: 13.5, fontWeight: 600, opacity: list.length ? 1 : 0.5,
+              }}>
+                <span style={{ color }}>{label}</span>
+                <span style={{ fontSize: 12, color: "#8B93A1", fontFamily: "ui-monospace, monospace" }}>{list.length} event{list.length !== 1 ? "s" : ""}{withTs < list.length ? ` · ${withTs} with video` : ""}</span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Le Screen Contest vaut 1 ou 0 point par événement (au lieu de 0/1/2 pour le Rebound Contest).
 function computeScreenContestStats(events, playerNames, categories = DEFAULT_SCREEN_CONTEST_CATEGORIES) {
   return computeReboundContestStats(events, playerNames, categories, 1);
@@ -5692,10 +5804,14 @@ function useScreenContestSessions() {
     setSessions(s => { const n = { ...s }; delete n[id]; return n; });
   }
   async function editSession(id, changes) {
-    const newIndex = index.map(s => s.id === id ? { ...s, ...changes } : s);
+    // "events" (remplacement du fichier) n'est jamais copié dans l'index, seulement le décompte.
+    const { events, ...idxChanges } = changes;
+    const newIndex = index.map(s => s.id === id ? { ...s, ...idxChanges, ...(events ? { eventsCount: events.length } : {}) } : s);
     await storeSet("screen_contest_index", newIndex);
     setIndex(newIndex);
-    setSessions(s => ({ ...s, [id]: { ...s[id], ...changes } }));
+    const rec = { ...(sessions[id] || { id }), ...changes };
+    if (events) await storeSet("screen_contest:" + id, rec);
+    setSessions(s => ({ ...s, [id]: rec }));
   }
 
   return { index, sessions, loading, addSession, deleteSession, editSession, reload: load };
@@ -8606,6 +8722,7 @@ function ScreenContestTab({ roster, isCoach, teamLogo }) {
   const { name: tabName } = useScreenContestTabName();
   const [selectedIds, setSelectedIds] = useState(null); // null = toutes les sessions
   const userTouchedRef = useRef(false);
+  const [clipReq, setClipReq] = useState(null); // { title, events } — clic sur un pourcentage
   // Par défaut, seule la dernière session AJOUTÉE (pas forcément la plus récente en date, si
   // le coach rattrape un import en retard) est sélectionnée — le coach peut ensuite en
   // choisir d'autres, ou "All sessions", librement. On ne touche plus à ce choix une fois
@@ -8618,7 +8735,7 @@ function ScreenContestTab({ roster, isCoach, teamLogo }) {
 
   const effectiveIds = selectedIds === null ? index.map(s => s.id) : [...selectedIds];
   const allEvents = useMemo(() => {
-    return effectiveIds.flatMap(id => (sessions[id]?.events) || []);
+    return effectiveIds.flatMap(id => ((sessions[id]?.events) || []).map(ev => ({ ...ev, sessionId: id })));
   }, [effectiveIds.join(","), sessions]);
 
   const stats = useMemo(() => computeScreenContestStats(allEvents, roster.map(p => p.name), categories), [allEvents, roster, categories]);
@@ -8706,14 +8823,14 @@ function ScreenContestTab({ roster, isCoach, teamLogo }) {
                 {categories.map((cat, ci) => {
                   const c = p.stats[cat.key] || { earned: 0, possible: 0, pct: null };
                   return (
-                    <div key={cat.key} style={{ textAlign: "center" }}>
+                    <div key={cat.key} title="Click to see the video clips" onClick={() => c.possible > 0 && setClipReq({ title: `${p.name} — ${cat.label}`, events: screenClipEvents(allEvents, p.name, cat.key) })} style={{ textAlign: "center", cursor: c.possible > 0 ? "pointer" : "default" }}>
                       <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 17, color: catColors[ci % catColors.length] }}>{c.pct !== null ? `${Math.round(c.pct)}%` : "–"}</div>
                       <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 11, color: "#8B93A1" }}>{c.possible > 0 ? `${c.earned}/${c.possible}` : "–"}</div>
                       <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>{cat.label}</div>
                     </div>
                   );
                 })}
-                <div style={{ textAlign: "center" }}>
+                <div title="Click to see the video clips" onClick={() => p.stats.total.possible > 0 && setClipReq({ title: `${p.name} — Total`, events: screenClipEvents(allEvents, p.name, null) })} style={{ textAlign: "center", cursor: p.stats.total.possible > 0 ? "pointer" : "default" }}>
                   <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 19, color: AMBER }}>{p.stats.total.pct !== null ? `${Math.round(p.stats.total.pct)}%` : "–"}</div>
                   <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 11, color: "#8B93A1" }}>{p.stats.total.possible > 0 ? `${p.stats.total.earned}/${p.stats.total.possible}` : "–"}</div>
                   <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>Total</div>
@@ -8755,6 +8872,8 @@ function ScreenContestTab({ roster, isCoach, teamLogo }) {
           </div>
         </div>
       )}
+
+      {clipReq && <ScreenClipFlow title={clipReq.title} events={clipReq.events} index={index} categories={categories} onClose={() => setClipReq(null)} />}
 
       {/* Légende des points, uniquement ici (bas du classement) — demandé par l'utilisateur,
           pas dans la fiche joueur. Une carte par catégorie configurée (2 par défaut). */}
@@ -8899,6 +9018,9 @@ function ScreenContestImportPanel({ roster }) {
   const [editingId, setEditingId] = useState(null);
   const [editLabel, setEditLabel] = useState(""), [editDate, setEditDate] = useState("");
   const fileRef = useRef();
+  const replaceRef = useRef();
+  const [replaceId, setReplaceId] = useState(null);
+  const [replaceMsg, setReplaceMsg] = useState("");
 
   async function handleFile(e) {
     const file = e.target.files[0];
@@ -8906,13 +9028,14 @@ function ScreenContestImportPanel({ roster }) {
     setFileErr(""); setPreview(null);
     try {
       const buf = await file.arrayBuffer();
-      const { events, unmatchedColumns } = parseReboundContestFile(buf, roster, categories);
+      const isDnk = /\.dnk$/i.test(file.name);
+      const { events, unmatchedColumns, videoPathHint } = isDnk ? await parseScreenContestDnk(buf, roster, categories) : parseReboundContestFile(buf, roster, categories);
       if (!events.length) throw new Error(`No ${categories.map(c => c.label).join("/")} event found in this file — check the "button" column (recognized words: ${categories.flatMap(c => c.matchValues).join(", ")}) and the player columns ("Name 0", "Name 1").`);
       // Pré-remplit le libellé à partir du nom du fichier (ex. "Practice_18_Aout_export.csv"
       // -> "Practice 18 Aout"), comme demandé implicitement par l'exemple envoyé.
-      const guessedLabel = file.name.replace(/\.(csv|xlsx?|xls)$/i, "").replace(/_export$/i, "").replace(/_/g, " ").trim();
+      const guessedLabel = file.name.replace(/\.(csv|xlsx?|xls|dnk)$/i, "").replace(/_export$/i, "").replace(/_/g, " ").trim();
       setLabel(guessedLabel);
-      setPreview({ events, unmatchedColumns });
+      setPreview({ events, unmatchedColumns, videoPathHint, hasVideo: isDnk });
     } catch (err) {
       setFileErr(err.message || "Unable to read this file.");
     }
@@ -8926,6 +9049,24 @@ function ScreenContestImportPanel({ roster }) {
     setBusy(false); setPreview(null); setLabel("");
   }
 
+  // Remplace les événements d'une session déjà importée (ex. CSV -> .dnk pour récupérer les vidéos),
+  // sans perdre son nom ni sa date.
+  async function handleReplace(e) {
+    const file = e.target.files[0];
+    const id = replaceId;
+    if (replaceRef.current) replaceRef.current.value = "";
+    if (!file || !id) return;
+    setReplaceMsg("");
+    try {
+      const buf = await file.arrayBuffer();
+      const isDnk = /\.dnk$/i.test(file.name);
+      const { events } = isDnk ? await parseScreenContestDnk(buf, roster, categories) : parseReboundContestFile(buf, roster, categories);
+      if (!events.length) throw new Error("No event found in this file.");
+      await editSession(id, { events });
+      setReplaceMsg(`Session updated — ${events.length} events${isDnk ? ", with video timestamps" : ""}.`);
+    } catch (err) { setReplaceMsg(err.message || "Unable to read this file."); }
+  }
+
   function startEdit(s) { setEditingId(s.id); setEditLabel(s.label); setEditDate(s.date); }
   async function confirmEdit() { await editSession(editingId, { label: editLabel.trim(), date: editDate }); setEditingId(null); }
 
@@ -8934,17 +9075,17 @@ function ScreenContestImportPanel({ roster }) {
       <SectionTitle eyebrow={tabName} title={`Import a ${categories.map(c => c.label).join(" / ")} session`} />
       <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 16, maxWidth: 600 }}>
         One row per screen event, with a "button" column ({categories.map(c => c.matchValues.join("/")).join(" or ")}) and 2 columns per
-        player ("Name 0", "Name 1") marking the point earned on that event (1 or 0).
+        player ("Name 0", "Name 1") marking the point earned on that event (1 or 0). Import the .dnk project instead of the CSV to get the video clips (click a percentage in the ranking).
       </div>
 
       {!preview ? (
         <div style={{ border: `1px dashed ${LINE}`, borderRadius: 10, padding: 20, textAlign: "center", marginBottom: 20 }}>
-          <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
+          <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv,.dnk" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
           {fileErr && <div style={{ color: RED, fontSize: 12.5, marginTop: 10 }}>{fileErr}</div>}
         </div>
       ) : (
         <div style={{ background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 10, padding: 16, marginBottom: 20 }}>
-          <div style={{ fontSize: 13, color: TEAL, marginBottom: 10 }}>{preview.events.length} event{preview.events.length !== 1 ? "s" : ""} found ({categories.map(c => `${preview.events.filter(e => e.categoryKey === c.key).length} ${c.label}`).join(", ")})</div>
+          <div style={{ fontSize: 13, color: TEAL, marginBottom: 10 }}>{preview.hasVideo ? "Video timestamps included (.dnk) — " : "No video timestamps (CSV) — "}{preview.events.length} event{preview.events.length !== 1 ? "s" : ""} found ({categories.map(c => `${preview.events.filter(e => e.categoryKey === c.key).length} ${c.label}`).join(", ")})</div>
           {preview.unmatchedColumns.length > 0 && (
             <div style={{ fontSize: 12, color: AMBER, marginBottom: 10 }}>
               These column names don't match anyone in the roster, so they were ignored: {preview.unmatchedColumns.join(", ")}.
@@ -8964,6 +9105,8 @@ function ScreenContestImportPanel({ roster }) {
       {index.length > 0 && (
         <>
           <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 8 }}>Imported sessions</div>
+          <input ref={replaceRef} type="file" accept=".xlsx,.xls,.csv,.dnk" onChange={handleReplace} style={{ display: "none" }} />
+          {replaceMsg && <div style={{ fontSize: 12.5, color: replaceMsg.startsWith("Session updated") ? TEAL : RED, marginBottom: 8 }}>{replaceMsg}</div>}
           {index.slice().reverse().map(s => (
             <div key={s.id} style={{ ...btnRow, marginBottom: 6, cursor: "default" }}>
               {editingId === s.id ? (
@@ -8977,6 +9120,7 @@ function ScreenContestImportPanel({ roster }) {
                 <>
                   <span>{s.label} <span style={{ color: "#5C6470", fontSize: 12 }}>· {s.date} · {s.eventsCount} events</span></span>
                   <div style={{ display: "flex", gap: 10 }}>
+                    <button onClick={() => { setReplaceId(s.id); replaceRef.current && replaceRef.current.click(); }} style={{ background: "none", border: "none", color: AMBER, cursor: "pointer", fontSize: 12.5 }}>Replace file</button>
                     <button onClick={() => startEdit(s)} style={{ background: "none", border: "none", color: AMBER, cursor: "pointer", fontSize: 12.5 }}>Edit</button>
                     {confirmDeleteId === s.id ? (
                       <>
@@ -11438,6 +11582,7 @@ function PlayerScreenContestSection({ playerName, matchFilter }) {
   const { index, sessions, loading } = useScreenContestSessions();
   const { categories } = useScreenContestCategories();
   const { name: tabName } = useScreenContestTabName();
+  const [clipReq, setClipReq] = useState(null);
 
   if (loading || !index.length) return null;
 
@@ -11446,7 +11591,7 @@ function PlayerScreenContestSection({ playerName, matchFilter }) {
   // Contest dont la date correspond à un match sélectionné.
   const selectedDates = matchFilter ? new Set([...matchFilter].map(k => k.split("||")[0])) : null;
   const effectiveIds = selectedDates === null ? index.map(s => s.id) : index.filter(s => selectedDates.has(s.date)).map(s => s.id);
-  const events = effectiveIds.flatMap(id => (sessions[id]?.events) || []);
+  const events = effectiveIds.flatMap(id => ((sessions[id]?.events) || []).map(ev => ({ ...ev, sessionId: id })));
   const stats = computeScreenContestStats(events, [playerName], categories)[playerName];
   if (!stats || stats.total.possible === 0) return null;
 
@@ -11459,17 +11604,18 @@ function PlayerScreenContestSection({ playerName, matchFilter }) {
         {categories.map((cat, ci) => {
           const c = stats[cat.key] || { earned: 0, possible: 0, pct: null };
           return (
-            <div key={cat.key}>
+            <div key={cat.key} title="Click to see the video clips" onClick={() => c.possible > 0 && setClipReq({ title: `${playerName} — ${cat.label}`, events: screenClipEvents(events, playerName, cat.key) })} style={{ cursor: c.possible > 0 ? "pointer" : "default" }}>
               <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 26, color: catColors[ci % catColors.length] }}>{c.pct !== null ? `${Math.round(c.pct)}%` : "–"}</div>
               <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase" }}>{cat.label} {c.possible > 0 ? `(${c.earned}/${c.possible})` : "no data"}</div>
             </div>
           );
         })}
-        <div>
+        <div title="Click to see the video clips" onClick={() => setClipReq({ title: `${playerName} — Total`, events: screenClipEvents(events, playerName, null) })} style={{ cursor: "pointer" }}>
           <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 26, color: AMBER }}>{stats.total.pct !== null ? `${Math.round(stats.total.pct)}%` : "–"}</div>
           <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase" }}>Total {stats.total.possible > 0 ? `(${stats.total.earned}/${stats.total.possible})` : "no data"}</div>
         </div>
       </div>
+      {clipReq && <ScreenClipFlow title={clipReq.title} events={clipReq.events} index={index} categories={categories} onClose={() => setClipReq(null)} />}
     </div>
   );
 }
