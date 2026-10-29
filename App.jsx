@@ -2055,6 +2055,7 @@ function ensureSlideFonts() {
 // Polices importées par le coach (.ttf / .otf / .woff / .woff2) : enregistrées (slide_fonts + slide_font:<id>),
 // déclarées au navigateur via FontFace, donc utilisables dans l'éditeur, le lecteur et l'export vidéo.
 const SLIDE_FONT_REGISTERED = new Set();
+const SLIDE_FONT_DATA = []; // { name, data } : copiées dans le document cloné par html2canvas (sinon police de repli → mots espacés / décalés)
 async function loadCustomSlideFonts() {
   let idx = [];
   try { idx = (await storeGet("slide_fonts")) || []; } catch (e) { return []; }
@@ -2066,6 +2067,7 @@ async function loadCustomSlideFonts() {
       const ff = new FontFace(f.name, `url(${data})`, { weight: "100 900", style: "normal" });
       await ff.load();
       document.fonts.add(ff);
+      SLIDE_FONT_DATA.push({ name: f.name, data });
       SLIDE_FONT_REGISTERED.add(f.id);
     } catch (e) { /* police illisible : ignorée */ }
   }
@@ -2828,7 +2830,22 @@ async function renderSlidePng(slide, data, imgs) {
     await new Promise(r => setTimeout(r, 450));
     undo = await slideSwapRoses(host);
     const { default: html2canvas } = await import("html2canvas");
-    const canvas = await html2canvas(host.firstChild, { backgroundColor: null, scale: 1, useCORS: true, logging: false, width: SLIDE_W, height: SLIDE_H });
+    // html2canvas dessine dans une COPIE du document : si les polices n'y sont pas encore chargées, les mots sont placés avec
+    // une police de repli (plus large) puis dessinés avec la vraie police → espaces énormes, titres décalés ou coupés.
+    // On charge donc les polices dans la copie avant le dessin.
+    const onclone = async (cdoc) => {
+      try {
+        const win = cdoc.defaultView;
+        if (!cdoc.fonts) return;
+        for (const f of SLIDE_FONT_DATA) { try { const ff = new win.FontFace(f.name, `url(${f.data})`, { weight: "100 900", style: "normal" }); await ff.load(); cdoc.fonts.add(ff); } catch (e) { /* ignorée */ } }
+        const link = cdoc.getElementById("slide-gfonts");
+        for (let i = 0; i < 40 && link && !link.sheet; i++) await new Promise(r => setTimeout(r, 100));
+        await Promise.all([...fonts].flatMap(f => [400, 500, 700].map(w => cdoc.fonts.load(`${w} 40px "${f}"`).catch(() => {}))));
+        await cdoc.fonts.ready;
+        await new Promise(r => setTimeout(r, 120));
+      } catch (e) { /* on dessine quand même */ }
+    };
+    const canvas = await html2canvas(host.firstChild, { backgroundColor: null, scale: 1, useCORS: true, logging: false, width: SLIDE_W, height: SLIDE_H, onclone });
     return await new Promise((res, rej) => canvas.toBlob(b => (b ? res(b) : rej(new Error("Slide rendering failed."))), "image/png"));
   } finally {
     undo.forEach(f => f());
