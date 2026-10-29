@@ -4935,6 +4935,7 @@ function buildFixedBoxScorePlayerTiles(box, allBox, playerName) {
   const astLabel = find("ast");
   const stlLabel = find("stl");
   const blkLabel = find("blk");
+  const tovLabel = find("tov");
   const made2Label = find("made2"), missed2Label = find("missed2");
   const made3Label = find("made3"), missed3Label = find("missed3");
   const madeFTLabel = find("madeFT"), missedFTLabel = find("missedFT");
@@ -4983,6 +4984,8 @@ function buildFixedBoxScorePlayerTiles(box, allBox, playerName) {
     { key: "ast", label: "Assists", value: fmt(astLabel), sub: subFor(astLabel), tone: "teal" },
     { key: "stl", label: "Steals", value: fmt(stlLabel), sub: subFor(stlLabel), tone: "teal" },
     { key: "blk", label: "Blocks", value: fmt(blkLabel), sub: subFor(blkLabel), tone: "teal" },
+    // Pertes de balle : moins = mieux, donc le rang #1 est le joueur qui en perd le moins
+    { key: "tov", label: "Turnovers", value: fmt(tovLabel), sub: (tovLabel !== undefined && rankSub(b => { const v = b.averages[tovLabel]; return v === undefined || v === null ? undefined : -v; })) || "average / game", tone: "red" },
     { key: "made2", label: "2Pts Made", value: fmt(made2Label), sub: subFor(made2Label), tone: "teal" },
     { key: "att2", label: "2Pts Attempted", value: att2 !== undefined ? att2.toFixed(1) : "–", sub: rankSub(b => attOf(b, made2Label, missed2Label)) || "average / game", tone: "teal" },
     { key: "pct2", label: "% 2Pts", value: fmt(pct2Label), sub: subFor(pct2Label), tone: "teal" },
@@ -14517,6 +14520,7 @@ const FFBB_BOX_DEFS = [
     ["Assists", s => s.ast, ffbbF1, "teal"],
     ["Steals", s => s.stl, ffbbF1, "teal"],
     ["Blocks", s => s.blk, ffbbF1, "teal"],
+    ["Turnovers", s => s.tov, ffbbF1, "red", true],
     ["2Pts Made", s => s.r2, ffbbF1, "teal"],
     ["2Pts Attempted", s => s.t2, ffbbF1, "teal"],
     ["% 2Pts", s => ffbbPctOf(s.r2, s.t2), ffbbPct, "teal"],
@@ -14546,18 +14550,18 @@ function FfbbBoxScoreTiles({ stats, loading, error, teammates }) {
   // Classement dans l'équipe (même format que le Box Score de nos joueurs : "#N of M team"),
   // parmi les joueurs de l'équipe qui ont des stats FFBB ; ex-aequo = même rang.
   const pool = (teammates || []).filter(Boolean);
-  const rankSub = get => {
+  const rankSub = (get, low) => {
     const mine = get(stats);
     if (mine === null || mine === undefined) return "average / game";
     const vals = pool.map(get).filter(v => v !== null && v !== undefined);
     if (vals.length < 2) return "average / game";
-    return `#${1 + vals.filter(v => v > mine + 1e-9).length} of ${vals.length} team`;
+    return `#${1 + vals.filter(v => (low ? v < mine - 1e-9 : v > mine + 1e-9)).length} of ${vals.length} team`;
   };
   return (
     <div style={{ marginBottom: 26 }}>
       <SectionTitle eyebrow="Source: FFBB NM1 — season average" title="Box Score" />
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-        {defs.map(([label, get, show, tone]) => <StatPill key={label} label={label} value={show(get(stats))} sub={rankSub(get)} tone={tone} />)}
+        {defs.map(([label, get, show, tone, low]) => <StatPill key={label} label={label} value={show(get(stats))} sub={rankSub(get, low)} tone={tone} />)}
       </div>
     </div>
   );
