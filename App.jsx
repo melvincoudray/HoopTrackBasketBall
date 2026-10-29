@@ -4039,6 +4039,33 @@ function useReboundContestTabName() {
   return { name, save };
 }
 
+// Catégories du Screen Contest (1 ou 0 point par événement) — entièrement personnalisables (nom affiché ET mots reconnus
+// dans la colonne "button" du fichier), propres à chaque équipe. Par défaut : Tagg et Box Out,
+// mais le coach peut renommer, changer les mots reconnus, ou en ajouter d'autres si un jour un
+// troisième aspect doit être suivi.
+const DEFAULT_SCREEN_CONTEST_CATEGORIES = [
+  { key: "screenSet", label: "Screen Set", matchValues: ["OFFENSE (GOOD SCREEN SET)", "OFFENSE", "SCREEN SET"], pointDescriptions: ["screen not well set (badly placed or no contact)", "good screen set (well placed and well touched)"] },
+  { key: "coverage", label: "Coverage", matchValues: ["DEFENSE (GOOD COVERAGE)", "DEFENSE", "COVERAGE"], pointDescriptions: ["pick coverage not well executed", "pick coverage well executed"] },
+];
+const DEFAULT_SCREEN_CONTEST_TAB_NAME = "Screen Contest";
+function useScreenContestCategories() {
+  const [categories, setCategories] = useState(DEFAULT_SCREEN_CONTEST_CATEGORIES);
+  useEffect(() => { storeGet("screen_contest_categories").then(v => setCategories(v && v.length ? v : DEFAULT_SCREEN_CONTEST_CATEGORIES)); }, []);
+  async function save(next) { await storeSet("screen_contest_categories", next); setCategories(next); }
+  return { categories, save };
+}
+function useScreenContestTabName() {
+  const [name, setName] = useState(DEFAULT_SCREEN_CONTEST_TAB_NAME);
+  useEffect(() => { storeGet("screen_contest_tab_name").then(v => setName(v || DEFAULT_SCREEN_CONTEST_TAB_NAME)); }, []);
+  async function save(next) { await storeSet("screen_contest_tab_name", next); setName(next); }
+  return { name, save };
+}
+
+// Le Screen Contest vaut 1 ou 0 point par événement (au lieu de 0/1/2 pour le Rebound Contest).
+function computeScreenContestStats(events, playerNames, categories = DEFAULT_SCREEN_CONTEST_CATEGORIES) {
+  return computeReboundContestStats(events, playerNames, categories, 1);
+}
+
 // Lit un fichier de "Rebound Contest" : chaque ligne représente UN événement de rebond, où
 // plusieurs joueurs peuvent être notés simultanément — 3 colonnes par joueur ("Nom 0", "Nom 1",
 // "Nom 2"), une seule vaut "1" pour les joueurs concernés par cet événement précis (indiquant
@@ -4128,7 +4155,7 @@ function computeShootingGridStats(grid, playerScores, filters = {}) {
   return out;
 }
 
-function computeReboundContestStats(events, playerNames, categories = DEFAULT_REBOUND_CONTEST_CATEGORIES) {
+function computeReboundContestStats(events, playerNames, categories = DEFAULT_REBOUND_CONTEST_CATEGORIES, maxPts = 2) {
   const out = {};
   function emptyStats() {
     const s = {};
@@ -4141,7 +4168,7 @@ function computeReboundContestStats(events, playerNames, categories = DEFAULT_RE
       if (!out[name]) out[name] = emptyStats();
       if (!out[name][ev.categoryKey]) out[name][ev.categoryKey] = { earned: 0, possible: 0, count: 0 };
       out[name][ev.categoryKey].earned += pts;
-      out[name][ev.categoryKey].possible += 2;
+      out[name][ev.categoryKey].possible += maxPts;
       out[name][ev.categoryKey].count += 1;
     }
   }
@@ -5628,6 +5655,52 @@ function useReboundContestSessions() {
   return { index, sessions, loading, addSession, deleteSession, editSession, reload: load };
 }
 
+function useScreenContestSessions() {
+  const [index, setIndex] = useState([]);
+  const [sessions, setSessions] = useState({}); // { id: { id, label, date, events } }
+  const [loading, setLoading] = useState(true);
+
+  async function load() {
+    setLoading(true);
+    const idx = (await storeGet("screen_contest_index")) || [];
+    setIndex(idx);
+    const loaded = {};
+    for (const s of idx) {
+      const rec = await storeGet("screen_contest:" + s.id);
+      if (rec) loaded[s.id] = rec;
+    }
+    setSessions(loaded);
+    setLoading(false);
+  }
+  useEffect(() => { load(); }, []);
+
+  async function addSession({ label, date, events }) {
+    const id = uid();
+    const record = { id, label, date, events };
+    await storeSet("screen_contest:" + id, record);
+    const newIndex = [...index, { id, label, date, eventsCount: events.length }];
+    await storeSet("screen_contest_index", newIndex);
+    setIndex(newIndex);
+    setSessions(s => ({ ...s, [id]: record }));
+    return id;
+  }
+  async function deleteSession(id) {
+    await storeDelete("screen_contest:" + id);
+    const newIndex = index.filter(s => s.id !== id);
+    await storeSet("screen_contest_index", newIndex);
+    setIndex(newIndex);
+    setSessions(s => { const n = { ...s }; delete n[id]; return n; });
+  }
+  async function editSession(id, changes) {
+    const newIndex = index.map(s => s.id === id ? { ...s, ...changes } : s);
+    await storeSet("screen_contest_index", newIndex);
+    setIndex(newIndex);
+    setSessions(s => ({ ...s, [id]: { ...s[id], ...changes } }));
+  }
+
+  return { index, sessions, loading, addSession, deleteSession, editSession, reload: load };
+}
+
 function useAllBoxScores(filterKeys) {
   const [byPlayer, setByPlayer] = useState({});
   const [loading, setLoading] = useState(true);
@@ -5877,6 +5950,22 @@ async function loadBadgeData(roster) {
     if (st.total?.possible > 0) o["% Rebound Contest (total)"] = Math.round(st.total.pct);
     return o;
   };
+  // Screen Contest : mêmes calculs (clés "% <catégorie>" et "% Screen Contest (total)").
+  const scIdx = (await storeGet("screen_contest_index")) || [];
+  const scCats = ((await storeGet("screen_contest_categories")) || []);
+  const scCategories = scCats.length ? scCats : DEFAULT_SCREEN_CONTEST_CATEGORIES;
+  const scSessionsAll = [];
+  for (const s of scIdx) { const rec = await storeGet("screen_contest:" + s.id); if (rec) scSessionsAll.push(rec); }
+  const scStatsFor = (name, date) => {
+    const events = scSessionsAll.filter(s => s.date === date).flatMap(s => s.events || []);
+    if (!events.length) return {};
+    const st = computeScreenContestStats(events, [name], scCategories)[name];
+    if (!st) return {};
+    const o = {};
+    scCategories.forEach(cat => { const c = st[cat.key]; if (c && c.possible > 0) o[`% ${cat.label}`] = Math.round(c.pct); });
+    if (st.total?.possible > 0) o["% Screen Contest (total)"] = Math.round(st.total.pct);
+    return o;
+  };
   const out = {}; names.forEach(n => { out[n] = []; });
 
   // Titres d'équipe : meilleure moyenne par match.
@@ -5913,7 +6002,7 @@ async function loadBadgeData(roster) {
     const evalMap = {};
     games[n].forEach(g => { evalMap[g.key] = { date: g.date, stats: { ...g.stats } }; });
     Object.entries(codingByKey[n]).forEach(([k, c]) => { const e = evalMap[k] || (evalMap[k] = { date: c.date, stats: {} }); Object.assign(e.stats, c.stats); });
-    Object.values(evalMap).forEach(e => { Object.assign(e.stats, rcStatsFor(n, e.date)); });
+    Object.values(evalMap).forEach(e => { Object.assign(e.stats, rcStatsFor(n, e.date), scStatsFor(n, e.date)); });
     const evalGames = Object.values(evalMap).sort((a, b) => a.date.localeCompare(b.date));
     const pcts = evalGames.map((g, gi) => {
       let ok = 0, tot = 0;
@@ -6586,6 +6675,8 @@ export default function App() {
             <div style={{ height: 26 }} />
             <ReboundContestSettings />
             <div style={{ height: 26 }} />
+            <ScreenContestSettings />
+            <div style={{ height: 26 }} />
             <BoxColumnAliasesSettings />
           </div>
         )}
@@ -7084,7 +7175,7 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
                 </label>
               ))}
               <div style={{ height: 1, background: LINE, margin: "4px 0" }} />
-              {[["standings", "Team — Standings"], ["teamPlay", "Team — Team Play"], ["advanced", "Team — Advanced"], ["reboundContest", "Team — Rebound Contest"], ["shootingGrid", "Team — Shooting Grid"], ["resources", "Team — Resources"]].map(([key, label]) => (
+              {[["standings", "Team — Standings"], ["teamPlay", "Team — Team Play"], ["advanced", "Team — Advanced"], ["reboundContest", "Team — Rebound Contest"], ["screenContest", "Team — Screen Contest"], ["shootingGrid", "Team — Shooting Grid"], ["resources", "Team — Resources"]].map(([key, label]) => (
                 <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, cursor: "pointer" }}>
                   <input type="checkbox" checked={visibility.team[key]} onChange={() => toggleTeamSection(key)} /> {label}
                 </label>
@@ -8509,6 +8600,179 @@ function ReboundContestTab({ roster, isCoach, teamLogo }) {
   );
 }
 
+function ScreenContestTab({ roster, isCoach, teamLogo }) {
+  const { index, sessions, loading } = useScreenContestSessions();
+  const { categories } = useScreenContestCategories();
+  const { name: tabName } = useScreenContestTabName();
+  const [selectedIds, setSelectedIds] = useState(null); // null = toutes les sessions
+  const userTouchedRef = useRef(false);
+  // Par défaut, seule la dernière session AJOUTÉE (pas forcément la plus récente en date, si
+  // le coach rattrape un import en retard) est sélectionnée — le coach peut ensuite en
+  // choisir d'autres, ou "All sessions", librement. On ne touche plus à ce choix une fois
+  // que l'utilisateur l'a modifié lui-même.
+  useEffect(() => {
+    if (userTouchedRef.current || index.length === 0) return;
+    setSelectedIds(new Set([index[index.length - 1].id]));
+  }, [index.length]);
+  function userSetSelectedIds(next) { userTouchedRef.current = true; setSelectedIds(next); }
+
+  const effectiveIds = selectedIds === null ? index.map(s => s.id) : [...selectedIds];
+  const allEvents = useMemo(() => {
+    return effectiveIds.flatMap(id => (sessions[id]?.events) || []);
+  }, [effectiveIds.join(","), sessions]);
+
+  const stats = useMemo(() => computeScreenContestStats(allEvents, roster.map(p => p.name), categories), [allEvents, roster, categories]);
+  const ranked = roster
+    .map(p => ({ ...p, stats: stats[p.name] }))
+    .filter(p => p.stats && p.stats.total.possible > 0)
+    .sort((a, b) => (b.stats.total.pct ?? -1) - (a.stats.total.pct ?? -1));
+
+  // Carte "Team Total", toujours en dernière position — additionne les points obtenus et
+  // possibles de TOUS les joueurs pour chaque catégorie, puis calcule le pourcentage à partir
+  // de cette somme (jamais une moyenne des pourcentages individuels, ce qui serait faux dès que
+  // les joueurs n'ont pas le même nombre d'occasions).
+  const teamTotal = useMemo(() => {
+    const catTotals = {};
+    for (const cat of categories) catTotals[cat.key] = { earned: 0, possible: 0 };
+    let grandEarned = 0, grandPossible = 0;
+    for (const p of ranked) {
+      for (const cat of categories) {
+        const c = p.stats[cat.key];
+        if (!c) continue;
+        catTotals[cat.key].earned += c.earned;
+        catTotals[cat.key].possible += c.possible;
+      }
+      grandEarned += p.stats.total.earned;
+      grandPossible += p.stats.total.possible;
+    }
+    for (const cat of categories) {
+      const c = catTotals[cat.key];
+      c.pct = c.possible > 0 ? (100 * c.earned) / c.possible : null;
+    }
+    return { ...catTotals, total: { earned: grandEarned, possible: grandPossible, pct: grandPossible > 0 ? (100 * grandEarned) / grandPossible : null } };
+  }, [ranked, categories]);
+
+  if (loading) return <div style={{ color: "#5C6470", fontSize: 13 }}>Loading…</div>;
+  if (!index.length) return <EmptyState text={`No ${tabName} session imported yet — import one from the 'Import' tab.`} />;
+
+  // Couleurs cycliques pour les catégories au-delà des 2 par défaut (Tagg=vert, Box Out=bleu),
+  // pour que toute catégorie ajoutée par le coach reste visuellement distincte.
+  const catColors = [TEAL, "#4A90D9", "#B15FE0", "#E4231C", "#2FBF9C", "#F2A93B"];
+
+  return (
+    <div>
+      <SectionTitle eyebrow="Team" title={`${tabName} — ${categories.map(c => c.label).join(" & ")}`} />
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 20, flexWrap: "wrap" }}>
+        <button onClick={() => userSetSelectedIds(selectedIds === null ? new Set() : null)} style={{
+          padding: "8px 14px", background: selectedIds === null ? PANEL2 : "transparent", border: `1px solid ${LINE}`, borderRadius: 8,
+          color: PAPER, fontSize: 12.5, fontWeight: 600, cursor: "pointer", fontFamily: "inherit",
+        }}>
+          {selectedIds === null ? `All sessions (${index.length})` : `${effectiveIds.length} session${effectiveIds.length !== 1 ? "s" : ""} selected`}
+        </button>
+        {index.map(s => {
+          const checked = effectiveIds.includes(s.id);
+          return (
+            <button key={s.id} onClick={() => {
+              const cur = selectedIds === null ? new Set(index.map(x => x.id)) : new Set(selectedIds);
+              if (cur.has(s.id)) cur.delete(s.id); else cur.add(s.id);
+              userSetSelectedIds(cur.size === index.length ? null : cur);
+            }} style={{
+              padding: "6px 10px", borderRadius: 6, fontSize: 11.5, cursor: "pointer", fontFamily: "inherit",
+              background: checked ? AMBER : "transparent", color: checked ? "#1a1200" : "#8B93A1", border: `1px solid ${checked ? AMBER : LINE}`,
+            }}>
+              {s.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {ranked.length === 0 ? (
+        <EmptyState text="No player has data for the selected session(s)." />
+      ) : (
+        // Grille responsive : ~4 cartes par ligne sur ordinateur (colonnes de 220px minimum
+        // dans un conteneur large), et une seule visible à la fois sur mobile (l'écran est
+        // trop étroit pour loger 2 colonnes de 220px) — demandé par l'utilisateur.
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(220px, 1fr))", gap: 16 }}>
+          {ranked.map((p, i) => (
+            <div key={p.id} style={{ position: "relative", display: "flex", flexDirection: "column", alignItems: "center", padding: "20px 16px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 14, textAlign: "center" }}>
+              <div style={{ position: "absolute", top: 12, left: 12, width: 24, height: 24, borderRadius: "50%", background: i === 0 ? AMBER : PANEL2, color: i === 0 ? "#1a1200" : "#8B93A1", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 800, fontFamily: "ui-monospace, monospace" }}>{i + 1}</div>
+              <PlayerAvatar playerName={p.name} size={140} />
+              <div style={{ fontWeight: 700, fontSize: 16, marginTop: 14 }}>{p.name}</div>
+              <div style={{ fontSize: 12, color: "#5C6470", marginBottom: 16 }}>{p.position || ""}</div>
+              <div style={{ display: "flex", justifyContent: "center", gap: 20, width: "100%", flexWrap: "wrap" }}>
+                {/* Une colonne par catégorie configurée (2 par défaut, mais s'adapte si le
+                    coach en ajoute) — demandé par l'utilisateur : afficher aussi le total en
+                    fraction (ex. "13/16"), pas seulement le pourcentage. */}
+                {categories.map((cat, ci) => {
+                  const c = p.stats[cat.key] || { earned: 0, possible: 0, pct: null };
+                  return (
+                    <div key={cat.key} style={{ textAlign: "center" }}>
+                      <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 17, color: catColors[ci % catColors.length] }}>{c.pct !== null ? `${Math.round(c.pct)}%` : "–"}</div>
+                      <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 11, color: "#8B93A1" }}>{c.possible > 0 ? `${c.earned}/${c.possible}` : "–"}</div>
+                      <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>{cat.label}</div>
+                    </div>
+                  );
+                })}
+                <div style={{ textAlign: "center" }}>
+                  <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 19, color: AMBER }}>{p.stats.total.pct !== null ? `${Math.round(p.stats.total.pct)}%` : "–"}</div>
+                  <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 11, color: "#8B93A1" }}>{p.stats.total.possible > 0 ? `${p.stats.total.earned}/${p.stats.total.possible}` : "–"}</div>
+                  <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>Total</div>
+                </div>
+              </div>
+            </div>
+          ))}
+
+          {/* Carte "Team Total", toujours en dernière position (demandé par l'utilisateur) —
+              additionne les points de TOUS les joueurs avant de calculer le pourcentage, jamais
+              une moyenne des pourcentages individuels. Distinguée visuellement d'une carte
+              joueur (bordure ambre, icône au lieu d'un numéro de classement). */}
+          <div style={{ position: "relative", display: "flex", flexDirection: "column", alignItems: "center", padding: "20px 16px", background: PANEL, border: `2px solid ${AMBER}`, borderRadius: 14, textAlign: "center" }}>
+            <div style={{ position: "absolute", top: 12, left: 12, width: 24, height: 24, borderRadius: "50%", background: AMBER, color: "#1a1200", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <Users size={13} />
+            </div>
+            <div style={{ width: 140, height: 140, borderRadius: 16, background: PANEL2, border: `1px solid ${LINE}`, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden" }}>
+              {teamLogo ? <img src={teamLogo} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }} /> : <Users size={56} color={AMBER} />}
+            </div>
+            <div style={{ fontWeight: 700, fontSize: 16, marginTop: 14 }}>Team Total</div>
+            <div style={{ fontSize: 12, color: "#5C6470", marginBottom: 16 }}>All players combined</div>
+            <div style={{ display: "flex", justifyContent: "center", gap: 20, width: "100%", flexWrap: "wrap" }}>
+              {categories.map((cat, ci) => {
+                const c = teamTotal[cat.key] || { earned: 0, possible: 0, pct: null };
+                return (
+                  <div key={cat.key} style={{ textAlign: "center" }}>
+                    <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 17, color: catColors[ci % catColors.length] }}>{c.pct !== null ? `${Math.round(c.pct)}%` : "–"}</div>
+                    <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 11, color: "#8B93A1" }}>{c.possible > 0 ? `${c.earned}/${c.possible}` : "–"}</div>
+                    <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>{cat.label}</div>
+                  </div>
+                );
+              })}
+              <div style={{ textAlign: "center" }}>
+                <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 19, color: AMBER }}>{teamTotal.total.pct !== null ? `${Math.round(teamTotal.total.pct)}%` : "–"}</div>
+                <div style={{ fontFamily: "ui-monospace, monospace", fontSize: 11, color: "#8B93A1" }}>{teamTotal.total.possible > 0 ? `${teamTotal.total.earned}/${teamTotal.total.possible}` : "–"}</div>
+                <div style={{ fontSize: 10, color: "#5C6470", textTransform: "uppercase" }}>Total</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Légende des points, uniquement ici (bas du classement) — demandé par l'utilisateur,
+          pas dans la fiche joueur. Une carte par catégorie configurée (2 par défaut). */}
+      <div style={{ marginTop: 24, display: "flex", gap: 16, flexWrap: "wrap" }}>
+        {categories.map(cat => (
+          <div key={cat.key} style={{ padding: 16, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, flex: "1 1 260px", maxWidth: 380 }}>
+            <div style={{ fontSize: 12, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 10 }}>{cat.label} scoring</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12.5, color: "#D8DCE2" }}>
+              <div><span style={{ color: TEAL, fontWeight: 700, fontFamily: "ui-monospace, monospace" }}>1 pt</span> — {cat.pointDescriptions?.[1] || "—"}</div>
+              <div><span style={{ color: RED, fontWeight: 700, fontFamily: "ui-monospace, monospace" }}>0 pts</span> — {cat.pointDescriptions?.[0] || "—"}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // Import d'un fichier "Rebound Contest", avec aperçu avant confirmation, comme
 // pour les autres imports de l'app.
 function ReboundContestImportPanel({ roster }) {
@@ -8577,6 +8841,117 @@ function ReboundContestImportPanel({ roster }) {
           )}
           <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
             <input value={label} onChange={e => setLabel(e.target.value)} placeholder="Session name (e.g. Practice 18 Aout)" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", flex: "1 1 240px" }} />
+            <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 160 }} />
+          </div>
+          <div style={{ display: "flex", gap: 10 }}>
+            <button disabled={busy} onClick={confirmImport} style={{ ...btnPrimary, width: "auto", padding: "9px 18px" }}>{busy ? "…" : "Save session"}</button>
+            <button onClick={() => setPreview(null)} style={btnSecondary}>Cancel</button>
+          </div>
+        </div>
+      )}
+
+      {index.length > 0 && (
+        <>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 8 }}>Imported sessions</div>
+          {index.slice().reverse().map(s => (
+            <div key={s.id} style={{ ...btnRow, marginBottom: 6, cursor: "default" }}>
+              {editingId === s.id ? (
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flex: 1, flexWrap: "wrap" }}>
+                  <input value={editLabel} onChange={e => setEditLabel(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", flex: "1 1 200px" }} />
+                  <input type="date" value={editDate} onChange={e => setEditDate(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 150 }} />
+                  <button onClick={confirmEdit} style={{ ...btnPrimary, width: "auto", padding: "7px 14px" }}>Save</button>
+                  <button onClick={() => setEditingId(null)} style={btnSecondary}>Cancel</button>
+                </div>
+              ) : (
+                <>
+                  <span>{s.label} <span style={{ color: "#5C6470", fontSize: 12 }}>· {s.date} · {s.eventsCount} events</span></span>
+                  <div style={{ display: "flex", gap: 10 }}>
+                    <button onClick={() => startEdit(s)} style={{ background: "none", border: "none", color: AMBER, cursor: "pointer", fontSize: 12.5 }}>Edit</button>
+                    {confirmDeleteId === s.id ? (
+                      <>
+                        <button onClick={() => deleteSession(s.id).then(() => setConfirmDeleteId(null))} style={{ background: "none", border: "none", color: RED, cursor: "pointer", fontSize: 12.5 }}>Confirm</button>
+                        <button onClick={() => setConfirmDeleteId(null)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", fontSize: 12.5 }}>Cancel</button>
+                      </>
+                    ) : (
+                      <button onClick={() => setConfirmDeleteId(s.id)} style={{ background: "none", border: "none", color: RED, cursor: "pointer", fontSize: 12.5 }}>Delete</button>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
+function ScreenContestImportPanel({ roster }) {
+  const { index, sessions, deleteSession, editSession, addSession } = useScreenContestSessions();
+  const { categories } = useScreenContestCategories();
+  const { name: tabName } = useScreenContestTabName();
+  const [preview, setPreview] = useState(null);
+  const [fileErr, setFileErr] = useState("");
+  const [label, setLabel] = useState("");
+  const [date, setDate] = useState(todayLocal());
+  const [busy, setBusy] = useState(false);
+  const [confirmDeleteId, setConfirmDeleteId] = useState(null);
+  const [editingId, setEditingId] = useState(null);
+  const [editLabel, setEditLabel] = useState(""), [editDate, setEditDate] = useState("");
+  const fileRef = useRef();
+
+  async function handleFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setFileErr(""); setPreview(null);
+    try {
+      const buf = await file.arrayBuffer();
+      const { events, unmatchedColumns } = parseReboundContestFile(buf, roster, categories);
+      if (!events.length) throw new Error(`No ${categories.map(c => c.label).join("/")} event found in this file — check the "button" column (recognized words: ${categories.flatMap(c => c.matchValues).join(", ")}) and the player columns ("Name 0", "Name 1").`);
+      // Pré-remplit le libellé à partir du nom du fichier (ex. "Practice_18_Aout_export.csv"
+      // -> "Practice 18 Aout"), comme demandé implicitement par l'exemple envoyé.
+      const guessedLabel = file.name.replace(/\.(csv|xlsx?|xls)$/i, "").replace(/_export$/i, "").replace(/_/g, " ").trim();
+      setLabel(guessedLabel);
+      setPreview({ events, unmatchedColumns });
+    } catch (err) {
+      setFileErr(err.message || "Unable to read this file.");
+    }
+    if (fileRef.current) fileRef.current.value = "";
+  }
+
+  async function confirmImport() {
+    if (!preview) return;
+    setBusy(true);
+    await addSession({ label: label.trim() || tabName, date, events: preview.events });
+    setBusy(false); setPreview(null); setLabel("");
+  }
+
+  function startEdit(s) { setEditingId(s.id); setEditLabel(s.label); setEditDate(s.date); }
+  async function confirmEdit() { await editSession(editingId, { label: editLabel.trim(), date: editDate }); setEditingId(null); }
+
+  return (
+    <div>
+      <SectionTitle eyebrow={tabName} title={`Import a ${categories.map(c => c.label).join(" / ")} session`} />
+      <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 16, maxWidth: 600 }}>
+        One row per screen event, with a "button" column ({categories.map(c => c.matchValues.join("/")).join(" or ")}) and 2 columns per
+        player ("Name 0", "Name 1") marking the point earned on that event (1 or 0).
+      </div>
+
+      {!preview ? (
+        <div style={{ border: `1px dashed ${LINE}`, borderRadius: 10, padding: 20, textAlign: "center", marginBottom: 20 }}>
+          <input ref={fileRef} type="file" accept=".xlsx,.xls,.csv" onChange={handleFile} style={{ color: "#8B93A1", fontSize: 13 }} />
+          {fileErr && <div style={{ color: RED, fontSize: 12.5, marginTop: 10 }}>{fileErr}</div>}
+        </div>
+      ) : (
+        <div style={{ background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 10, padding: 16, marginBottom: 20 }}>
+          <div style={{ fontSize: 13, color: TEAL, marginBottom: 10 }}>{preview.events.length} event{preview.events.length !== 1 ? "s" : ""} found ({categories.map(c => `${preview.events.filter(e => e.categoryKey === c.key).length} ${c.label}`).join(", ")})</div>
+          {preview.unmatchedColumns.length > 0 && (
+            <div style={{ fontSize: 12, color: AMBER, marginBottom: 10 }}>
+              These column names don't match anyone in the roster, so they were ignored: {preview.unmatchedColumns.join(", ")}.
+            </div>
+          )}
+          <div style={{ display: "flex", gap: 10, marginBottom: 12, flexWrap: "wrap" }}>
+            <input value={label} onChange={e => setLabel(e.target.value)} placeholder="Session name (e.g. Match Rennes)" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", flex: "1 1 240px" }} />
             <input type="date" value={date} onChange={e => setDate(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 160 }} />
           </div>
           <div style={{ display: "flex", gap: 10 }}>
@@ -8847,6 +9222,8 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatc
 
       <div style={{ height: 34 }} />
       <ReboundContestImportPanel roster={roster} />
+      <div style={{ height: 34 }} />
+      <ScreenContestImportPanel roster={roster} />
     </div>
   );
 }
@@ -9584,6 +9961,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
                 Stats, juste sous le Shot chart — pas dans Role. Corrélée au(x) match(s)
                 sélectionné(s) au-dessus (matchFilter), pas à sa propre sélection locale. */}
             <PlayerReboundContestSection playerName={playerName} matchFilter={matchFilter} />
+            <PlayerScreenContestSection playerName={playerName} matchFilter={matchFilter} />
 
             {position && (
               <>
@@ -10201,7 +10579,7 @@ function useObjectives(playerName) {
   return { objectives, loading, save, remove };
 }
 
-function ObjectiveForm({ initial, linkableStats, reboundContestKeys = [], onSave, onCancel, busy }) {
+function ObjectiveForm({ initial, linkableStats, reboundContestKeys = [], screenContestKeys = [], onSave, onCancel, busy }) {
   const [description, setDescription] = useState(initial?.description || "");
   const [direction, setDirection] = useState(initial?.direction || "up");
   const [linkedStat, setLinkedStat] = useState(resolveStatKey(linkableStats, initial?.linkedStat) || "");
@@ -10217,7 +10595,7 @@ function ObjectiveForm({ initial, linkableStats, reboundContestKeys = [], onSave
     if (!initial && l && linkableStats[l] !== undefined) setStartValue(Number(linkableStats[l].toFixed(2)));
   }
 
-  const rcKeySet = new Set(reboundContestKeys);
+  const rcKeySet = new Set([...reboundContestKeys, ...screenContestKeys]);
   const boxKeys = Object.keys(linkableStats).filter(k => !k.startsWith("[") && !rcKeySet.has(k));
   const codingKeys = Object.keys(linkableStats).filter(k => k.startsWith("["));
 
@@ -10254,6 +10632,11 @@ function ObjectiveForm({ initial, linkableStats, reboundContestKeys = [], onSave
             {reboundContestKeys.length > 0 && (
               <optgroup label="Rebound Contest">
                 {reboundContestKeys.map(l => <option key={l} value={l}>{l}</option>)}
+              </optgroup>
+            )}
+            {screenContestKeys.length > 0 && (
+              <optgroup label="Screen Contest">
+                {screenContestKeys.map(l => <option key={l} value={l}>{l}</option>)}
               </optgroup>
             )}
           </select>
@@ -10391,6 +10774,21 @@ function ObjectivesPanel({ playerName, isCoach, box, off, def, matchFilter }) {
     if (stats.total?.possible > 0) out["% Rebound Contest (total)"] = Math.round(stats.total.pct);
     return out;
   }, [rcLoading, rcIndex, rcSessions, rcCategories, playerName, matchFilter]);
+  // Screen Contest : mêmes principes que ci-dessus (sessions filtrées par la date des matchs sélectionnés).
+  const { index: scIndex, sessions: scSessions, loading: scLoading } = useScreenContestSessions();
+  const { categories: scCategories } = useScreenContestCategories();
+  const screenContestStats = useMemo(() => {
+    if (scLoading || !scIndex.length) return {};
+    const selectedDates = matchFilter ? new Set([...matchFilter].map(k => k.split("||")[0])) : null;
+    const effectiveIds = selectedDates === null ? scIndex.map(s => s.id) : scIndex.filter(s => selectedDates.has(s.date)).map(s => s.id);
+    const events = effectiveIds.flatMap(id => (scSessions[id]?.events) || []);
+    const stats = computeScreenContestStats(events, [playerName], scCategories)[playerName];
+    if (!stats) return {};
+    const out = {};
+    scCategories.forEach(cat => { const c = stats[cat.key]; if (c && c.possible > 0) out[`% ${cat.label}`] = Math.round(c.pct); });
+    if (stats.total?.possible > 0) out["% Screen Contest (total)"] = Math.round(stats.total.pct);
+    return out;
+  }, [scLoading, scIndex, scSessions, scCategories, playerName, matchFilter]);
   // Tirs TENTÉS (2pts, 3pts, LF) : le box score ne donne que réussis / manqués — on les additionne pour pouvoir lier un objectif.
   const attemptStats = useMemo(() => {
     const out = {};
@@ -10401,7 +10799,7 @@ function ObjectivesPanel({ playerName, isCoach, box, off, def, matchFilter }) {
     });
     return out;
   }, [box.averages, box.statLabels]);
-  const linkableStats = useMemo(() => ({ ...box.averages, ...attemptStats, ...codingStats, ...reboundContestStats }), [box.averages, attemptStats, codingStats, reboundContestStats]);
+  const linkableStats = useMemo(() => ({ ...box.averages, ...attemptStats, ...codingStats, ...reboundContestStats, ...screenContestStats }), [box.averages, attemptStats, codingStats, reboundContestStats, screenContestStats]);
 
   if (loading) return <EmptyState text="Loading…" />;
 
@@ -10422,6 +10820,7 @@ function ObjectivesPanel({ playerName, isCoach, box, off, def, matchFilter }) {
           initial={editing === "new" ? null : editing}
           linkableStats={linkableStats}
           reboundContestKeys={Object.keys(reboundContestStats)}
+          screenContestKeys={Object.keys(screenContestStats)}
           busy={busy}
           onCancel={() => setEditing(null)}
           onSave={async (obj) => { setBusy(true); await save(obj); setBusy(false); setEditing(null); }}
@@ -10756,7 +11155,7 @@ const MENTAL_CRITERIA = [
 const DEFAULT_VISIBILITY = {
   tabs: { players: true, team: true, scouting: true, planning: true, draw: false, montage: true },
   playerDetail: { stats: true, objectives: true, training: true, mental: true, wellness: true, role: true, meetings: true },
-  team: { standings: true, teamPlay: true, advanced: true, resources: true, reboundContest: true, shootingGrid: true },
+  team: { standings: true, teamPlay: true, advanced: true, resources: true, reboundContest: true, screenContest: true, shootingGrid: true },
   // Demandé par l'utilisateur : Comparison / Scouting Report / Observation, chacune
   // décochable séparément (auparavant, "Observation" était cachée aux joueurs de façon figée
   // dans le code, sans case à cocher — et les deux autres restaient toujours visibles).
@@ -11008,6 +11407,47 @@ function PlayerReboundContestSection({ playerName, matchFilter }) {
   const effectiveIds = selectedDates === null ? index.map(s => s.id) : index.filter(s => selectedDates.has(s.date)).map(s => s.id);
   const events = effectiveIds.flatMap(id => (sessions[id]?.events) || []);
   const stats = computeReboundContestStats(events, [playerName], categories)[playerName];
+  if (!stats || stats.total.possible === 0) return null;
+
+  const catColors = [TEAL, "#4A90D9", "#B15FE0", "#E4231C", "#2FBF9C", "#F2A93B"];
+
+  return (
+    <div>
+      <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 10 }}>{tabName}</div>
+      <div style={{ display: "flex", gap: 26, flexWrap: "wrap" }}>
+        {categories.map((cat, ci) => {
+          const c = stats[cat.key] || { earned: 0, possible: 0, pct: null };
+          return (
+            <div key={cat.key}>
+              <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 26, color: catColors[ci % catColors.length] }}>{c.pct !== null ? `${Math.round(c.pct)}%` : "–"}</div>
+              <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase" }}>{cat.label} {c.possible > 0 ? `(${c.earned}/${c.possible})` : "no data"}</div>
+            </div>
+          );
+        })}
+        <div>
+          <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 800, fontSize: 26, color: AMBER }}>{stats.total.pct !== null ? `${Math.round(stats.total.pct)}%` : "–"}</div>
+          <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase" }}>Total {stats.total.possible > 0 ? `(${stats.total.earned}/${stats.total.possible})` : "no data"}</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+
+function PlayerScreenContestSection({ playerName, matchFilter }) {
+  const { index, sessions, loading } = useScreenContestSessions();
+  const { categories } = useScreenContestCategories();
+  const { name: tabName } = useScreenContestTabName();
+
+  if (loading || !index.length) return null;
+
+  // "matchFilter" est soit null (tous les matchs sélectionnés), soit un Set de clés
+  // "date||adversaire" — on ne garde ici que la date, pour ne retenir que les sessions Rebound
+  // Contest dont la date correspond à un match sélectionné.
+  const selectedDates = matchFilter ? new Set([...matchFilter].map(k => k.split("||")[0])) : null;
+  const effectiveIds = selectedDates === null ? index.map(s => s.id) : index.filter(s => selectedDates.has(s.date)).map(s => s.id);
+  const events = effectiveIds.flatMap(id => (sessions[id]?.events) || []);
+  const stats = computeScreenContestStats(events, [playerName], categories)[playerName];
   if (!stats || stats.total.possible === 0) return null;
 
   const catColors = [TEAL, "#4A90D9", "#B15FE0", "#E4231C", "#2FBF9C", "#F2A93B"];
@@ -16152,6 +16592,96 @@ function ReboundContestSettings() {
   );
 }
 
+function ScreenContestSettings() {
+  const { name: tabName, save: saveTabName } = useScreenContestTabName();
+  const { categories, save: saveCategories } = useScreenContestCategories();
+  const [draftName, setDraftName] = useState(tabName);
+  const [draftCats, setDraftCats] = useState(categories);
+  const [confirmRemoveIdx, setConfirmRemoveIdx] = useState(null);
+  useEffect(() => setDraftName(tabName), [tabName]);
+  useEffect(() => setDraftCats(categories), [categories]);
+  const nameDirty = draftName !== tabName;
+  const catsDirty = JSON.stringify(draftCats) !== JSON.stringify(categories);
+
+  function updateCat(idx, field, value) {
+    setDraftCats(cats => cats.map((c, i) => i === idx ? { ...c, [field]: value } : c));
+  }
+  function updateMatchValues(idx, text) {
+    // Champ texte séparé par des virgules -> tableau de mots reconnus.
+    updateCat(idx, "matchValues", text.split(",").map(s => s.trim()).filter(Boolean));
+  }
+  function addCategory() {
+    const n = draftCats.length + 1;
+    setDraftCats(cats => [...cats, { key: "custom" + Date.now(), label: `Category ${n}`, matchValues: [], pointDescriptions: ["", ""] }]);
+  }
+  function removeCategory(idx) {
+    setDraftCats(cats => cats.filter((_, i) => i !== idx));
+  }
+
+  return (
+    <div>
+      <SectionTitle eyebrow="Settings" title="Screen Contest" />
+      <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 16, maxWidth: 600 }}>
+        Rename the tab itself, and for each category, its label, the words recognized in the
+        imported file's "button" column, and the description of each point value. Add or remove
+        categories entirely if needed. Specific to this team.
+      </div>
+
+      <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12.5, color: "#8B93A1", marginBottom: 20, maxWidth: 280 }}>
+        Tab name
+        <input value={draftName} onChange={e => setDraftName(e.target.value)}
+          style={{ padding: "8px 12px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, fontFamily: "inherit" }} />
+      </label>
+      {nameDirty && (
+        <button onClick={() => saveTabName(draftName)} style={{ marginBottom: 20, padding: "8px 16px", background: AMBER, border: "none", borderRadius: 8, color: "#1a1200", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Save tab name</button>
+      )}
+
+      <div style={{ display: "flex", flexDirection: "column", gap: 14, marginBottom: 16 }}>
+        {draftCats.map((cat, i) => (
+          <div key={cat.key} style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 16 }}>
+            <div style={{ display: "flex", gap: 12, flexWrap: "wrap", marginBottom: 10 }}>
+              <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12, color: "#8B93A1", flex: "1 1 160px" }}>
+                Label
+                <input value={cat.label} onChange={e => updateCat(i, "label", e.target.value)}
+                  style={{ padding: "7px 10px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 7, color: PAPER, fontFamily: "inherit" }} />
+              </label>
+              <label style={{ display: "flex", flexDirection: "column", gap: 6, fontSize: 12, color: "#8B93A1", flex: "2 1 240px" }}>
+                Recognized words in the file (comma-separated)
+                <input value={cat.matchValues.join(", ")} onChange={e => updateMatchValues(i, e.target.value)}
+                  style={{ padding: "7px 10px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 7, color: PAPER, fontFamily: "inherit" }} />
+              </label>
+              {confirmRemoveIdx === i ? (
+                <div style={{ display: "flex", gap: 6, alignSelf: "flex-end" }}>
+                  <button onClick={() => { removeCategory(i); setConfirmRemoveIdx(null); }} style={{ padding: "7px 12px", background: RED, border: "none", borderRadius: 7, color: "#fff", cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>Confirm</button>
+                  <button onClick={() => setConfirmRemoveIdx(null)} style={{ padding: "7px 12px", background: "none", border: `1px solid ${LINE}`, borderRadius: 7, color: "#8B93A1", cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>Cancel</button>
+                </div>
+              ) : (
+                <button onClick={() => setConfirmRemoveIdx(i)} style={{ alignSelf: "flex-end", padding: "7px 12px", background: "none", border: `1px solid ${RED}`, borderRadius: 7, color: RED, cursor: "pointer", fontFamily: "inherit", fontSize: 12 }}>Remove</button>
+              )}
+            </div>
+            <div style={{ fontSize: 11, color: "#5C6470", marginBottom: 6 }}>Point legend (shown under the ranking)</div>
+            {[1, 0].map(pts => (
+              <input key={pts} value={cat.pointDescriptions?.[pts] || ""} onChange={e => {
+                const next = [...(cat.pointDescriptions || ["", ""])];
+                next[pts] = e.target.value;
+                updateCat(i, "pointDescriptions", next);
+              }} placeholder={`${pts} pt${pts !== 1 ? "s" : ""} description`}
+                style={{ width: "100%", padding: "6px 10px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 7, color: PAPER, fontFamily: "inherit", fontSize: 12.5, marginBottom: 6 }} />
+            ))}
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: "flex", gap: 10 }}>
+        <button onClick={addCategory} style={{ padding: "8px 16px", background: "none", border: `1px solid ${LINE}`, borderRadius: 8, color: "#8B93A1", cursor: "pointer", fontFamily: "inherit", fontSize: 12.5 }}>+ Add category</button>
+        {catsDirty && (
+          <button onClick={() => saveCategories(draftCats)} style={{ padding: "8px 16px", background: AMBER, border: "none", borderRadius: 8, color: "#1a1200", fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>Save categories</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function TrainingThemeColorsSettings() {
   const { themes, addTheme } = useTrainingThemes();
   const [, forceRerender] = useState(0);
@@ -16553,6 +17083,19 @@ async function migratePlayerRename(oldName, newName) {
       return { ...ev, scores: { ...rest, [newName]: value } };
     });
     await storeSet("rebound_contest:" + s.id, { ...data, events });
+  }
+  // Même principe pour les sessions du Screen Contest.
+  const screenIdx = (await storeGet("screen_contest_index")) || [];
+  for (const s of screenIdx) {
+    const data = await storeGet("screen_contest:" + s.id);
+    if (!data || !data.events) continue;
+    if (!data.events.some(ev => ev.scores && Object.prototype.hasOwnProperty.call(ev.scores, oldName))) continue;
+    const events = data.events.map(ev => {
+      if (!ev.scores || !Object.prototype.hasOwnProperty.call(ev.scores, oldName)) return ev;
+      const { [oldName]: value, ...rest } = ev.scores;
+      return { ...ev, scores: { ...rest, [newName]: value } };
+    });
+    await storeSet("screen_contest:" + s.id, { ...data, events });
   }
 }
 
@@ -18142,7 +18685,8 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
   const advanced = useTeamAdvancedStats(matchFilter);
   const { thresholds: shotChartThresholds } = useShotChartThresholds();
   const { name: reboundContestTabName } = useReboundContestTabName();
-  const TEAM_SUBTAB_ORDER = [["classement", "standings"], ["collectif", "teamPlay"], ["avance", "advanced"], ["reboundContest", "reboundContest"], ["shootingGrid", "shootingGrid"], ["resources", "resources"]];
+  const { name: screenContestTabName } = useScreenContestTabName();
+  const TEAM_SUBTAB_ORDER = [["classement", "standings"], ["collectif", "teamPlay"], ["avance", "advanced"], ["reboundContest", "reboundContest"], ["screenContest", "screenContest"], ["shootingGrid", "shootingGrid"], ["resources", "resources"]];
   const defaultTeamSubtab = isCoach ? "classement" : ((TEAM_SUBTAB_ORDER.find(([, key]) => v[key]) || ["classement"])[0]);
   const [subtab, setSubtab] = useState(defaultTeamSubtab);
   const [exportReport, setExportReport] = useState(null);
@@ -18198,7 +18742,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
       </div>
 
       <div style={{ display: "flex", gap: 8, marginBottom: 20, borderBottom: `1px solid ${LINE}`, paddingBottom: 10, flexWrap: "wrap" }}>
-        {[["classement", "Standings", "standings"], ["collectif", "Team Play", "teamPlay"], ["avance", "Advanced", "advanced"], ["reboundContest", reboundContestTabName, "reboundContest"], ["shootingGrid", "Shooting Grid", "shootingGrid"], ["resources", "Resources", "resources"]]
+        {[["classement", "Standings", "standings"], ["collectif", "Team Play", "teamPlay"], ["avance", "Advanced", "advanced"], ["reboundContest", reboundContestTabName, "reboundContest"], ["screenContest", screenContestTabName, "screenContest"], ["shootingGrid", "Shooting Grid", "shootingGrid"], ["resources", "Resources", "resources"]]
           .filter(([, , key]) => isCoach || v[key])
           .concat(isCoach ? [["entrainement", "Team Training"]] : [])
           .map(([id, label]) => (
@@ -18209,7 +18753,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
         ))}
       </div>
 
-      {!isCoach && !v[{ classement: "standings", collectif: "teamPlay", avance: "advanced", reboundContest: "reboundContest", shootingGrid: "shootingGrid", resources: "resources" }[subtab]] && (
+      {!isCoach && !v[{ classement: "standings", collectif: "teamPlay", avance: "advanced", reboundContest: "reboundContest", screenContest: "screenContest", shootingGrid: "shootingGrid", resources: "resources" }[subtab]] && (
         <div style={{ padding: 30, textAlign: "center", color: "#5C6470", border: `1px dashed ${LINE}`, borderRadius: 12, fontSize: 13.5, marginBottom: 26 }}>
           You don't have the permission to see this.
         </div>
@@ -18252,6 +18796,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
       )}
       {subtab === "resources" && (isCoach || v.resources) && <TeamResourcesTab isCoach={isCoach} team={team} />}
       {subtab === "reboundContest" && (isCoach || v.reboundContest) && <ReboundContestTab roster={roster} isCoach={isCoach} teamLogo={team?.logo} />}
+      {subtab === "screenContest" && (isCoach || v.screenContest) && <ScreenContestTab roster={roster} isCoach={isCoach} teamLogo={team?.logo} />}
       {subtab === "shootingGrid" && (isCoach || v.shootingGrid) && <ShootingGridTab roster={roster} isCoach={isCoach} />}
       {subtab === "entrainement" && isCoach && <CollectiveTraining roster={roster} />}
 
