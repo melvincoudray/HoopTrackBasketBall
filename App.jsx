@@ -689,6 +689,8 @@ const SCOUT_STAT_SCHEMA = [
   { key: "nrtg", label: "Net rating", group: "Ratings" },
   { key: "pct3poss", label: "% 3pts/Poss", pct: true, group: "Ratings" },
   { key: "pct3tst", label: "3pt shot frequency (share of shots attempted)", pct: true, group: "Shooting" },
+  { key: "blk100", label: "Blocks / 100 poss", group: "Ratings" },
+  { key: "stl100", label: "Steals / 100 poss", group: "Ratings" },
   // Métriques propres aux exports FIBA — gardées sous leur nom d'origine (pas retraduites)
   // pour éviter de leur donner un sens que je ne suis pas sûr de connaître avec certitude.
   { key: "fgAtt", label: "FG Att (FIBA)", group: "FIBA (advanced)" },
@@ -6742,7 +6744,7 @@ export default function App() {
             You don't have the permission to see this.
           </div>
         )}
-        {tab === "scouting" && (session.role === "coach" || visibility.tabs.scouting) && <ScoutingTab isCoach={session.role === "coach"} matchFilter={effectiveMatchFilter} initialSubtab={homeNav?.scoutingSubtab} initialReportTeam={homeNav?.scoutingTeam} visibility={visibility} />}
+        {tab === "scouting" && (session.role === "coach" || visibility.tabs.scouting) && <ScoutingTab isCoach={session.role === "coach"} matchFilter={effectiveMatchFilter} initialSubtab={homeNav?.scoutingSubtab} initialReportTeam={homeNav?.scoutingTeam} visibility={visibility} team={team} />}
         {tab === "scouting" && session.role === "player" && !visibility.tabs.scouting && (
           <div style={{ padding: 30, textAlign: "center", color: "#5C6470", border: `1px dashed ${LINE}`, borderRadius: 12, fontSize: 13.5 }}>
             You don't have the permission to see this.
@@ -12663,6 +12665,40 @@ function useScoutingReport(teamName) {
   return { collective, players, loading, saveCollective, savePlayer, deletePlayer, movePlayer, sortPlayersByPosition };
 }
 
+async function loadPlaybookPlays(teamName) {
+  let books = [];
+  try { const b = await storeGet("draw_playbooks"); books = Array.isArray(b) ? b : []; } catch { /* aucun playbook */ }
+  let staff = [];
+  try { const b = await storeGet("draw_staff:" + teamName); staff = Array.isArray(b) ? b : []; } catch { /* aucun */ }
+  return [
+    ...staff.filter(p => (p.frames || []).length).map(p => ({ id: "staff:" + p.id, label: "Staff · " + p.name, name: p.name, frames: p.frames })),
+    ...books.flatMap(b => (b.plays || []).filter(p => (p.frames || []).length).map(p => ({ id: "book:" + b.id + ":" + p.id, label: b.name + " · " + p.name, name: p.name, frames: p.frames }))),
+  ];
+}
+async function loadScoutingPlayLinks(teamName) { return (await storeGet("scouting_play_links:" + teamName)) || {}; }
+async function saveScoutingPlayLink(teamName, playLabel, playId) {
+  const links = await loadScoutingPlayLinks(teamName);
+  const next = { ...links, [playLabel]: playId };
+  await storeSet("scouting_play_links:" + teamName, next);
+  return next;
+}
+// Résout le dessin du Playbook pour un libellé de play codé en Scouting : priorité au lien
+// manuel choisi par le coach (toujours exact), sinon on retombe sur la correspondance par nom.
+function resolveScoutingPlayDiagram(label, allPlays, links) {
+  const linkedId = links && links[label];
+  if (linkedId) { const hit = allPlays.find(p => p.id === linkedId); if (hit) return hit; }
+  return allPlays.find(p => normTag(p.name) === normTag(label));
+}
+
+// Charge les fiches individuelles réalisées dans Scouting Report > Individual (hors React,
+// pour l'export PDF — même stockage que useScoutingReport côté écran).
+async function loadScoutingPlayers(teamName) {
+  const ids = (await storeGet("scouting_players:" + teamName)) || [];
+  const out = [];
+  for (const id of ids) { const p = await storeGet("scouting_player:" + teamName + ":" + id); if (p) out.push(p); }
+  return out;
+}
+
 function embedUrl(url) {
   if (!url) return null;
   const yt = url.match(/(?:youtu\.be\/|youtube\.com\/(?:watch\?v=|embed\/))([\w-]+)/);
@@ -14398,6 +14434,12 @@ const SCOUT_SW_KEYS = ["pts", "ptse", "pctv", "pct2", "pct3", "pctlf", "efg", "t
   "ortg", "drtg", "nrtg", "dPct2", "dPct3", "dEfg", "dPctbp", "dFtafga", "oPctro", "oRo", "oRt", "oBp", "poss"];
 function ScoutingStatsPanel({ teamName, teams }) {
   const t = teams[teamName];
+  // Rang de poule (en plus du rang "parmi les équipes chargées dans Scouting" déjà calculé) :
+  // le vrai classement NM1, filtré aux seules équipes réellement dans la poule de l'adversaire.
+  const [poules, setPoules] = useState(null);
+  useEffect(() => { let alive = true; loadFfbbPoules().then(p => alive && setPoules(p)).catch(() => {}); return () => { alive = false; }; }, []);
+  const pouleInfo = teamName ? pouleFor(poules, teamName) : null;
+  const pouleTeams = pouleInfo ? Object.fromEntries(Object.entries(teams).filter(([n]) => pouleInfo.names.has(normTag(n)))) : null;
   if (!t) return <EmptyState text="Select a team." />;
   const total = Object.values(teams).length;
   const strongMax = 5, weakMin = Math.max(strongMax + 1, Math.min(20, total - 5));
@@ -14407,7 +14449,8 @@ function ScoutingStatsPanel({ teamName, teams }) {
     if (!schema || v === undefined || v === null || isNaN(v)) return null;
     const r = leagueRank(teams, key, teamName);
     if (!r) return null;
-    return { key, label: schema.label, pct: schema.pct, group: schema.group, v, rank: r.rank, total: r.total };
+    const rp = pouleTeams ? leagueRank(pouleTeams, key, teamName) : null;
+    return { key, label: schema.label, pct: schema.pct, group: schema.group, v, rank: r.rank, total: r.total, rankP: rp };
   }).filter(Boolean);
   const strengths = rows.filter(r => r.rank <= strongMax).sort((a, b) => a.rank - b.rank);
   const weaknesses = rows.filter(r => r.rank >= weakMin).sort((a, b) => b.rank - a.rank);
@@ -14424,6 +14467,7 @@ function ScoutingStatsPanel({ teamName, teams }) {
           </div>
           <div style={{ fontFamily: "ui-monospace, monospace", fontWeight: 700, fontSize: 16, color }}>{fmt(r)}</div>
           <div style={{ fontSize: 11.5, color: "#8B93A1", width: 54, textAlign: "right" }}>#{r.rank}/{r.total}</div>
+          <div style={{ fontSize: 10.5, color: "#5C6470", width: 60, textAlign: "right" }}>{r.rankP ? `poule #${r.rankP.rank}/${r.rankP.total}` : ""}</div>
         </div>
       ))}
     </div>
@@ -14431,7 +14475,7 @@ function ScoutingStatsPanel({ teamName, teams }) {
   return (
     <div>
       <div style={{ fontSize: 12, color: "#5C6470", marginBottom: 12 }}>
-        Rank among the {total} teams in Scouting · strengths: rank 1 to {strongMax} · weaknesses: rank {weakMin} to {total}. Stats where lower is better (turnovers, points allowed…) are ranked the other way round.
+        Rank among the {total} teams in Scouting{pouleInfo ? ` · "poule" badge = rank among ${pouleInfo.rows.length} teams actually in ${pouleInfo.pouleName}` : ""} · strengths: rank 1 to {strongMax} · weaknesses: rank {weakMin} to {total}. Stats where lower is better (turnovers, points allowed…) are ranked the other way round.
       </div>
       <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
         {col("Strengths", strengths, TEAL, "No stat ranked in the top 5.")}
@@ -14452,7 +14496,8 @@ const REP_GROUPS = [
   ["SHOOTING", ["pct2", "pct3", "pctlf", "efg", "ts", "pct3tst", "ftafga"]],
   ["REBOUNDING", ["rt", "ro", "pctro", "pctrd"]],
   ["DEFENSE", ["ptse", "drtg", "int", "ct", "fte"]],
-  ["OPPONENT STATS", ["dPct2", "dPct3", "dEfg", "oRt", "oPctro", "dPctbp", "dFtafga", "oLft"]],
+  ["ADVANCED", ["nrtg", "blk100", "stl100"]],
+  ["OPPONENT STATS", ["dPct2", "dPct3", "dEfg", "oRt", "oPctro", "dPctbp", "dFtafga", "oLft", "oR2", "oT2", "oR3", "oT3", "oPd", "oIn", "oBp", "oCt", "oFte"]],
   ["TURNOVERS & FOULS", ["bp", "pctbp", "fte", "fo"]],
 ];
 function repFmt(key, v) {
@@ -14692,6 +14737,31 @@ async function lsLoadAggregate(teamName) {
   return lsAggregate(done);
 }
 
+// Classement officiel NM1, par poule (fonction Netlify ffbb-nm1-poules) — gardé 6h : la vraie
+// composition et le vrai classement de la poule, pas seulement les équipes déjà chargées dans
+// Scouting (qui peuvent déborder sur une autre poule, ou ne pas toutes y être).
+async function loadFfbbPoules() {
+  let cached = null;
+  try { cached = await storeGet("ffbb_poules"); } catch { /* pas de cache */ }
+  if (cached && cached.poules && Date.now() - (cached.at || 0) < 6 * 3600 * 1000) return cached.poules;
+  const r = await fetch("/.netlify/functions/ffbb-nm1-poules");
+  if (!r.ok) throw new Error("NM1 poule standings unavailable (" + r.status + ").");
+  const data = await r.json();
+  const poules = data.poules || {};
+  try { await storeSet("ffbb_poules", { at: Date.now(), poules }); } catch { /* cache facultatif */ }
+  return poules;
+}
+// Poule contenant une équipe donnée (par nom, comparaison souple comme ailleurs dans l'appli) :
+// { pouleName, rows, names: Set<nom normalisé> } ou null si introuvable.
+function pouleFor(poules, name) {
+  if (!poules || !name) return null;
+  const key = normTag(name);
+  for (const [pouleName, rows] of Object.entries(poules)) {
+    const hit = rows.find(r => { const rk = normTag(r.name); return rk === key || rk.includes(key) || key.includes(rk); });
+    if (hit) return { pouleName, rows, names: new Set(rows.map(r => normTag(r.name))) };
+  }
+  return null;
+}
 // Stats FFBB de TOUS les joueurs de la ligue (une requête par équipe, sans photos), gardées 7 jours : sert aux rangs de division.
 async function repLeaguePlayers(teamNames, onProgress) {
   let cached = null;
@@ -14727,13 +14797,40 @@ const repNameMatch = (full, short) => {
   const last = normTag(b[b.length - 1]), init = normTag(b[0]).slice(0, 1);
   return normTag(a[a.length - 1]) === last && (normTag(a[0]).slice(0, 1) === init || b.length === 1) || normTag(a.join("")).endsWith(last) && normTag(a[0]).slice(0, 1) === init;
 };
-async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "Our team", ourLogo, onProgress }) {
-  const { jsPDF } = await import("jspdf");
+// Rassemble toutes les données du Scouting Report (standings, playtypes, LiveStats, FFBB, tirs contestés,
+// plays) en un seul passage — utilisé À LA FOIS par l'export PDF et par l'affichage à l'écran de l'onglet Stats,
+// pour ne calculer qu'une seule fois (et toujours de la même façon) ce qui alimente les deux.
+async function repGatherReportData({ teamName, teams, ourStats, ourName = "Our team", onProgress }) {
   let games = {};
   try { games = (await storeGet("league_games"))?.games || {}; } catch { /* classement indisponible */ }
   const all = { ...(ourStats && Object.keys(ourStats).length ? { [ourName]: { stats: ourStats } } : {}), ...teams };
+  // Stats dérivées — calculées une fois ici pour que chaque équipe (y compris la nôtre) les ait,
+  // qu'elle vienne d'un import "Classic" (qui ne les fournit pas telles quelles) ou non.
+  Object.values(all).forEach(team => {
+    const s = team.stats; if (!s) return;
+    if (s.nrtg === undefined && s.ortg != null && s.drtg != null) s.nrtg = s.ortg - s.drtg;
+    if (s.poss) {
+      if (s.blk100 === undefined && s.ct != null) s.blk100 = 100 * s.ct / s.poss;
+      if (s.stl100 === undefined && s.int != null) s.stl100 = 100 * s.int / s.poss;
+    }
+  });
   const t = teams[teamName];
   if (!t) throw new Error("Team not found.");
+  const total = Object.keys(all).length;
+  const rankOf = (key, name) => leagueRank(all, key, name);
+  // Classement réel de la poule (FFBB) — remplace l'ancien classement local (limité aux équipes
+  // déjà chargées dans Scouting, qui peuvent déborder sur une autre poule) quand il est lisible ;
+  // on retombe sur l'ancien calcul sinon. Les 5 derniers matchs viennent toujours des box scores
+  // synchronisés localement (le classement FFBB n'a pas le détail match par match).
+  let poules = null, pouleErr = "";
+  try { poules = await loadFfbbPoules(); } catch (e) { pouleErr = String((e && e.message) || e); }
+  const pouleInfo = poules ? (pouleFor(poules, teamName) || pouleFor(poules, ourName)) : null;
+  const pouleName = pouleInfo ? pouleInfo.pouleName : null;
+  const st = pouleInfo
+    ? pouleInfo.rows.map(r => ({ name: r.name, w: r.w ?? 0, l: r.l ?? 0, pf: r.pf ?? 0, pa: r.pa ?? 0, diff: r.diff ?? ((r.pf ?? 0) - (r.pa ?? 0)), pos: r.pos }))
+    : repStandings(games, Object.keys(all));
+  const recentGames = (repStandings(games, [teamName])[0] || { games: [] }).games;
+
   // Playtypes (Scouting Observation) : fréquence + PPP par équipe observée, attaque et défense ; notre équipe depuis nos matchs codés.
   const PT = { teams: {}, own: null, labels: [], myPlays: [] };
   try {
@@ -14763,8 +14860,48 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
     const strong = l.slice(0, 3), weak = l.slice(3).slice(-3).reverse();
     return { strong, weak };
   };
-  const total = Object.keys(all).length;
-  const rankOf = (key, name) => leagueRank(all, key, name);
+
+  // LiveStats : temps forts/faibles, impact terrain/banc, 5 majeurs, rotations, dernier match, fatigue.
+  let LS = null, lsErr = "";
+  try { LS = await lsLoadAggregate(teamName); } catch (e) { lsErr = String((e && e.message) || e); }
+
+  // Tirs contestés / non contestés (Scouting Observation : tag Open).
+  const myShots = (PT.myPlays || []).filter(p => isOffense(p) && isShotAttempt(p.tags));
+  const isOpen = p => tagIsSet(p.tags, "Open") || tagIsSet(p.tags, "Ouvert");
+  const isMade = p => Object.keys(p.tags).some(k => /^\d\s*PT\+$/i.test(k) && p.tags[k]);
+  const is3 = p => Object.keys(p.tags).some(k => /^3\s*PT[+-]$/i.test(k) && p.tags[k]);
+  const grp = arr => { const o = arr.filter(isOpen), c = arr.filter(p => !isOpen(p)); const f = x => x.length ? 100 * x.filter(isMade).length / x.length : null; const pps = x => x.length ? x.reduce((s, p) => s + (isMade(p) ? (is3(p) ? 3 : 2) : 0), 0) / x.length : null; return { n: arr.length, no: o.length, nc: c.length, fgo: f(o), fgc: f(c), ppso: pps(o), ppsc: pps(c) }; };
+  const CS = { all: grp(myShots), two: grp(myShots.filter(p => !is3(p))), three: grp(myShots.filter(is3)) };
+
+  // Joueurs FFBB (stats individuelles) + rangs de division.
+  let FF = [];
+  try { FF = (await loadFfbbRosterStats(teamName)).filter(x => x.st && x.st.min > 0).sort((a, b) => (b.st.pts || 0) - (a.st.pts || 0)); } catch { /* FFBB indisponible */ }
+  let LEAGUE = [];
+  try { if (FF.length) LEAGUE = await repLeaguePlayers(Object.keys(teams), onProgress); } catch { /* rangs indisponibles */ }
+  // Rang "de poule" : le même calcul que rankOf/repLeagueRank, mais restreint aux équipes/joueurs
+  // réellement dans la poule de l'adversaire (d'après le classement FFBB), en plus du rang parmi
+  // les seules équipes déjà chargées dans Scouting (rankOf / LEAGUE, inchangés).
+  const pouleRankOf = pouleInfo ? (key, name) => leagueRank(Object.fromEntries(Object.entries(all).filter(([n]) => pouleInfo.names.has(normTag(n)))), key, name) : () => null;
+  const LEAGUE_POULE = pouleInfo ? LEAGUE.filter(p => pouleInfo.names.has(normTag(p.team))) : [];
+
+  // Plays (fréquence + PPP), pour "Most frequent / most efficient plays".
+  const playLabels = PLAYS_LIST(currentObservationTagCategories());
+  const playStats = playLabels.map(l => ({ label: l, ...(rankStat(PT.myPlays.filter(isOffense), l) || {}) })).filter(x => x.n);
+
+  return { t, all, total, rankOf, games, st, pouleName, pouleErr, pouleRankOf, LEAGUE_POULE, recentGames, PT, ptMine, ptList, ptSW, LS, lsErr, myShots, isOpen, isMade, is3, grp, CS, FF, LEAGUE, playLabels, playStats };
+}
+
+async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "Our team", ourLogo, onProgress }) {
+  const { jsPDF } = await import("jspdf");
+  const D = await repGatherReportData({ teamName, teams, ourStats, ourName, onProgress });
+  const { t, all, total, rankOf, games, pouleName, pouleRankOf, LEAGUE_POULE, PT, ptMine, ptList, ptSW, FF, LEAGUE } = D;
+  let { LS, lsErr } = D;
+  // Logos "nettoyés" (fond carré uni retiré) — certains logos enregistrés avant l'arrivée de ce
+  // nettoyage (ou importés autrement que via "Sync FFBB logos") gardent un fond carré en stock ;
+  // on nettoie donc systématiquement ici, au moment de l'export, plutôt que de supposer que c'est
+  // déjà fait. logoClean() met en cache son résultat, donc un logo déjà propre ne coûte rien de plus.
+  const teamLogoClean = await logoClean(t.logo).catch(() => t.logo);
+  const ourLogoClean = ourLogo ? await logoClean(ourLogo).catch(() => ourLogo) : ourLogo;
   const doc = new jsPDF({ unit: "pt", format: "a4", compress: true });
   const W = 595.28, H = 841.89, M = 34;
   const fc = c => doc.setFillColor(c[0], c[1], c[2]);
@@ -14776,7 +14913,9 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
     doc.text(String(s), x, y, { align, ...(maxW ? { maxWidth: maxW } : {}) });
   };
   const logo = (img, name, cx, cy, r) => {
-    if (img) { try { doc.addImage(img, "PNG", cx - r, cy - r, 2 * r, 2 * r); return; } catch { /* monogramme */ } }
+    // Format déduit du data URL (les photos FFBB arrivent en JPEG, les logos en PNG) plutôt que
+    // supposé "PNG" partout — sinon jsPDF peut mal décoder une photo JPEG.
+    if (img) { try { const fmt = /^data:image\/jpe?g/i.test(img) ? "JPEG" : /^data:image\/webp/i.test(img) ? "WEBP" : "PNG"; doc.addImage(img, fmt, cx - r, cy - r, 2 * r, 2 * r); return; } catch { /* monogramme */ } }
     fc(REP.OR); doc.circle(cx, cy, r, "F");
     text(String(name).split(/\s+/).map(w => w[0]).join("").slice(0, 2).toUpperCase(), cx, cy + r * 0.32, { size: r * 0.9, bold: true, color: REP.WHITE, align: "center" });
   };
@@ -14787,44 +14926,59 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
     rect(0, 0, W, H, REP.WHITE);
     text(title, M, 44, { size: 17, bold: true });
     if (sub) text(sub, M, 60, { size: 8, color: REP.MUTE, maxW: W - 2 * M - 40 });
-    logo(t.logo, teamName, W - M - 14, 40, 14);
+    logo(teamLogoClean, teamName, W - M - 14, 40, 14);
     rect(M, 68, W - 2 * M, 1.5, REP.OR);
     text(`SCOUTING REPORT · ${teamName.toUpperCase()}`, M, H - 20, { size: 7, color: REP.MUTE });
     text(String(pageNo), W - M, H - 20, { size: 7, color: REP.MUTE, align: "right" });
   };
   const fmtDate = new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
 
-  // 1 — couverture
-  rect(0, 0, W, H, REP.INK); rect(0, 0, 14, H, REP.OR);
-  text("SCOUTING REPORT", W / 2, 200, { size: 12, bold: true, color: REP.OR, align: "center" });
-  logo(t.logo, teamName, W / 2, 300, 62);
-  text(teamName.toUpperCase(), W / 2, 410, { size: 28, bold: true, color: REP.WHITE, align: "center" });
-  text("Pre-game report", W / 2, 432, { size: 11, color: REP.MUTE, align: "center" });
-  text(`NM1 · ${fmtDate}`, W / 2, 456, { size: 10, color: REP.MUTE, align: "center" });
-  text(`Prepared by the staff · ${ourName} · HoopTrack`, W / 2, H - 60, { size: 8, color: REP.MUTE, align: "center" });
+  // 1 — couverture (demandé : "plus jolie") — les deux logos face à face (nous vs l'adversaire)
+  // plutôt que le logo adverse seul, un bandeau poule, et quelques formes décoratives très
+  // atténuées pour casser le fond uni, sans distraire du contenu.
+  rect(0, 0, W, H, REP.INK);
+  try {
+    doc.saveGraphicsState(); doc.setGState(new doc.GState({ opacity: 0.07 }));
+    fc(REP.OR); doc.circle(W + 30, 70, 220, "F"); doc.circle(-30, H - 50, 190, "F");
+    doc.restoreGraphicsState();
+  } catch { /* dégradé indisponible selon la version de jsPDF : le fond reste uni, pas grave */ }
+  rect(0, 0, W, 6, REP.OR); rect(0, H - 6, W, 6, REP.OR);
+  text(D.pouleName ? `NM1 · ${D.pouleName.toUpperCase()}` : "NM1", W / 2, 118, { size: 9, bold: true, color: REP.MUTE, align: "center" });
+  text("SCOUTING REPORT", W / 2, 140, { size: 14, bold: true, color: REP.OR, align: "center" });
+  rect(W / 2 - 18, 150, 36, 2, REP.OR);
+  const vsY = 262;
+  logo(ourLogoClean, ourName, W / 2 - 112, vsY, 56);
+  logo(teamLogoClean, teamName, W / 2 + 112, vsY, 56);
+  text("VS", W / 2, vsY + 5, { size: 15, bold: true, color: REP.MUTE, align: "center" });
+  text(ourName.toUpperCase(), W / 2 - 112, vsY + 86, { size: 11, bold: true, color: REP.WHITE, align: "center", maxW: 160 });
+  text(teamName.toUpperCase(), W / 2 + 112, vsY + 86, { size: 11, bold: true, color: REP.WHITE, align: "center", maxW: 160 });
+  text("Pre-game report", W / 2, 424, { size: 11, color: REP.MUTE, align: "center" });
+  text(fmtDate, W / 2, 446, { size: 10, color: REP.OR, align: "center" });
+  rect(M + 70, H - 92, W - 2 * M - 140, 1, REP.MUTE);
+  text(`Prepared by the staff · ${ourName} · HoopTrack`, W / 2, H - 62, { size: 8, color: REP.MUTE, align: "center" });
   pageNo = 1;
 
   // 2 — contexte du match
   newPage("Match context", "Standing and form computed from the FFBB box scores synchronised in HoopTrack");
-  const st = repStandings(games, Object.keys(all));
-  if (st.every(r => r.w + r.l === 0)) {
+  const st = D.st, recentGames = D.recentGames;
+  if (!st.length) {
     text("No league games synchronised yet — use Manage teams › Sync FFBB to load them.", M, 100, { size: 10, color: REP.MUTE });
   } else {
-    text("NM1 STANDINGS", M, 92, { size: 8, bold: true, color: REP.OR });
+    text(D.pouleName ? `${D.pouleName.toUpperCase()} STANDINGS` : "NM1 STANDINGS", M, 92, { size: 8, bold: true, color: REP.OR });
     const rh = Math.min(17, 330 / st.length);
     st.forEach((r, i) => {
-      const y = 100 + i * rh, me = r.name === teamName;
-      if (me) rect(M, y, W - 2 * M, rh - 1, REP.LOR, 3);
-      text(i + 1, M + 8, y + rh * 0.68, { size: 8, color: REP.MUTE });
-      text(r.name, M + 40, y + rh * 0.68, { size: 8.5, bold: me, maxW: 300 });
+      const y = 100 + i * rh, isOpp = normTag(r.name) === normTag(teamName), isUs = normTag(r.name) === normTag(ourName);
+      if (isOpp || isUs) rect(M, y, W - 2 * M, rh - 1, isUs ? REP.LGRN : REP.LOR, 3);
+      text(r.pos ?? (i + 1), M + 8, y + rh * 0.68, { size: 8, color: REP.MUTE });
+      text(r.name, M + 40, y + rh * 0.68, { size: 8.5, bold: isOpp || isUs, maxW: 300 });
       text(`${r.w} - ${r.l}`, W - M - 90, y + rh * 0.68, { size: 8.5, align: "right" });
       text(r.w * 2 + r.l, W - M - 10, y + rh * 0.68, { size: 8.5, bold: true, align: "right" });
     });
     text("W - L", W - M - 90, 92, { size: 7.5, color: REP.MUTE, align: "right" }); text("Pts", W - M - 10, 92, { size: 7.5, color: REP.MUTE, align: "right" });
-    const me = st.find(r => r.name === teamName);
     const y0 = 100 + st.length * rh + 28;
     text("LAST 5 GAMES", M, y0, { size: 8, bold: true, color: REP.OR });
-    (me ? me.games.slice(-5).reverse() : []).forEach((g, i) => {
+    if (!recentGames || !recentGames.length) text("No recent games synchronised for this team.", M, y0 + 16, { size: 9, color: REP.MUTE });
+    (recentGames || []).slice(-5).reverse().forEach((g, i) => {
       const y = y0 + 10 + i * 40, win = g.pf > g.pa;
       rect(M, y, W - 2 * M, 34, win ? REP.LGRN : REP.LRED, 6);
       rect(M, y, 34, 34, win ? REP.GRN : REP.RED, 6);
@@ -14836,7 +14990,7 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
   }
 
   // 3 — stats générales (rang sur la ligue)
-  newPage("General stats", `Rank among ${total} teams · green = top 5, red = bottom 5`);
+  newPage("General stats", `Left badge = rank among ${total} teams loaded in Scouting · right badge = rank in ${pouleName || "the poule"} · green = top 5, red = bottom 5`);
   const col = r => (r && r.rank <= 5 ? [REP.GRN, REP.WHITE] : r && r.rank > r.total - 5 ? [REP.RED, REP.WHITE] : [REP.GREY, REP.WHITE]);
   const colW = (W - 2 * M - 24) / 2;
   let ys = [92, 92];
@@ -14849,10 +15003,13 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
       const sc = SCOUT_STAT_SCHEMA.find(s => s.key === k); const v = t.stats[k];
       if (!sc || v === undefined || v === null || isNaN(v)) return;
       const r = rankOf(k, teamName); const [bg, fg] = col(r);
+      const rp = pouleRankOf(k, teamName); const [bgp, fgp] = col(rp);
       rect(x, y, colW, 16, REP.BG, 3);
-      text(sc.label, x + 6, y + 11, { size: 8, maxW: colW - 110 });
-      text(repFmt(k, v), x + colW - 58, y + 11, { size: 8.5, bold: true, align: "right" });
-      if (r) { rect(x + colW - 50, y + 2, 44, 12, bg, 3); text(`${r.rank}${[, "st", "nd", "rd"][r.rank % 10 > 3 || Math.floor(r.rank / 10) === 1 ? 0 : r.rank % 10] || "th"}`, x + colW - 28, y + 11, { size: 7.5, bold: true, color: fg, align: "center" }); }
+      text(sc.label, x + 6, y + 11, { size: 8, maxW: colW - 158 });
+      text(repFmt(k, v), x + colW - 106, y + 11, { size: 8.5, bold: true, align: "right" });
+      const ord = n => `${n}${[, "st", "nd", "rd"][n % 10 > 3 || Math.floor(n / 10) === 1 ? 0 : n % 10] || "th"}`;
+      if (r) { rect(x + colW - 98, y + 2, 44, 12, bg, 3); text(ord(r.rank), x + colW - 76, y + 11, { size: 7.5, bold: true, color: fg, align: "center" }); }
+      if (rp) { rect(x + colW - 50, y + 2, 44, 12, bgp, 3); text(ord(rp.rank), x + colW - 28, y + 11, { size: 7.5, bold: true, color: fgp, align: "center" }); }
       y += 19;
     });
     ys[c] = y + 14;
@@ -14928,7 +15085,7 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
   if (!ourStats || !Object.keys(ourStats).length) {
     text("Our team stats are not available yet (import box scores first).", M, 100, { size: 10, color: REP.MUTE });
   } else {
-    logo(ourLogo, ourName, M + 190, 92, 11); logo(t.logo, teamName, M + 290, 92, 11);
+    logo(ourLogoClean, ourName, M + 190, 92, 11); logo(teamLogoClean, teamName, M + 290, 92, 11);
     let y = 112;
     REP_GROUPS.forEach(([title, keys]) => {
       const list = keys.filter(k => ourStats[k] !== undefined && t.stats[k] !== undefined);
@@ -14955,26 +15112,28 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
     text(!PT.own ? "Our own coded games are needed for this page (Team › coding file)." : "No Scouting Observation file for this team yet.", M, 100, { size: 10, color: REP.MUTE });
   } else {
     let y = 92;
-    [["OUR OFFENSE VS THEIR DEFENSE", PT.own.off, ptMine.def], ["THEIR OFFENSE VS OUR DEFENSE", ptMine.off, PT.own.def]].forEach(([ttl, A, B]) => {
+    [["OUR OFFENSE VS THEIR DEFENSE", PT.own.off, ptMine.def, false], ["THEIR OFFENSE VS OUR DEFENSE", ptMine.off, PT.own.def, true]].forEach(([ttl, A, B, invert]) => {
       text(ttl, M, y, { size: 8, bold: true, color: REP.OR }); y += 8;
       [["Playtype", M + 6, "left"], ["Vol.", M + 170, "right"], ["PPP", M + 215, "right"], ["Vol.", M + 270, "right"], ["PPP", M + 315, "right"], ["Avg", M + 370, "right"]].forEach(([h, x, al]) => text(h, x, y + 8, { size: 7, color: REP.MUTE, align: al }));
       text("Message", W - M - 8, y + 8, { size: 7, color: REP.MUTE, align: "right" }); y += 12;
       PT.labels.filter(l => A[l] && B[l]).map(l => ({ l, a: A[l], b: B[l], avg: (A[l].ppp + B[l].ppp) / 2 })).sort((p, q) => q.avg - p.avg).forEach(r => {
-        const good = r.avg > 1.05, bad = r.avg < 0.9;
+        // "OUR O vs THEIR D" : haute PPP = bon pour nous = EXPLOIT. "THEIR O vs OUR D" : haute PPP = risque
+        // pour nous = DANGER (inversé) ; basse PPP = secteur qu'on maîtrise déjà = STRENGTH, pas "exploit".
+        const highRisk = r.avg > 1.05, lowRisk = r.avg < 0.9;
+        const good = invert ? lowRisk : highRisk, bad = invert ? highRisk : lowRisk;
+        const goodLabel = invert ? "STRENGTH" : "EXPLOIT";
         rect(M, y, W - 2 * M, 17, good ? REP.LGRN : bad ? REP.LRED : REP.BG, 3);
         text(r.l, M + 6, y + 12, { size: 8.5, maxW: 150 });
         text(r.a.n, M + 170, y + 12, { size: 8, align: "right" }); text(r.a.ppp.toFixed(2), M + 215, y + 12, { size: 8.5, bold: true, align: "right" });
         text(r.b.n, M + 270, y + 12, { size: 8, align: "right" }); text(r.b.ppp.toFixed(2), M + 315, y + 12, { size: 8.5, bold: true, align: "right" });
         text(r.avg.toFixed(2), M + 370, y + 12, { size: 8.5, bold: true, color: good ? REP.GRN : bad ? REP.RED : REP.INK, align: "right" });
-        if (good || bad) { rect(W - M - 70, y + 3, 62, 11, good ? REP.GRN : REP.RED, 3); text(good ? "EXPLOIT" : "DANGER", W - M - 39, y + 11.5, { size: 7, bold: true, color: REP.WHITE, align: "center" }); }
+        if (good || bad) { rect(W - M - 70, y + 3, 62, 11, good ? REP.GRN : REP.RED, 3); text(good ? goodLabel : "DANGER", W - M - 39, y + 11.5, { size: 7, bold: true, color: REP.WHITE, align: "center" }); }
         y += 19;
       });
       y += 18;
     });
   }
   // 8-10 — LiveStats : temps forts/faibles, impact terrain/banc, 5 majeurs
-  let LS = null, lsErr = "";
-  try { LS = await lsLoadAggregate(teamName); } catch (e) { lsErr = String((e && e.message) || e); }
   newPage("Hot and cold stretches", LS ? `Average margin of ${teamName} per 2-minute block over ${LS.games} LiveStats games · regulation time` : "LiveStats data");
   if (!LS) {
     text("LiveStats unavailable: " + lsErr, M, 100, { size: 10, color: REP.MUTE, maxW: W - 2 * M });
@@ -15050,18 +15209,21 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
     text("LiveStats unavailable: " + lsErr, M, 100, { size: 10, color: REP.MUTE, maxW: W - 2 * M });
   } else {
     const list = LS.rot.filter(p => p.min >= 10).slice(0, 12);
-    const x0 = M + 92, gw = W - M - x0, cw = gw / 80, rh = 24;
-    ["Q1", "Q2", "Q3", "Q4"].forEach((q, i) => text(q, x0 + (i * 20 + 10) * cw, 92, { size: 7, bold: true, color: REP.MUTE, align: "center" }));
+    // Regroupé en 20 blocs de 2 minutes (comme à l'écran), avec un vrai espace entre chaque bloc —
+    // la version précédente (80 cellules de 30 s accolées) donnait un dégradé flou, pas des blocs nets.
+    const bucket20 = prob => { const out = []; for (let i = 0; i < 20; i++) { const seg = prob.slice(i * 4, i * 4 + 4); out.push(seg.reduce((a, b) => a + b, 0) / seg.length); } return out; };
+    const x0 = M + 92, gw = W - M - x0, cw = gw / 20, rh = 24, gap = 1.6;
+    ["Q1", "Q2", "Q3", "Q4"].forEach((q, i) => text(q, x0 + (i * 5 + 2.5) * cw, 92, { size: 7, bold: true, color: REP.MUTE, align: "center" }));
     list.forEach((p, r) => {
       const y = 100 + r * (rh + 3);
       text(p.name, M + 2, y + 15, { size: 8, bold: true, maxW: 80 });
-      p.prob.forEach((v, k) => {
+      bucket20(p.prob).forEach((v, k) => {
         const m = Math.min(1, v); const c = [255 - (255 - REP.OR[0]) * m, 255 - (255 - REP.OR[1]) * m, 255 - (255 - REP.OR[2]) * m];
-        rect(x0 + k * cw, y, cw + 0.3, rh, c);
+        rect(x0 + k * cw + gap / 2, y, Math.max(cw - gap, 0.5), rh, c, 1.5);
       });
       text(`${(p.min / LS.games).toFixed(0)} min`, W - M + 2, y + 15, { size: 6.5, color: REP.MUTE });
     });
-    dc(REP.INK); doc.setLineWidth(0.8); [0, 20, 40, 60, 80].forEach(k => doc.line(x0 + k * cw, 96, x0 + k * cw, 100 + list.length * (rh + 3)));
+    dc(REP.INK); doc.setLineWidth(0.8); [0, 5, 10, 15, 20].forEach(k => doc.line(x0 + k * cw, 96, x0 + k * cw, 100 + list.length * (rh + 3)));
   }
 
   const lg = LS && LS.last;
@@ -15088,19 +15250,21 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
   // 12-13 — fatigue individuelle (durée continue sur le terrain, tranches de 2 min)
   const fatPlayers = LS ? LS.impact.filter(p => p.min >= 40 && LS.fatigue[p.name]).slice(0, 10) : [];
   const buckLab = ["0-2", "2-4", "4-6", "6-8", "8-10", "10+"];
+  const fatPhotoFor = name => ((FF || []).find(({ fp }) => repNameMatch(fp.name, name)) || {}).fp?.photo || null;
   for (let pg = 0; pg < (LS ? Math.max(1, Math.ceil(fatPlayers.length / 5)) : 1); pg++) {
     newPage(`Fatigue player by player (${pg + 1}/${Math.max(1, Math.ceil(fatPlayers.length / 5))})`, "By continuous minutes on court (2-min blocks, reset at half-time) · hollow dot = under 3 min observed");
     if (!LS) { text("LiveStats unavailable: " + lsErr, M, 100, { size: 10, color: REP.MUTE, maxW: W - 2 * M }); continue; }
     const mets = [["FG %", "fg", REP.OR], ["REB %", "reb", REP.GRN], ["TOV %", "tov", REP.RED], ["AST %", "ast", REP.GREY]];
-    const cwid = (W - 2 * M - 70) / 4;
-    mets.forEach(([h], i) => text(h, M + 70 + i * cwid + cwid / 2, 90, { size: 8, bold: true, align: "center" }));
+    const cwid = (W - 2 * M - 85) / 4;
+    mets.forEach(([h], i) => text(h, M + 85 + i * cwid + cwid / 2, 90, { size: 8, bold: true, align: "center" }));
     fatPlayers.slice(pg * 5, pg * 5 + 5).forEach((p, r) => {
       const y = 98 + r * 140, F = LS.fatigue[p.name];
       rect(M, y, W - 2 * M, 132, REP.BG, 6);
-      text(p.name, M + 6, y + 18, { size: 9, bold: true, maxW: 62 });
-      text(`${(p.min / p.games).toFixed(0)} min/game`, M + 6, y + 30, { size: 6.5, color: REP.MUTE });
+      logo(fatPhotoFor(p.name), p.name, M + 17, y + 16, 11);
+      text(p.name, M + 32, y + 18, { size: 9, bold: true, maxW: 50 });
+      text(`${(p.min / p.games).toFixed(0)} min/game`, M + 32, y + 30, { size: 6.5, color: REP.MUTE });
       mets.forEach(([, k, col], i) => {
-        const cx = M + 74 + i * cwid, cy = y + 12, cwd = cwid - 12, chh = 92;
+        const cx = M + 89 + i * cwid, cy = y + 12, cwd = cwid - 12, chh = 92;
         const vals = F.map(b => b[k]);
         const defd = vals.filter(v => v !== null);
         if (defd.length < 2) { text("not enough data", cx + cwd / 2, cy + chh / 2, { size: 6.5, color: REP.MUTE, align: "center" }); return; }
@@ -15123,12 +15287,7 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
 
   // 14 — tirs contestés / non contestés (Scouting Observation : tag Open)
   newPage("Contested and uncontested shooting", "From Scouting Observation: shots tagged Open versus all other shots (contested or turnover-prone)");
-  const myShots = (PT.myPlays || []).filter(p => isOffense(p) && isShotAttempt(p.tags));
-  const isOpen = p => tagIsSet(p.tags, "Open") || tagIsSet(p.tags, "Ouvert");
-  const isMade = p => Object.keys(p.tags).some(k => /^\d\s*PT\+$/i.test(k) && p.tags[k]);
-  const is3 = p => Object.keys(p.tags).some(k => /^3\s*PT[+-]$/i.test(k) && p.tags[k]);
-  const grp = arr => { const o = arr.filter(isOpen), c = arr.filter(p => !isOpen(p)); const f = x => x.length ? 100 * x.filter(isMade).length / x.length : null; const pps = x => x.length ? x.reduce((s, p) => s + (isMade(p) ? (is3(p) ? 3 : 2) : 0), 0) / x.length : null; return { n: arr.length, no: o.length, nc: c.length, fgo: f(o), fgc: f(c), ppso: pps(o), ppsc: pps(c) }; };
-  const CS = { all: grp(myShots), two: grp(myShots.filter(p => !is3(p))), three: grp(myShots.filter(is3)) };
+  const { myShots, isOpen, isMade, is3, grp, CS } = D;
   if (!myShots.length) {
     text("No coded shots for this team in Scouting Observation yet.", M, 100, { size: 10, color: REP.MUTE });
   } else {
@@ -15159,10 +15318,6 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
   }
 
   // 15-16 — joueurs (FFBB) : stats individuelles + points générés, puis fiches scoring
-  let FF = [];
-  try { FF = (await loadFfbbRosterStats(teamName)).filter(x => x.st && x.st.min > 0).sort((a, b) => (b.st.pts || 0) - (a.st.pts || 0)); } catch { /* FFBB indisponible */ }
-  let LEAGUE = [];
-  try { if (FF.length) LEAGUE = await repLeaguePlayers(Object.keys(teams), onProgress); } catch { /* rangs indisponibles */ }
   newPage("Individual stats and points created", "Regular season averages from the FFBB (Sync roster) · points created = points + points off assists (LiveStats)");
   if (!FF.length) {
     text("No FFBB player stats for this team yet (Scouting Report › Individual › Sync roster).", M, 100, { size: 10, color: REP.MUTE });
@@ -15203,7 +15358,8 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
     FF.slice(0, 8).forEach(({ fp, st: s }, i) => {
       const x = M + (i % 2) * (cw2 + 14), y = 88 + Math.floor(i / 2) * (ch2 + 8);
       rect(x, y, cw2, ch2, REP.BG, 8);
-      text(`#${fp.jersey ?? ""} ${fp.name}`.toUpperCase(), x + 10, y + 18, { size: 9, bold: true, maxW: cw2 - 20 });
+      logo(fp.photo, fp.name, x + 20, y + 18, 12);
+      text(`#${fp.jersey ?? ""} ${fp.name}`.toUpperCase(), x + 38, y + 21, { size: 9, bold: true, maxW: cw2 - 48 });
       const fga = (s.t2 || 0) + (s.t3 || 0), ts = fga + 0.44 * (s.lft || 0) > 0 ? 100 * (s.pts || 0) / (2 * (fga + 0.44 * (s.lft || 0))) : null;
       [["PTS/GAME", (s.pts ?? 0).toFixed(1)], ["USAGE %", s.usage != null ? s.usage.toFixed(0) + "%" : "–"], ["TS %", ts !== null ? ts.toFixed(0) + "%" : "–"], ["3PT %", s.t3 > 0 ? (100 * s.r3 / s.t3).toFixed(0) + "%" : "–"]].forEach(([l, v], j) => {
         const bx = x + 10 + j * ((cw2 - 20) / 4);
@@ -15215,6 +15371,10 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
       const p2 = 2 * (s.r2 || 0), p3 = 3 * (s.r3 || 0), pf = s.lfr || 0, pt = Math.max(0.1, p2 + p3 + pf);
       let bx = x + 10; const bwid = cw2 - 20;
       [[p2, REP.OR, "2PT"], [p3, REP.GREY, "3PT"], [pf, REP.GRN, "FT"]].forEach(([v, c, l]) => { const w = bwid * v / pt; if (w > 0) { rect(bx, y + 68, w, 10, c); if (w > 28) text(`${l} ${(100 * v / pt).toFixed(0)}%`, bx + w / 2, y + 75.5, { size: 5.5, bold: true, color: REP.WHITE, align: "center" }); bx += w; } });
+      if (LEAGUE_POULE.length) {
+        const rkp = [["PTS", repLeagueRank(LEAGUE_POULE, { st: s }, q => q.pts, q => q.mj >= 3)], ["TS%", repLeagueRank(LEAGUE_POULE, { st: s }, q => { const f = (q.t2 || 0) + (q.t3 || 0) + 0.44 * (q.lft || 0); return f > 0 ? q.pts / (2 * f) : null; }, q => q.mj >= 3 && (q.min || 0) >= 10)], ["3PT%", repLeagueRank(LEAGUE_POULE, { st: s }, q => (q.t3 > 0 ? q.r3 / q.t3 : null), q => q.mj >= 3 && q.t3 * q.mj >= 15)]].filter(([, r]) => r);
+        if (rkp.length) text(`${pouleName || "Poule"} rank — ` + rkp.map(([l, r]) => `${l} #${r.rank}/${r.total}`).join(" · "), x + 10, y + 86, { size: 6, color: REP.MUTE, maxW: cw2 - 20 });
+      }
       text("3 MOST USED PLAYTYPES", x + 10, y + 94, { size: 6, bold: true, color: REP.MUTE });
       const last = String(fp.name).split(/\s+/).pop();
       const mine = myPlaysAll.filter(p => p.player && normTag(p.player).includes(normTag(last)));
@@ -15228,40 +15388,75 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
     });
   }
 
+  // 16bis — fiches individuelles (Scouting Report > Individual)
+  const scoutPlayers = await loadScoutingPlayers(teamName);
+  if (scoutPlayers.length) {
+    const perPage = 2, rowsH = (H - 100 - 40) / perPage;
+    for (let pg = 0; pg < Math.ceil(scoutPlayers.length / perPage); pg++) {
+      newPage(`Individual scouting sheets (${pg + 1}/${Math.ceil(scoutPlayers.length / perPage)})`, "From Scouting Report › Individual");
+      const pagePlayers = scoutPlayers.slice(pg * perPage, pg * perPage + perPage);
+      pagePlayers.forEach((p, i) => {
+        const y = 92 + i * rowsH;
+        rect(M, y, W - 2 * M, rowsH - 14, REP.BG, 8);
+        logo(p.photo, p.lastName || "?", M + 34, y + 34, 24);
+        text(`${p.jersey ? "#" + p.jersey + " " : ""}${(p.lastName || "").toUpperCase()}`, M + 70, y + 26, { size: 11, bold: true });
+        text(`${p.firstName || ""}${p.position ? " · Position " + p.position : ""}`, M + 70, y + 40, { size: 8.5, color: REP.MUTE });
+        const cl = CLOSEOUT_LEVELS.find(c => c.key === p.closeOut) || CLOSEOUT_LEVELS[1];
+        const clHex = String(cl.color).replace("#", ""); const clRgb = [parseInt(clHex.slice(0, 2), 16), parseInt(clHex.slice(2, 4), 16), parseInt(clHex.slice(4, 6), 16)];
+        text("Close out: " + cl.label, M + 70, y + 54, { size: 8, bold: true, color: clRgb });
+        // Notes (barres compactes) — l'équivalent "roue" complet reste réservé à l'écran.
+        const ratings = p.ratings || {};
+        const colW2 = (W - 2 * M - 110) / 2;
+        SKILL_CATEGORIES.forEach((cat, ci) => {
+          const v = Math.max(0, Math.min(10, Number(ratings[cat]) || 0));
+          const cx2 = M + 70 + (ci % 2) * (colW2 + 10), cy2 = y + 68 + Math.floor(ci / 2) * 13;
+          text(cat, cx2, cy2 + 6, { size: 6.5, color: REP.MUTE, maxW: 62 });
+          rect(cx2 + 64, cy2, colW2 - 96, 6, REP.GREY, 2);
+          if (v > 0) rect(cx2 + 64, cy2, (colW2 - 96) * v / 10, 6, REP.OR, 2);
+          text(v.toFixed(0), cx2 + colW2 - 6, cy2 + 6, { size: 6.5, align: "right" });
+        });
+        if (p.plan) text("Game plan: " + p.plan, M + 10, y + rowsH - 36, { size: 7.5, color: REP.MUTE, maxW: W - 2 * M - 20 });
+      });
+    }
+  }
+
   // 17 — plays les plus fréquents / efficaces, avec leur dessin du Playbook
-  newPage("Most frequent and most efficient plays", "Each play is linked to its Playbook diagram (Draw tab, same name)");
-  const playLabels = PLAYS_LIST(currentObservationTagCategories());
-  const playStats = playLabels.map(l => ({ label: l, ...(rankStat(PT.myPlays.filter(isOffense), l) || {}) })).filter(x => x.n);
+  newPage("Most frequent and most efficient plays", "5 most frequent + 5 most efficient · linked to their Playbook diagram (manual link takes priority over name match)");
+  const { playStats } = D;
   if (!playStats.length) {
     text("No play coded for this team in Scouting Observation yet.", M, 100, { size: 10, color: REP.MUTE });
   } else {
-    let books = [];
-    try { { const b = await storeGet("draw_playbooks"); books = Array.isArray(b) ? b : []; } } catch { /* aucun playbook */ }
-    let staff = [];
-    try { { const b = await storeGet("draw_staff:" + teamName); staff = Array.isArray(b) ? b : []; } } catch { /* aucun */ }
-    const allPlays = [...staff, ...books.flatMap(b => b.plays || [])];
-    const findPlay = label => allPlays.find(p => (p.frames || []).length && normTag(p.name) === normTag(label));
-    const cols2 = [["MOST FREQUENT", [...playStats].sort((a, b) => b.n - a.n).slice(0, 4), REP.OR], ["MOST EFFICIENT", [...playStats].filter(x => x.n >= 3).sort((a, b) => b.ppp - a.ppp).slice(0, 4), REP.GRN]];
+    const allPlays = await loadPlaybookPlays(teamName);
+    const playLinks = await loadScoutingPlayLinks(teamName);
+    const cols2 = [["MOST FREQUENT", [...playStats].sort((a, b) => b.n - a.n).slice(0, 5), REP.OR], ["MOST EFFICIENT", [...playStats].filter(x => x.n >= 3).sort((a, b) => b.ppp - a.ppp).slice(0, 5), REP.GRN]];
     const cw3 = (W - 2 * M - 14) / 2;
     for (let ci = 0; ci < 2; ci++) {
       const [ttl, list, c] = cols2[ci]; const x = M + ci * (cw3 + 14);
       text(ttl, x, 92, { size: 8, bold: true, color: c });
       for (let i = 0; i < list.length; i++) {
-        const it = list[i], y = 100 + i * 170;
-        rect(x, y, cw3, 162, REP.BG, 8);
-        text(it.label, x + 10, y + 16, { size: 9, bold: true, maxW: cw3 - 20 });
-        const pl2 = findPlay(it.label);
+        const it = list[i], y = 100 + i * 134;
+        rect(x, y, cw3, 126, REP.BG, 8);
+        text(it.label, x + 10, y + 15, { size: 8.5, bold: true, maxW: cw3 - 20 });
+        const pl2 = resolveScoutingPlayDiagram(it.label, allPlays, playLinks);
         let drawn = false;
+        // Le dessin reste TOUJOURS carré (jamais étiré en rectangle) : on l'inscrit dans le plus
+        // grand carré disponible, centré, quitte à le réduire plutôt que de le déformer.
+        const boxS = Math.min(cw3 - 20, 72), boxX = x + (cw3 - boxS) / 2, boxY = y + 20;
         if (pl2) {
           try {
             const fr = pl2.frames[0];
             const img = await repSvgToPng(drawFrameSvg(fr, DRAW_PAL_PRINT), drawVB(fr), 360);
-            if (img) { const iw = cw3 - 20, ih = Math.min(104, iw * img.ratio); doc.addImage(img.png, "PNG", x + 10, y + 24, iw, ih); drawn = true; }
+            if (img) {
+              let iw2 = boxS, ih2 = boxS * img.ratio;
+              if (ih2 > boxS) { ih2 = boxS; iw2 = boxS / img.ratio; }
+              doc.addImage(img.png, "PNG", boxX + (boxS - iw2) / 2, boxY + (boxS - ih2) / 2, iw2, ih2);
+              drawn = true;
+            }
           } catch { /* dessin illisible */ }
         }
-        if (!drawn) text("No matching diagram in the Playbook", x + cw3 / 2, y + 70, { size: 7.5, color: REP.MUTE, align: "center" });
-        rect(x + 10, y + 134, 60, 18, c, 4); text(`${it.ppp.toFixed(2)} PPP`, x + 40, y + 146, { size: 8, bold: true, color: REP.WHITE, align: "center" });
-        text(`${it.n} possessions · ${it.freq.toFixed(0)}%`, x + 78, y + 146, { size: 7.5, color: REP.MUTE });
+        if (!drawn) { rect(boxX, boxY, boxS, boxS, REP.GREY, 4); text("No diagram linked", x + cw3 / 2, boxY + boxS / 2 + 3, { size: 6.5, color: REP.MUTE, align: "center" }); }
+        rect(x + 10, y + 98, 60, 18, c, 4); text(`${it.ppp.toFixed(2)} PPP`, x + 40, y + 110, { size: 8, bold: true, color: REP.WHITE, align: "center" });
+        text(`${it.n} possessions · ${it.freq.toFixed(0)}%`, x + 78, y + 110, { size: 7.5, color: REP.MUTE });
       }
     }
   }
@@ -15305,7 +15500,637 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
   doc.save(`scouting_report_${teamName.replace(/\s+/g, "_")}_${todayLocal()}.pdf`);
 }
 
-function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, initialTeam, ourStats }) {
+// ---------------------------------------------------------------------------
+// Affichage à l'écran de l'onglet Scouting Report › Stats : les MÊMES données que l'export PDF
+// (repGatherReportData), affichées directement dans l'app, pas seulement dans le fichier exporté.
+// ---------------------------------------------------------------------------
+const RS_GRN = "#1F9D6B", RS_RED = "#D9453B", RS_LGRN = "rgba(31,157,107,0.16)", RS_LRED = "rgba(217,69,59,0.16)", RS_LOR = "rgba(242,169,59,0.16)";
+function RsCard({ title, sub, children, style }) {
+  return (
+    <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 16, marginBottom: 16, ...style }}>
+      {title && <div style={{ fontSize: 14, fontWeight: 800, color: PAPER, marginBottom: sub ? 2 : 10 }}>{title}</div>}
+      {sub && <div style={{ fontSize: 11.5, color: "#8B93A1", marginBottom: 10 }}>{sub}</div>}
+      {children}
+    </div>
+  );
+}
+function RsBadge({ children, color = "#5C6470", bg }) {
+  return <span style={{ fontSize: 10.5, fontWeight: 700, color, background: bg || "transparent", borderRadius: 5, padding: "2px 6px" }}>{children}</span>;
+}
+function RsEmpty({ text }) { return <div style={{ fontSize: 12, color: "#5C6470", padding: "10px 0" }}>{text}</div>; }
+// Photo FFBB du joueur (déjà récupérée par ffbb-nm1-roster.js) si on l'a, sinon ses initiales
+// sur un disque — jamais de cadre vide.
+function RsAvatar({ photo, name, size = 28 }) {
+  const style = { width: size, height: size, borderRadius: "50%", flex: "0 0 auto", objectFit: "cover", background: "#2A323D" };
+  if (photo) return <img src={photo} alt="" style={style} />;
+  const initials = String(name || "?").split(/\s+/).filter(Boolean).map(w => w[0]).join("").slice(0, 2).toUpperCase();
+  return <div style={{ ...style, display: "flex", alignItems: "center", justifyContent: "center", fontSize: size * 0.38, fontWeight: 700, color: AMBER }}>{initials}</div>;
+}
+
+function RsStandings({ st, teamName, ourName, pouleName, recentGames }) {
+  if (!st.length) return <RsEmpty text="No league games synchronised yet — use Manage teams › Sync FFBB to load them." />;
+  return (
+    <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+      <div style={{ flex: "1 1 280px", minWidth: 0 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: AMBER, marginBottom: 6 }}>{(pouleName || "NM1").toUpperCase()} STANDINGS</div>
+        <div style={{ maxHeight: 320, overflowY: "auto" }}>
+          {st.map((r, i) => {
+            const isOpp = normTag(r.name) === normTag(teamName), isUs = ourName && normTag(r.name) === normTag(ourName);
+            return (
+              <div key={r.name} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", borderRadius: 6, background: isUs ? RS_LGRN : isOpp ? RS_LOR : "transparent" }}>
+                <div style={{ width: 20, fontSize: 11, color: "#8B93A1" }}>{r.pos ?? i + 1}</div>
+                <div style={{ flex: 1, fontSize: 12.5, fontWeight: isOpp || isUs ? 700 : 400, color: PAPER, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.name}</div>
+                <div style={{ fontSize: 12, color: "#8B93A1", width: 54, textAlign: "right" }}>{r.w} - {r.l}</div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+      <div style={{ flex: "1 1 280px", minWidth: 0 }}>
+        <div style={{ fontSize: 11, fontWeight: 700, color: AMBER, marginBottom: 6 }}>LAST 5 GAMES</div>
+        {!recentGames || !recentGames.length ? <RsEmpty text="No game yet." /> : recentGames.slice(-5).reverse().map((g, i) => {
+          const win = g.pf > g.pa;
+          return (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 10px", marginBottom: 6, borderRadius: 8, background: win ? RS_LGRN : RS_LRED }}>
+              <div style={{ width: 26, height: 26, borderRadius: 6, background: win ? RS_GRN : RS_RED, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 12 }}>{win ? "W" : "L"}</div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 12.5, fontWeight: 700, color: PAPER, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{g.opp}</div>
+                <div style={{ fontSize: 10, color: "#8B93A1" }}>{g.home ? "Home" : "Away"}{g.date ? " · " + g.date : ""}</div>
+              </div>
+              <div style={{ fontSize: 15, fontWeight: 800, color: win ? RS_GRN : RS_RED }}>{g.pf} - {g.pa}</div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function RsPlaytypeTable({ list, title, color }) {
+  if (!list.length) return <RsEmpty text="No Scouting Observation file for this team yet." />;
+  const maxF = Math.max(1, ...list.map(x => x.freq));
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color, marginBottom: 6 }}>{title}</div>
+      {list.map(it => (
+        <div key={it.label} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", borderTop: `1px solid ${LINE}` }}>
+          <div style={{ width: 120, fontSize: 11.5, color: PAPER, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{it.label}</div>
+          <div style={{ flex: 1, height: 8, background: LINE, borderRadius: 4, overflow: "hidden" }}><div style={{ width: `${100 * it.freq / maxF}%`, height: "100%", background: AMBER }} /></div>
+          <div style={{ width: 36, fontSize: 10.5, color: "#8B93A1", textAlign: "right" }}>{it.freq.toFixed(0)}%</div>
+          <div style={{ width: 48, fontSize: 11.5, fontWeight: 700, color: PAPER, textAlign: "right" }}>{it.ppp.toFixed(2)}</div>
+          <div style={{ width: 44, fontSize: 10, color: "#8B93A1", textAlign: "right" }}>#{it.rank}/{it.total}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RsComparison({ ourStats, t, ourName, teamName }) {
+  if (!ourStats || !Object.keys(ourStats).length) return <RsEmpty text="Our team stats are not available yet (import box scores first)." />;
+  const groups = [
+    ["Playmaking", ["pts", "pd", "padbp", "pctpad", "poss", "ortg"]],
+    ["Shooting", ["pct2", "pct3", "pctlf", "efg", "ts", "pct3tst", "ftafga"]],
+    ["Rebounding", ["rt", "ro", "pctro", "pctrd"]],
+    ["Defense", ["ptse", "drtg", "int", "ct", "fte"]],
+    ["Advanced", ["nrtg", "blk100", "stl100"]],
+    ["Opponent stats", ["dPct2", "dPct3", "dEfg", "oRt", "oPctro", "dPctbp", "dFtafga", "oLft", "oR2", "oT2", "oR3", "oT3", "oPd", "oIn", "oBp", "oCt", "oFte"]],
+    ["Turnovers & fouls", ["bp", "pctbp", "fte", "fo"]],
+  ];
+  const fmt = (k, v) => { const sc = SCOUT_STAT_SCHEMA.find(s => s.key === k); if (v === undefined || v === null || isNaN(v)) return "–"; return sc && sc.pct ? v.toFixed(1) + "%" : Number.isInteger(v) ? String(v) : v.toFixed(1); };
+  return (
+    <div>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 70, paddingRight: 4, marginBottom: 4 }}>
+        <div style={{ width: 56, fontSize: 10.5, fontWeight: 700, color: "#8B93A1", textAlign: "center" }}>{ourName}</div>
+        <div style={{ width: 56, fontSize: 10.5, fontWeight: 700, color: "#8B93A1", textAlign: "center" }}>{teamName}</div>
+      </div>
+      {groups.map(([title, keys]) => {
+        const list = keys.filter(k => ourStats[k] !== undefined && t.stats[k] !== undefined);
+        if (!list.length) return null;
+        return (
+          <div key={title} style={{ marginBottom: 10 }}>
+            <div style={{ fontSize: 10.5, fontWeight: 700, color: AMBER, marginBottom: 4 }}>{title.toUpperCase()}</div>
+            {list.map(k => {
+              const sc = SCOUT_STAT_SCHEMA.find(s => s.key === k), a = ourStats[k], b = t.stats[k];
+              const better = a === b ? 0 : (sc.lowerBetter ? a < b : a > b) ? 1 : -1;
+              return (
+                <div key={k} style={{ display: "flex", alignItems: "center", padding: "4px 8px", borderRadius: 5, background: "rgba(255,255,255,0.03)", marginBottom: 2 }}>
+                  <div style={{ flex: 1, fontSize: 11.5, color: PAPER }}>{sc.label}</div>
+                  <div style={{ width: 56, textAlign: "center", fontSize: 11.5, fontWeight: 700, color: better > 0 ? RS_GRN : better < 0 ? RS_RED : PAPER, background: better > 0 ? RS_LGRN : better < 0 ? RS_LRED : "transparent", borderRadius: 4, padding: "2px 0" }}>{fmt(k, a)}</div>
+                  <div style={{ width: 14 }} />
+                  <div style={{ width: 56, textAlign: "center", fontSize: 11.5, fontWeight: 700, color: better < 0 ? RS_GRN : better > 0 ? RS_RED : PAPER, background: better < 0 ? RS_LGRN : better > 0 ? RS_LRED : "transparent", borderRadius: 4, padding: "2px 0" }}>{fmt(k, b)}</div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function RsPlaytypeCompare({ A, B, labels, title, invert = false }) {
+  const rows = labels.filter(l => A[l] && B[l]).map(l => ({ l, a: A[l], b: B[l], avg: (A[l].ppp + B[l].ppp) / 2 })).sort((p, q) => q.avg - p.avg);
+  if (!rows.length) return null;
+  return (
+    <div style={{ marginBottom: 14 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: AMBER, marginBottom: 6 }}>{title}</div>
+      {rows.map(r => {
+        // Vu depuis notre attaque, haute PPP = EXPLOIT. Vu depuis LEUR attaque contre notre défense
+        // (invert), haute PPP = DANGER pour nous ; basse PPP = secteur déjà maîtrisé (STRENGTH).
+        const highRisk = r.avg > 1.05, lowRisk = r.avg < 0.9;
+        const good = invert ? lowRisk : highRisk, bad = invert ? highRisk : lowRisk;
+        const goodLabel = invert ? "STRENGTH" : "EXPLOIT";
+        return (
+          <div key={r.l} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", borderRadius: 6, background: good ? RS_LGRN : bad ? RS_LRED : "rgba(255,255,255,0.03)", marginBottom: 3 }}>
+            <div style={{ flex: 1, fontSize: 11.5, color: PAPER, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.l}</div>
+            <div style={{ fontSize: 10.5, color: "#8B93A1", width: 70, textAlign: "right" }}>{r.a.n} poss · {r.a.ppp.toFixed(2)}</div>
+            <div style={{ fontSize: 10.5, color: "#8B93A1", width: 70, textAlign: "right" }}>{r.b.n} poss · {r.b.ppp.toFixed(2)}</div>
+            <div style={{ width: 48, fontSize: 11.5, fontWeight: 800, textAlign: "right", color: good ? RS_GRN : bad ? RS_RED : PAPER }}>{r.avg.toFixed(2)}</div>
+            {(good || bad) && <RsBadge color="#fff" bg={good ? RS_GRN : RS_RED}>{good ? goodLabel : "DANGER"}</RsBadge>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function RsHotCold({ LS }) {
+  const max = Math.max(2, ...LS.tempo.map(v => Math.abs(v)));
+  const worst = LS.tempo.indexOf(Math.min(...LS.tempo)), best = LS.tempo.indexOf(Math.max(...LS.tempo));
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "flex-end", height: 90, gap: 2, borderBottom: `1px solid ${LINE}`, marginBottom: 4 }}>
+        {LS.tempo.map((v, i) => (
+          <div key={i} style={{ flex: 1, height: "100%", display: "flex", flexDirection: "column", justifyContent: "flex-end", alignItems: "center" }} title={`${i * 2}-${i * 2 + 2}': ${v.toFixed(1)} pts`}>
+            <div style={{ width: "70%", height: `${Math.abs(v) / max * 100}%`, minHeight: 2, background: v >= 0 ? RS_GRN : RS_RED, borderRadius: 2 }} />
+          </div>
+        ))}
+      </div>
+      <div style={{ display: "flex", gap: 2, marginBottom: 10 }}>
+        {LS.tempo.map((_, i) => <div key={i} style={{ flex: 1, fontSize: 7, color: "#5C6470", textAlign: "center" }}>{i % 5 === 0 ? `${i * 2}'` : ""}</div>)}
+      </div>
+      <div style={{ display: "flex", gap: 10 }}>
+        <div style={{ flex: 1, background: RS_LRED, borderRadius: 8, padding: "8px 12px" }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: RS_RED }}>WORST BLOCK</div>
+          <div style={{ fontSize: 14, fontWeight: 800, color: RS_RED }}>{worst * 2}-{worst * 2 + 2}' · {LS.tempo[worst].toFixed(1)} pts</div>
+        </div>
+        <div style={{ flex: 1, background: RS_LGRN, borderRadius: 8, padding: "8px 12px" }}>
+          <div style={{ fontSize: 10, fontWeight: 700, color: RS_GRN }}>BEST BLOCK</div>
+          <div style={{ fontSize: 14, fontWeight: 800, color: RS_GRN }}>{best * 2}-{best * 2 + 2}' · +{LS.tempo[best].toFixed(1)} pts</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function RsImpact({ LS }) {
+  const cols = [["ORTG", "ortg", 1], ["DRTG", "drtg", 0], ["OREB%", "ro", 1], ["TO%", "to", 0], ["AST%", "ast", 1]];
+  const list = LS.impact.filter(p => p.min >= 10).slice(0, 14);
+  if (!list.length) return <RsEmpty text="Not enough minutes yet." />;
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <div style={{ minWidth: 560 }}>
+        <div style={{ display: "flex", fontSize: 10, color: "#8B93A1", fontWeight: 700, paddingBottom: 4, borderBottom: `1px solid ${LINE}` }}>
+          <div style={{ width: 110 }}>Player</div><div style={{ width: 36, textAlign: "right" }}>Min</div>
+          {cols.map(([h]) => <div key={h} style={{ flex: 1, textAlign: "center" }}>{h}</div>)}
+        </div>
+        {list.map(p => (
+          <div key={p.name} style={{ display: "flex", alignItems: "center", padding: "6px 0", borderBottom: `1px solid ${LINE}` }}>
+            <div style={{ width: 110, fontSize: 11.5, fontWeight: 700, color: PAPER, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</div>
+            <div style={{ width: 36, textAlign: "right", fontSize: 10.5, color: "#8B93A1" }}>{p.min.toFixed(0)}</div>
+            {cols.map(([, k, hi]) => {
+              const a = p.on[k], b = p.off[k];
+              if (a == null || b == null) return <div key={k} style={{ flex: 1 }} />;
+              const onBetter = hi ? a > b : a < b;
+              const pct = k !== "ortg" && k !== "drtg";
+              return (
+                <div key={k} style={{ flex: 1, display: "flex", gap: 3, justifyContent: "center" }}>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: onBetter ? RS_GRN : RS_RED, background: onBetter ? RS_LGRN : RS_LRED, borderRadius: 3, padding: "2px 4px" }}>{a.toFixed(0)}{pct ? "%" : ""}</span>
+                  <span style={{ fontSize: 10, fontWeight: 700, color: !onBetter ? RS_GRN : RS_RED, background: !onBetter ? RS_LGRN : RS_LRED, borderRadius: 3, padding: "2px 4px" }}>{b.toFixed(0)}{pct ? "%" : ""}</span>
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+      <div style={{ fontSize: 9.5, color: "#5C6470", marginTop: 6 }}>Left value = on court, right value = bench, per 100 possessions.</div>
+    </div>
+  );
+}
+
+function RsLineups({ LS }) {
+  const L5 = LS.lineups.filter(l => l.min >= 5);
+  const sets = [["Most used", [...L5].sort((a, b) => b.min - a.min).slice(0, 5), "#5C6470"], ["Most efficient", [...L5].sort((a, b) => b.net10 - a.net10).slice(0, 5), RS_GRN], ["Least efficient", [...L5].sort((a, b) => a.net10 - b.net10).slice(0, 5), RS_RED]];
+  return (
+    <div style={{ display: "flex", gap: 14, flexWrap: "wrap" }}>
+      {sets.map(([ttl, list, c]) => (
+        <div key={ttl} style={{ flex: "1 1 300px", minWidth: 0 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: c, marginBottom: 6 }}>{ttl.toUpperCase()}</div>
+          {!list.length ? <RsEmpty text="Not enough minutes together." /> : list.map((l, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", marginBottom: 4, borderRadius: 6, background: "rgba(255,255,255,0.03)", borderLeft: `3px solid ${c}` }}>
+              <div style={{ flex: 1, fontSize: 10.5, color: PAPER }}>{l.players.join(" · ")}<div style={{ fontSize: 9.5, color: "#8B93A1" }}>{l.min.toFixed(1)} min · {l.pf}-{l.pa}</div></div>
+              <div style={{ fontSize: 11, fontWeight: 800, color: "#fff", background: l.net10 >= 0 ? RS_GRN : RS_RED, borderRadius: 4, padding: "2px 7px" }}>{l.net10 > 0 ? "+" : ""}{l.net10.toFixed(1)}</div>
+            </div>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function RsRotations({ LS }) {
+  const list = LS.rot.filter(p => p.min >= 10).slice(0, 12);
+  if (!list.length) return <RsEmpty text="Not enough minutes yet." />;
+  // 30 s -> tranches de 2 min pour l'affichage (moyenne de 4 cases).
+  const bucket = prob => { const out = []; for (let i = 0; i < 20; i++) { const seg = prob.slice(i * 4, i * 4 + 4); out.push(seg.reduce((a, b) => a + b, 0) / seg.length); } return out; };
+  return (
+    <div>
+      {list.map(p => (
+        <div key={p.name} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          <div style={{ width: 90, fontSize: 10.5, color: PAPER, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{p.name}</div>
+          <div style={{ flex: 1, display: "flex", gap: 2, height: 18 }}>
+            {bucket(p.prob).map((v, i) => { const m = Math.min(1, v); return <div key={i} style={{ flex: 1, background: `rgba(242,169,59,${0.12 + 0.75 * m})`, borderRadius: 2, borderRight: i % 5 === 4 ? `1px solid ${INK}` : "none" }} />; })}
+          </div>
+          <div style={{ width: 48, fontSize: 9.5, color: "#8B93A1", textAlign: "right" }}>{(p.min / LS.games).toFixed(0)} min</div>
+        </div>
+      ))}
+      <div style={{ display: "flex", fontSize: 8.5, color: "#5C6470", marginTop: 2, paddingLeft: 98 }}>
+        {["Q1", "Q2", "Q3", "Q4"].map(q => <div key={q} style={{ flex: 1, textAlign: "center" }}>{q}</div>)}
+      </div>
+    </div>
+  );
+}
+
+function RsLastGame({ lg }) {
+  if (!lg) return <RsEmpty text="Not available." />;
+  return (
+    <div>
+      <div style={{ fontSize: 12, fontWeight: 700, color: PAPER, marginBottom: 8 }}>{lg.opp} ({lg.scoreFor}-{lg.scoreAgainst})</div>
+      {[0, 1, 2, 3, 4].map(row => {
+        const segs = lg.segs.filter(s => s.row === row);
+        return (
+          <div key={row} style={{ display: "flex", height: 30, marginBottom: 3, gap: 1 }}>
+            {segs.map((s, i) => {
+              const w = 100 * (s.b - s.a) / lg.endT;
+              const k = Math.min(1, Math.abs(s.pm) / 10);
+              const bg = s.pm >= 0 ? `rgba(31,157,107,${0.2 + 0.6 * k})` : `rgba(217,69,59,${0.2 + 0.6 * k})`;
+              return (
+                <div key={i} style={{ width: `${w}%`, background: bg, display: "flex", alignItems: "center", justifyContent: "center", borderRadius: 2, overflow: "hidden" }} title={`${s.name} ${s.pm > 0 ? "+" : ""}${s.pm}`}>
+                  {w > 6 && <span style={{ fontSize: 8.5, fontWeight: 700, color: "#1A1D24", whiteSpace: "nowrap" }}>{s.name.replace(/^[A-Z]\.\s*/, "")} {s.pm > 0 ? "+" : ""}{s.pm}</span>}
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+      <div style={{ fontSize: 9.5, color: "#5C6470", marginTop: 4 }}>A player entering takes the row of the player he replaces.</div>
+    </div>
+  );
+}
+
+function RsFatigueSpark({ vals, mins, color }) {
+  const defd = vals.map((v, i) => v !== null ? [i, v] : null).filter(Boolean);
+  if (defd.length < 2) return <div style={{ fontSize: 9.5, color: "#5C6470" }}>not enough data</div>;
+  const lo = Math.min(...defd.map(x => x[1])) - 4, hi = Math.max(...defd.map(x => x[1])) + 4;
+  const W = 110, H = 44;
+  const px = i => 6 + (W - 12) * i / 5, py = v => H - 6 - (H - 12) * (v - lo) / Math.max(1, hi - lo);
+  const path = defd.map(([i, v], j) => `${j === 0 ? "M" : "L"}${px(i)},${py(v)}`).join(" ");
+  return (
+    <svg width={W} height={H}>
+      <path d={path} fill="none" stroke={color} strokeWidth={1.6} />
+      {defd.map(([i, v]) => <circle key={i} cx={px(i)} cy={py(v)} r={2.4} fill={mins[i] >= 3 ? color : "#161B22"} stroke={color} strokeWidth={1} />)}
+    </svg>
+  );
+}
+function RsFatigue({ LS, FF, repNameMatch }) {
+  const players = LS.impact.filter(p => p.min >= 40 && LS.fatigue[p.name]).slice(0, 10);
+  if (!players.length) return <RsEmpty text="Not enough minutes yet." />;
+  const mets = [["FG %", "fg", AMBER], ["REB %", "reb", RS_GRN], ["TOV %", "tov", RS_RED], ["AST %", "ast", "#8B93A1"]];
+  const photoFor = name => ((FF || []).find(({ fp }) => repNameMatch(fp.name, name)) || {}).fp?.photo || null;
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, fontSize: 9.5, color: "#8B93A1", paddingLeft: 86, marginBottom: 4 }}>{mets.map(([h]) => <div key={h} style={{ width: 120, textAlign: "center" }}>{h}</div>)}</div>
+      {players.map(p => {
+        const F = LS.fatigue[p.name];
+        return (
+          <div key={p.name} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8, paddingBottom: 8, borderBottom: `1px solid ${LINE}` }}>
+            <div style={{ width: 78, display: "flex", alignItems: "center", gap: 6 }}>
+              <RsAvatar photo={photoFor(p.name)} name={p.name} size={26} />
+              <div style={{ fontSize: 10.5, color: PAPER, fontWeight: 700, minWidth: 0 }}>{p.name}<div style={{ fontSize: 9, color: "#8B93A1", fontWeight: 400 }}>{(p.min / p.games).toFixed(0)} min/g</div></div>
+            </div>
+            {mets.map(([, k, c]) => <div key={k} style={{ width: 120, textAlign: "center" }}><RsFatigueSpark vals={F.map(b => b[k])} mins={F.map(b => b.min)} color={c} /></div>)}
+          </div>
+        );
+      })}
+      <div style={{ fontSize: 9, color: "#5C6470" }}>Each point = a 2-minute block of continuous time on court (0-2, 2-4 … 10+), reset at half-time. Filled dot = at least 3 min observed.</div>
+    </div>
+  );
+}
+
+function RsContested({ CS, PT, myShots, tagIsSet }) {
+  if (!myShots.length) return <RsEmpty text="No coded shots for this team in Scouting Observation yet." />;
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 10, marginBottom: 14 }}>
+        {[["2 pts", CS.two], ["3 pts", CS.three], ["Total", CS.all]].map(([lab, g]) => (
+          <div key={lab} style={{ flex: 1, background: "rgba(255,255,255,0.03)", borderRadius: 8, padding: 10, textAlign: "center" }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: PAPER, marginBottom: 6 }}>{lab}</div>
+            <div style={{ display: "flex", justifyContent: "center", gap: 14 }}>
+              {[[g.fgo, RS_GRN, "Open", g.no], [g.fgc, RS_RED, "Contested", g.nc]].map(([v, c, l, n]) => (
+                <div key={l}>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: c }}>{v !== null ? v.toFixed(0) + "%" : "–"}</div>
+                  <div style={{ fontSize: 9, color: "#8B93A1" }}>{l} ({n})</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+function RsContestedByPlaytype({ PT, myShots, grp, tagIsSet }) {
+  const rows = PT.labels.map(l => ({ l, arr: myShots.filter(p => tagIsSet(p.tags, l)) })).filter(x => x.arr.length >= 4).sort((a, b) => b.arr.length - a.arr.length).slice(0, 12);
+  if (!rows.length) return null;
+  return (
+    <div>
+      <div style={{ fontSize: 11, fontWeight: 700, color: AMBER, marginBottom: 6 }}>BY PLAYTYPE</div>
+      {rows.map(({ l, arr }) => {
+        const g = grp(arr), gap = g.fgo !== null && g.fgc !== null ? g.fgo - g.fgc : null;
+        return (
+          <div key={l} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", borderRadius: 6, background: "rgba(255,255,255,0.03)", marginBottom: 3 }}>
+            <div style={{ flex: 1, fontSize: 11, color: PAPER, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{l}</div>
+            <div style={{ width: 40, fontSize: 10, color: "#8B93A1", textAlign: "right" }}>{g.n}</div>
+            <div style={{ width: 54, fontSize: 10.5, fontWeight: 700, color: RS_GRN, textAlign: "right" }}>{g.fgo === null ? "–" : g.fgo.toFixed(0) + "%"}</div>
+            <div style={{ width: 64, fontSize: 10.5, fontWeight: 700, color: RS_RED, textAlign: "right" }}>{g.fgc === null ? "–" : g.fgc.toFixed(0) + "%"}</div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function RsIndividualStats({ FF }) {
+  if (!FF.length) return <RsEmpty text="No FFBB player stats for this team yet (Scouting Report › Individual › Sync roster)." />;
+  const pc = (m, a) => (a > 0 ? (100 * m / a).toFixed(0) + "%" : "–");
+  return (
+    <div style={{ overflowX: "auto" }}>
+      <div style={{ minWidth: 560 }}>
+        <div style={{ display: "flex", fontSize: 10, color: "#8B93A1", fontWeight: 700, paddingBottom: 4, borderBottom: `1px solid ${LINE}` }}>
+          {["Player", "GP", "MIN", "PTS", "REB", "AST", "STL", "TO", "FG%", "3P%", "FT%"].map((h, i) => <div key={h} style={{ width: i === 0 ? 140 : 44, textAlign: i === 0 ? "left" : "right" }}>{h}</div>)}
+        </div>
+        {FF.slice(0, 14).map(({ fp, st: s }) => (
+          <div key={fp.name} style={{ display: "flex", alignItems: "center", padding: "5px 0", borderBottom: `1px solid ${LINE}` }}>
+            <div style={{ width: 140, display: "flex", alignItems: "center", gap: 6, fontSize: 11, fontWeight: 700, color: PAPER, minWidth: 0 }}>
+              <RsAvatar photo={fp.photo} name={fp.name} size={22} />
+              <span style={{ whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{fp.name}</span>
+            </div>
+            {[s.mj ?? "–", (s.min ?? 0).toFixed(1), (s.pts ?? 0).toFixed(1), (s.reb ?? 0).toFixed(1), (s.ast ?? 0).toFixed(1), (s.stl ?? 0).toFixed(1), (s.tov ?? 0).toFixed(1), pc(s.r2 + s.r3, s.t2 + s.t3), pc(s.r3, s.t3), pc(s.lfr, s.lft)].map((v, i) => (
+              <div key={i} style={{ width: 44, textAlign: "right", fontSize: 11, color: i === 2 ? PAPER : "#C7CCD6", fontWeight: i === 2 ? 700 : 400 }}>{v}</div>
+            ))}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+function RsPointsCreated({ FF, LS, repNameMatch }) {
+  if (!FF.length) return null;
+  const cr = FF.slice(0, 10).map(({ fp, st: s }) => { const li = LS ? LS.impact.find(i => repNameMatch(fp.name, i.name)) : null; return { n: fp.name, p: s.pts || 0, a: li && li.games ? (li.astPts || 0) / li.games : 2 * (s.ast || 0) }; }).sort((a, b) => (b.p + b.a) - (a.p + a.a));
+  const max = Math.max(1, ...cr.map(x => x.p + x.a));
+  return (
+    <div>
+      <div style={{ fontSize: 11, fontWeight: 700, color: AMBER, marginBottom: 8 }}>POINTS CREATED PER GAME</div>
+      {cr.map(c => (
+        <div key={c.n} style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
+          <div style={{ width: 100, fontSize: 10.5, color: PAPER, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{c.n}</div>
+          <div style={{ flex: 1, display: "flex", height: 13, borderRadius: 3, overflow: "hidden" }}>
+            <div style={{ width: `${100 * c.p / max}%`, background: AMBER }} /><div style={{ width: `${100 * c.a / max}%`, background: "#5C6470" }} />
+          </div>
+          <div style={{ width: 34, fontSize: 10.5, fontWeight: 700, color: PAPER, textAlign: "right" }}>{(c.p + c.a).toFixed(1)}</div>
+        </div>
+      ))}
+      <div style={{ display: "flex", gap: 14, marginTop: 6 }}>
+        <div style={{ fontSize: 9.5, color: "#8B93A1" }}><span style={{ display: "inline-block", width: 8, height: 8, background: AMBER, borderRadius: 2, marginRight: 4 }} />Points</div>
+        <div style={{ fontSize: 9.5, color: "#8B93A1" }}><span style={{ display: "inline-block", width: 8, height: 8, background: "#5C6470", borderRadius: 2, marginRight: 4 }} />Points off assists (LiveStats)</div>
+      </div>
+    </div>
+  );
+}
+
+function RsPlayerCards({ FF, LEAGUE, LEAGUE_POULE, pouleName, PT, ptList, teamName, repLeagueRank, normTag }) {
+  if (!FF.length) return <RsEmpty text="No FFBB player stats for this team yet." />;
+  const myPlaysAll = (PT.myPlays || []).filter(isOffense);
+  const sorted = ptList("off"), topS = new Set(sorted.slice(0, 3).map(x => x.label)), botS = new Set(sorted.slice(-3).map(x => x.label));
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", gap: 12 }}>
+      {FF.slice(0, 8).map(({ fp, st: s }) => {
+        const fga = (s.t2 || 0) + (s.t3 || 0), ts = fga + 0.44 * (s.lft || 0) > 0 ? 100 * (s.pts || 0) / (2 * (fga + 0.44 * (s.lft || 0))) : null;
+        const p2 = 2 * (s.r2 || 0), p3 = 3 * (s.r3 || 0), pf = s.lfr || 0, pt = Math.max(0.1, p2 + p3 + pf);
+        const last = String(fp.name).split(/\s+/).pop();
+        const mine = myPlaysAll.filter(p => p.player && normTag(p.player).includes(normTag(last)));
+        const used = PT.labels.map(l => ({ l, n: mine.filter(p => tagIsSet(p.tags, l)).length })).filter(o => o.n > 0).sort((a, b) => b.n - a.n).slice(0, 3);
+        const rk = LEAGUE.length ? { pts: repLeagueRank(LEAGUE, { st: s }, q => q.pts, q => q.mj >= 3), ts: repLeagueRank(LEAGUE, { st: s }, q => { const f = (q.t2 || 0) + (q.t3 || 0) + 0.44 * (q.lft || 0); return f > 0 ? q.pts / (2 * f) : null; }, q => q.mj >= 3 && (q.min || 0) >= 10), p3: repLeagueRank(LEAGUE, { st: s }, q => (q.t3 > 0 ? q.r3 / q.t3 : null), q => q.mj >= 3 && q.t3 * q.mj >= 15) } : {};
+        const tiles = [["PTS/GAME", (s.pts ?? 0).toFixed(1), rk.pts], ["USAGE %", s.usage != null ? s.usage.toFixed(0) + "%" : "–", null], ["TS %", ts !== null ? ts.toFixed(0) + "%" : "–", rk.ts], ["3PT %", s.t3 > 0 ? (100 * s.r3 / s.t3).toFixed(0) + "%" : "–", rk.p3]];
+        return (
+          <div key={fp.name} style={{ flex: "1 1 320px", minWidth: 290, background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: 14 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+              <RsAvatar photo={fp.photo} name={fp.name} size={32} />
+              <div style={{ fontSize: 12, fontWeight: 800, color: PAPER }}>#{fp.jersey ?? ""} {fp.name.toUpperCase()}</div>
+            </div>
+            {(LEAGUE_POULE || []).length > 0 && (() => {
+              const rkp = [["PTS", repLeagueRank(LEAGUE_POULE, { st: s }, q => q.pts, q => q.mj >= 3)], ["TS%", repLeagueRank(LEAGUE_POULE, { st: s }, q => { const f = (q.t2 || 0) + (q.t3 || 0) + 0.44 * (q.lft || 0); return f > 0 ? q.pts / (2 * f) : null; }, q => q.mj >= 3 && (q.min || 0) >= 10)], ["3PT%", repLeagueRank(LEAGUE_POULE, { st: s }, q => (q.t3 > 0 ? q.r3 / q.t3 : null), q => q.mj >= 3 && q.t3 * q.mj >= 15)]].filter(([, r]) => r);
+              return rkp.length ? <div style={{ fontSize: 9.5, color: "#8B93A1", marginBottom: 8 }}>{pouleName || "Poule"} rank — {rkp.map(([l, r]) => `${l} #${r.rank}/${r.total}`).join(" · ")}</div> : null;
+            })()}
+            <div style={{ display: "flex", marginBottom: 10 }}>
+              {tiles.map(([l, v, rk2]) => (
+                <div key={l} style={{ flex: 1, textAlign: "center" }}>
+                  <div style={{ fontSize: 15, fontWeight: 800, color: PAPER }}>{v}</div>
+                  <div style={{ fontSize: 8, color: "#8B93A1" }}>{l}</div>
+                  {rk2 && <div style={{ fontSize: 8, fontWeight: 700, color: "#fff", background: rk2.rank <= Math.ceil(rk2.total * 0.1) ? RS_GRN : rk2.rank > rk2.total * 0.9 ? RS_RED : "#5C6470", borderRadius: 3, padding: "1px 4px", marginTop: 2, display: "inline-block" }}>#{rk2.rank}/{rk2.total}</div>}
+                </div>
+              ))}
+            </div>
+            <div style={{ display: "flex", height: 10, borderRadius: 3, overflow: "hidden", marginBottom: 10 }}>
+              {[[p2, AMBER], [p3, "#5C6470"], [pf, RS_GRN]].map(([v, c], i) => <div key={i} style={{ width: `${100 * v / pt}%`, background: c }} />)}
+            </div>
+            <div style={{ fontSize: 9, fontWeight: 700, color: "#8B93A1", marginBottom: 4 }}>3 MOST USED PLAYTYPES</div>
+            {!used.length ? <div style={{ fontSize: 10, color: "#5C6470" }}>No coded plays matched to this player</div> : used.map(o => {
+              const c = topS.has(o.l) ? RS_GRN : botS.has(o.l) ? RS_RED : "#5C6470";
+              return (
+                <div key={o.l} style={{ display: "flex", alignItems: "center", padding: "4px 8px", borderRadius: 5, background: "rgba(255,255,255,0.04)", borderLeft: `3px solid ${c}`, marginBottom: 3 }}>
+                  <div style={{ flex: 1, fontSize: 10.5, color: PAPER }}>{o.l}</div>
+                  <div style={{ fontSize: 10.5, fontWeight: 700, color: c }}>{(100 * o.n / mine.length).toFixed(0)}%</div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function RsPlays({ playStats, teamName, isCoach }) {
+  // Les 5 plays les plus fréquents + les 5 plus efficaces (demandé : "seulement ceux utiles,
+  // 5 fréquents, 5 efficaces") — pour chacun, on affiche le dessin lié dans le Playbook (carré,
+  // jamais déformé) ; si aucun nom ne correspond, le coach peut le lier lui-même.
+  const [allPlays, setAllPlays] = useState([]);
+  const [links, setLinks] = useState({});
+  const [nonce, setNonce] = useState(0);
+  useEffect(() => {
+    let alive = true;
+    if (!teamName) return;
+    Promise.all([loadPlaybookPlays(teamName), loadScoutingPlayLinks(teamName)]).then(([p, l]) => { if (alive) { setAllPlays(p); setLinks(l); } });
+    return () => { alive = false; };
+  }, [teamName, nonce]);
+  if (!playStats.length) return <RsEmpty text="No play coded for this team in Scouting Observation yet." />;
+  const freq = [...playStats].sort((a, b) => b.n - a.n).slice(0, 5);
+  const eff = [...playStats].filter(x => x.n >= 3).sort((a, b) => b.ppp - a.ppp).slice(0, 5);
+  async function link(label, playId) { const next = await saveScoutingPlayLink(teamName, label, playId); setLinks(next); }
+  const row = (it, c) => {
+    const pl = resolveScoutingPlayDiagram(it.label, allPlays, links);
+    return (
+      <div key={it.label} style={{ display: "flex", alignItems: "center", gap: 10, padding: "6px 8px", borderRadius: 6, background: "rgba(255,255,255,0.03)", marginBottom: 5 }}>
+        <div style={{ width: 46, height: 46, borderRadius: 6, background: "#fff", flexShrink: 0, overflow: "hidden" }}>
+          {pl ? <DrawThumb frame={pl.frames[0]} pal={DRAW_PAL_PRINT} style={{ height: "100%" }} /> : null}
+        </div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontSize: 11, color: PAPER }}>{it.label}</div>
+          {!pl && isCoach && teamName && (
+            <select defaultValue="" onChange={e => e.target.value && link(it.label, e.target.value)} style={{ fontSize: 9.5, color: AMBER, background: "none", border: `1px solid ${LINE}`, borderRadius: 4, marginTop: 2 }}>
+              <option value="">Link to Playbook diagram…</option>
+              {allPlays.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
+            </select>
+          )}
+          {!pl && !isCoach && <div style={{ fontSize: 9.5, color: "#5C6470" }}>No matching diagram in the Playbook</div>}
+        </div>
+        <div style={{ fontSize: 10, color: "#8B93A1" }}>{it.n} poss · {it.freq.toFixed(0)}%</div>
+        <RsBadge color="#fff" bg={c}>{it.ppp.toFixed(2)} PPP</RsBadge>
+      </div>
+    );
+  };
+  return (
+    <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+      <div style={{ flex: "1 1 320px", minWidth: 0 }}><div style={{ fontSize: 11, fontWeight: 700, color: AMBER, marginBottom: 6 }}>MOST FREQUENT</div>{freq.map(it => row(it, AMBER))}</div>
+      <div style={{ flex: "1 1 320px", minWidth: 0 }}><div style={{ fontSize: 11, fontWeight: 700, color: RS_GRN, marginBottom: 6 }}>MOST EFFICIENT</div>{eff.map(it => row(it, RS_GRN))}</div>
+      <div style={{ fontSize: 9.5, color: "#5C6470", width: "100%" }}>Diagrams linked to the Playbook are included in the PDF export too.</div>
+    </div>
+  );
+}
+
+function RsKeys({ D, teamName, ourName }) {
+  const { PT, ptMine, LS, lsErr, myShots, CS } = D;
+  const keys = [];
+  if (D.PT.own && ptMine) {
+    const cmp = (A, B) => PT.labels.filter(l => A[l] && B[l]).map(l => ({ l, avg: (A[l].ppp + B[l].ppp) / 2 })).sort((p, q) => q.avg - p.avg);
+    const ex = cmp(PT.own.off, ptMine.def).filter(x => x.avg > 1.05).slice(0, 2);
+    const dg = cmp(ptMine.off, PT.own.def).slice(0, 1);
+    if (ex.length) keys.push(["OFFENSE", RS_GRN, "Exploit " + ex.map(x => x.l).join(" and "), `Average PPP ${ex.map(x => x.avg.toFixed(2)).join(" and ")}: our best advantages against their defense.`]);
+    if (dg.length) keys.push(["DEFENSE", RS_RED, "Beware of " + dg[0].l, `Their best weapon against our defense (${dg[0].avg.toFixed(2)} PPP on average).`]);
+  }
+  if (LS) {
+    const w = LS.tempo.indexOf(Math.min(...LS.tempo));
+    keys.push(["TIMING", AMBER, `Watch the ${w * 2}-${w * 2 + 2}' block`, `Worst average block (${LS.tempo[w].toFixed(1)} pts over ${LS.games} games).`]);
+    const best = LS.impact.filter(p => p.min >= 30 && p.on.ortg != null && p.off.ortg != null && p.on.drtg != null && p.off.drtg != null).map(p => ({ p, net: (p.on.ortg - p.on.drtg) - (p.off.ortg - p.off.drtg) })).sort((a, b) => b.net - a.net)[0];
+    if (best) keys.push(["PLAYERS", "#5C6470", `${best.p.name}: biggest on-court impact`, `Team net rating is ${best.net > 0 ? "+" : ""}${best.net.toFixed(0)} points per 100 possessions better with him on court.`]);
+  }
+  if (myShots.length && CS.all.fgo !== null && CS.all.fgc !== null) keys.push(["CONTEST", RS_RED, "Contest their shots", `They shoot ${CS.all.fgo.toFixed(0)}% on open shots and ${CS.all.fgc.toFixed(0)}% when contested: force tough shots.`]);
+  if (!keys.length) return <RsEmpty text="Not enough data yet to generate keys (import observation files and LiveStats games)." />;
+  return (
+    <div>
+      {keys.slice(0, 6).map(([tag, c, ttl, body], i) => (
+        <div key={i} style={{ display: "flex", gap: 12, alignItems: "flex-start", padding: 12, borderRadius: 8, background: "rgba(255,255,255,0.03)", borderLeft: `3px solid ${c}`, marginBottom: 8 }}>
+          <div style={{ width: 24, height: 24, borderRadius: "50%", background: c, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 12, flexShrink: 0 }}>{i + 1}</div>
+          <div>
+            <div style={{ fontSize: 9.5, fontWeight: 700, color: c }}>{tag}</div>
+            <div style={{ fontSize: 12.5, fontWeight: 700, color: PAPER }}>{ttl}</div>
+            <div style={{ fontSize: 10.5, color: "#8B93A1" }}>{body}</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ScoutingReportOnScreen({ teamName, teams, ourStats, ourName = "Our team", isCoach, players, teamLogo, teamBg, scoutingLayout, displaySettings }) {
+  const [D, setD] = useState(null);
+  const [err, setErr] = useState("");
+  const [progress, setProgress] = useState("");
+  const [nonce, setNonce] = useState(0);
+  const ctx = useRef({ teams, ourStats, ourName });
+  ctx.current = { teams, ourStats, ourName };
+  useEffect(() => {
+    let alive = true;
+    setD(null); setErr(""); setProgress("");
+    repGatherReportData({ teamName, teams: ctx.current.teams, ourStats: ctx.current.ourStats, ourName: ctx.current.ourName, onProgress: (d, n) => alive && setProgress(`Loading league players ${d}/${n}…`) })
+      .then(d => { if (alive) { setD(d); setProgress(""); } })
+      .catch(e => { if (alive) { setErr(String((e && e.message) || e)); setProgress(""); } });
+    return () => { alive = false; };
+  }, [teamName, nonce]);
+
+  if (err) return <RsCard><RsEmpty text={"Could not load: " + err} /><button onClick={() => setNonce(n => n + 1)} style={{ fontSize: 11, color: AMBER, background: "none", border: `1px solid ${LINE}`, borderRadius: 6, padding: "4px 10px", cursor: "pointer" }}>Retry</button></RsCard>;
+  if (!D) return <RsCard><RsEmpty text={progress || "Loading…"} /></RsCard>;
+
+  const lg = D.LS && D.LS.last;
+  return (
+    <div>
+      <RsCard title="Match context" sub="Standing and form computed from the FFBB box scores synchronised in HoopTrack"><RsStandings st={D.st} teamName={teamName} ourName={ourName} pouleName={D.pouleName} recentGames={D.recentGames} /></RsCard>
+      <RsCard title="Offensive and defensive playtypes" sub="From Scouting Observation · rank among observed teams">
+        <RsPlaytypeTable list={D.ptList("off")} title="OFFENSIVE PLAYTYPES — what they run most" color={AMBER} />
+        <RsPlaytypeTable list={D.ptList("def")} title="DEFENSIVE PLAYTYPES — what they defend most" color={AMBER} />
+      </RsCard>
+      <RsCard title="Stats comparison" sub={`${ourName} vs ${teamName} · green = better`}><RsComparison ourStats={ourStats} t={D.t} ourName={ourName} teamName={teamName} /></RsCard>
+      {D.PT.own && D.ptMine && (
+        <RsCard title="Playtype comparison" sub="Average PPP > 1.05 = exploit · < 0.90 = danger">
+          <RsPlaytypeCompare A={D.PT.own.off} B={D.ptMine.def} labels={D.PT.labels} title="OUR OFFENSE VS THEIR DEFENSE" />
+          <RsPlaytypeCompare A={D.ptMine.off} B={D.PT.own.def} labels={D.PT.labels} title="THEIR OFFENSE VS OUR DEFENSE" invert />
+        </RsCard>
+      )}
+      <RsCard title="Hot and cold stretches" sub={D.LS ? `Average margin per 2-minute block · ${D.LS.games} LiveStats games` : "LiveStats data"}>
+        {D.LS ? <RsHotCold LS={D.LS} /> : <RsEmpty text={"LiveStats unavailable: " + D.lsErr} />}
+      </RsCard>
+      <RsCard title="Player impact: on court vs bench" sub="Per 100 possessions · left = on court, right = bench">
+        {D.LS ? <RsImpact LS={D.LS} /> : <RsEmpty text={"LiveStats unavailable: " + D.lsErr} />}
+      </RsCard>
+      <RsCard title="Lineups" sub="5-man lineups from LiveStats · at least 5 minutes played together">
+        {D.LS ? <RsLineups LS={D.LS} /> : <RsEmpty text={"LiveStats unavailable: " + D.lsErr} />}
+      </RsCard>
+      <RsCard title="Rotations" sub="Probability of being on court · darker = more likely">
+        {D.LS ? <RsRotations LS={D.LS} /> : <RsEmpty text={"LiveStats unavailable: " + D.lsErr} />}
+      </RsCard>
+      <RsCard title="Last game">
+        {lg ? <RsLastGame lg={lg} /> : <RsEmpty text={"LiveStats unavailable: " + D.lsErr} />}
+      </RsCard>
+      <RsCard title="Fatigue, player by player" sub="By continuous minutes on court (2-min blocks, reset at half-time)">
+        {D.LS ? <RsFatigue LS={D.LS} FF={D.FF} repNameMatch={repNameMatch} /> : <RsEmpty text={"LiveStats unavailable: " + D.lsErr} />}
+      </RsCard>
+      <RsCard title="Contested and uncontested shooting" sub="From Scouting Observation: shots tagged Open versus other shots">
+        <RsContested CS={D.CS} PT={D.PT} myShots={D.myShots} tagIsSet={tagIsSet} />
+        <RsContestedByPlaytype PT={D.PT} myShots={D.myShots} grp={D.grp} tagIsSet={tagIsSet} />
+      </RsCard>
+      <RsCard title="Individual stats and points created" sub="FFBB season averages">
+        <RsIndividualStats FF={D.FF} />
+        <div style={{ height: 14 }} />
+        <RsPointsCreated FF={D.FF} LS={D.LS} repNameMatch={repNameMatch} />
+      </RsCard>
+      <RsCard title="Player cards — scoring" sub="FFBB season averages · #rank among NM1 players (green = top 10%) · playtypes: green = team's 3 most efficient, red = 3 least">
+        <RsPlayerCards FF={D.FF} LEAGUE={D.LEAGUE} LEAGUE_POULE={D.LEAGUE_POULE} pouleName={D.pouleName} PT={D.PT} ptList={D.ptList} teamName={teamName} repLeagueRank={repLeagueRank} normTag={normTag} />
+      </RsCard>
+      {(players || []).length > 0 && (
+        <RsCard title="Individual scouting sheets" sub="From Scouting Report › Individual">
+          {players.map(p => (
+            <ScoutingPlayerCard key={p.id} player={p} isCoach={false} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness} bgStretch={teamBg?.stretch} teamLogo={teamLogo} chartScale={displaySettings?.chartScale} layout={scoutingLayout} onEdit={() => {}} onDelete={() => {}} />
+          ))}
+        </RsCard>
+      )}
+      <RsCard title="Most frequent and most efficient plays" sub="From Scouting Observation"><RsPlays playStats={D.playStats} teamName={teamName} isCoach={isCoach} /></RsCard>
+      <RsCard title="Keys to the game" sub="Auto-generated summary of this report"><RsKeys D={D} teamName={teamName} ourName={ourName} /></RsCard>
+    </div>
+  );
+}
+
+function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, initialTeam, ourStats, ourTeamName, ourTeamLogo }) {
   const [selectedTeam, setSelectedTeam] = useState(initialTeam || "");
   const [exportReport, setExportReport] = useState(null);
   const [exportMsg, setExportMsg] = useState("");
@@ -15587,7 +16412,7 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
               <div className="screen-only" style={{ display: "flex", gap: 10, alignItems: "center", marginBottom: 14 }}>
                 <button disabled={exportMsg.startsWith("Generating PDF")} onClick={async () => {
                   setExportMsg("Generating PDF…");
-                  try { await exportScoutingReportPdf({ teamName: selectedTeam, teams: scoutingTeams || {}, ourStats, ourLogo: null, onProgress: (d, n) => setExportMsg(`Generating PDF… league players ${d}/${n}`) }); setExportMsg(""); }
+                  try { await exportScoutingReportPdf({ teamName: selectedTeam, teams: scoutingTeams || {}, ourStats, ourName: ourTeamName || undefined, ourLogo: ourTeamLogo || null, onProgress: (d, n) => setExportMsg(`Generating PDF… league players ${d}/${n}`) }); setExportMsg(""); }
                   catch (e) { setExportMsg("PDF failed (" + (e && e.message || e) + ")"); }
                 }} style={{ display: "flex", alignItems: "center", gap: 6, padding: "9px 16px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, color: PAPER, fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "inherit" }}>
                   <Download size={14} /> Export Scouting Report — PDF
@@ -15595,6 +16420,8 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
                 {exportMsg && <span style={{ fontSize: 12, color: exportMsg.startsWith("PDF failed") ? RED : "#8B93A1" }}>{exportMsg}</span>}
               </div>
               <ScoutingStatsPanel teamName={selectedTeam} teams={scoutingTeams || {}} />
+              <div style={{ height: 8 }} />
+              <ScoutingReportOnScreen teamName={selectedTeam} teams={scoutingTeams || {}} ourStats={ourStats} ourName={ourTeamName || undefined} isCoach={isCoach} players={report.players} teamLogo={teamLogo} teamBg={teamBg} scoutingLayout={scoutingLayout} displaySettings={displaySettings} />
             </div>
           )}
         </>
@@ -17283,7 +18110,7 @@ async function saveBoxCorrections(id, corrections, opts = {}) {
   return { record: next, idx };
 }
 
-function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, visibility }) {
+function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, visibility, team }) {
   const scouting = useScoutingTeams();
   const advanced = useTeamAdvancedStats(matchFilter);
   const box = useAllBoxScores(matchFilter);
@@ -17302,7 +18129,8 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
   // "Our team" est injectée automatiquement à partir des box scores déjà importés,
   // en plus des équipes de scouting enregistrées manuellement/via fichier/photo.
   const ourStats = ourTeamAsScoutStats(advanced, box);
-  const allTeams = { ...(Object.keys(ourStats).length ? { "Our team": { stats: ourStats, source: "calculated" } } : {}), ...scouting.teams };
+  const ourTeamName = team?.name || "Our team";
+  const allTeams = { ...(Object.keys(ourStats).length ? { [ourTeamName]: { stats: ourStats, source: "calculated", logo: team?.logo } } : {}), ...scouting.teams };
 
   function startPending(teams, kind) {
     setPending({ teams: teams.map(t => ({ ...t, selected: true })), kind });
@@ -17412,7 +18240,7 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
       </div>
 
       {subtab === "comparaison" && (isCoach || v.comparison) && (scouting.loading ? <EmptyState text="Loading…" /> : <ScoutingComparison teams={allTeams} />)}
-      {subtab === "rapport" && (isCoach || v.scoutingReport) && <ScoutingReportTab isCoach={isCoach} teamNames={Object.keys(scouting.teams)} scoutingTeams={scouting.teams} onSaveLogo={scouting.saveLogo} initialTeam={initialReportTeam} ourStats={ourStats} />}
+      {subtab === "rapport" && (isCoach || v.scoutingReport) && <ScoutingReportTab isCoach={isCoach} teamNames={Object.keys(scouting.teams)} scoutingTeams={scouting.teams} onSaveLogo={scouting.saveLogo} initialTeam={initialReportTeam} ourStats={ourStats} ourTeamName={ourTeamName} ourTeamLogo={team?.logo} />}
       {subtab === "observation" && (isCoach || v.observation) && <ObservationTab isCoach={isCoach} />}
       {subtab === "classement" && (isCoach || v.rankings) && <ScoutingRankingsTab matchFilter={matchFilter} />}
 
