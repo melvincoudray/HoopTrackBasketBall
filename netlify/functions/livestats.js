@@ -1,6 +1,7 @@
 // Fonction Netlify — LiveStats (FIBA / Genius Sports) des matchs NM1, lues via le lien présent sur chaque match du calendrier FFBB.
 //  • GET ?team=Vitré        -> { games: [{ live, home, away, dm }] }  (matchs JOUÉS de l'équipe ; "live" = identifiant LiveStats)
-//  • GET ?live=<id>         -> { teams: {1:{name,starters,names}, 2:{...}}, ev: [[t, actionNumber, tno, shirt, type, sub, s1, s2, previousAction]] }
+//  • GET ?live=<id>         -> { teams: {1:{name,starters,names}, 2:{...}}, ev: [[t, actionNumber, tno, shirt, type, sub, s1, s2, previousAction, x, y]] }
+//    x, y = coordonnées du tir si le flux les fournit (sinon null), pour la carte de tir par zone.
 //    t = secondes écoulées depuis le début du match (temps réglementaire 0-2400, prolongations ensuite), trié.
 // Le navigateur ne peut pas lire data.json directement (pas de CORS) : cette fonction sert de relais.
 const ROOT = "https://nm1.ffbb.com";
@@ -55,10 +56,21 @@ export const handler = async (event) => {
         Object.values(t.pl || {}).forEach(p => { names[p.shirtNumber] = p.scoreboardName || p.name; if (p.starter) starters.push(String(p.shirtNumber)); });
         teams[k] = { name: t.name, score: Number(t.score) || 0, starters, names };
       });
+      // Coordonnées de tir (pour la carte de tir par zone) : le nom exact du champ dans le flux
+      // FIBA LiveStats/Genius Sports n'a pas pu être vérifié directement depuis cet environnement
+      // (accès web restreint) — on tente plusieurs noms plausibles (x/y, coordX/coordY, un objet
+      // location{x,y}) et on retombe sur null si aucun ne correspond : la carte de tir affichera
+      // alors "pas de données" plutôt que des zones fausses. À vérifier/ajuster une fois en prod.
+      const coord = x => {
+        const v = x.x ?? x.coordX ?? x.locX ?? x.location?.x ?? null;
+        const w = x.y ?? x.coordY ?? x.locY ?? x.location?.y ?? null;
+        return [v == null ? null : Number(v), w == null ? null : Number(w)];
+      };
       const ev = (d.pbp || []).map(x => {
         const rem = secs(x.gt), p = Number(x.period) || 1;
         const t = x.periodType === "OVERTIME" ? 2400 + (p - 1) * 300 + (300 - rem) : (p - 1) * 600 + (600 - rem);
-        return [t, Number(x.actionNumber) || 0, Number(x.tno) || 0, String(x.shirtNumber || ""), x.actionType, x.subType || "", Number(x.s1) || 0, Number(x.s2) || 0, Number(x.previousAction) || 0];
+        const [sx, sy] = coord(x);
+        return [t, Number(x.actionNumber) || 0, Number(x.tno) || 0, String(x.shirtNumber || ""), x.actionType, x.subType || "", Number(x.s1) || 0, Number(x.s2) || 0, Number(x.previousAction) || 0, sx, sy];
       }).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
       return { statusCode: 200, headers: { ...headers, "Cache-Control": "public, max-age=600" }, body: JSON.stringify({ teams, ev }) };
     }
