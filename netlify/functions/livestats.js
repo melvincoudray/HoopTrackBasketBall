@@ -1,8 +1,12 @@
 // Fonction Netlify — LiveStats (FIBA / Genius Sports) des matchs NM1, lues via le lien présent sur chaque match du calendrier FFBB.
 //  • GET ?team=Vitré        -> { games: [{ live, home, away, dm }] }  (matchs JOUÉS de l'équipe ; "live" = identifiant LiveStats)
-//  • GET ?live=<id>         -> { teams: {1:{name,starters,names}, 2:{...}}, ev: [[t, actionNumber, tno, shirt, type, sub, s1, s2, previousAction, x, y]] }
-//    x, y = coordonnées du tir si le flux les fournit (sinon null), pour la carte de tir par zone.
+//  • GET ?live=<id>         -> { teams: {1:{name,starters,names}, 2:{...}}, ev: [[t, actionNumber, tno, shirt, type, sub, s1, s2, previousAction]], shots: [[tno, shirt, made, x, y]] }
 //    t = secondes écoulées depuis le début du match (temps réglementaire 0-2400, prolongations ensuite), trié.
+//    shots : un élément par tir à 2 ou 3 pts (hors lancers francs), pour la carte de tir par zone.
+//    made = 1 si réussi / 0 si manqué ; x, y = position du tir en % du terrain ENTIER (confirmé le
+//    30/10/2026 sur un vrai data.json : champ "shot" sous tm["1"]/tm["2"], pas dans "pbp" — x va de 0
+//    à 100 sur la longueur (28 m), y de 0 à 100 sur la largeur (15 m) ; les deux équipes gardent leurs
+//    coordonnées physiques réelles et changent donc de côté entre les périodes 1-2 et 3-4, comme au vrai jeu.
 // Le navigateur ne peut pas lire data.json directement (pas de CORS) : cette fonction sert de relais.
 const ROOT = "https://nm1.ffbb.com";
 const LIVE = "https://fibalivestats.dcd.shared.geniussports.com";
@@ -56,23 +60,16 @@ export const handler = async (event) => {
         Object.values(t.pl || {}).forEach(p => { names[p.shirtNumber] = p.scoreboardName || p.name; if (p.starter) starters.push(String(p.shirtNumber)); });
         teams[k] = { name: t.name, score: Number(t.score) || 0, starters, names };
       });
-      // Coordonnées de tir (pour la carte de tir par zone) : le nom exact du champ dans le flux
-      // FIBA LiveStats/Genius Sports n'a pas pu être vérifié directement depuis cet environnement
-      // (accès web restreint) — on tente plusieurs noms plausibles (x/y, coordX/coordY, un objet
-      // location{x,y}) et on retombe sur null si aucun ne correspond : la carte de tir affichera
-      // alors "pas de données" plutôt que des zones fausses. À vérifier/ajuster une fois en prod.
-      const coord = x => {
-        const v = x.x ?? x.coordX ?? x.locX ?? x.location?.x ?? null;
-        const w = x.y ?? x.coordY ?? x.locY ?? x.location?.y ?? null;
-        return [v == null ? null : Number(v), w == null ? null : Number(w)];
-      };
       const ev = (d.pbp || []).map(x => {
         const rem = secs(x.gt), p = Number(x.period) || 1;
         const t = x.periodType === "OVERTIME" ? 2400 + (p - 1) * 300 + (300 - rem) : (p - 1) * 600 + (600 - rem);
-        const [sx, sy] = coord(x);
-        return [t, Number(x.actionNumber) || 0, Number(x.tno) || 0, String(x.shirtNumber || ""), x.actionType, x.subType || "", Number(x.s1) || 0, Number(x.s2) || 0, Number(x.previousAction) || 0, sx, sy];
+        return [t, Number(x.actionNumber) || 0, Number(x.tno) || 0, String(x.shirtNumber || ""), x.actionType, x.subType || "", Number(x.s1) || 0, Number(x.s2) || 0, Number(x.previousAction) || 0];
       }).sort((a, b) => a[0] - b[0] || a[1] - b[1]);
-      return { statusCode: 200, headers: { ...headers, "Cache-Control": "public, max-age=600" }, body: JSON.stringify({ teams, ev }) };
+      // Tirs à 2/3 pts avec position (tm[k].shot[]) : pour la carte de tir par zone.
+      const shots = ["1", "2"].flatMap(k => ((d.tm[k] || {}).shot || [])
+        .filter(s => s.x != null && s.y != null)
+        .map(s => [Number(k), String(s.shirtNumber || ""), Number(s.r) || 0, Number(s.x), Number(s.y)]));
+      return { statusCode: 200, headers: { ...headers, "Cache-Control": "public, max-age=600" }, body: JSON.stringify({ teams, ev, shots }) };
     }
     return { statusCode: 400, headers, body: JSON.stringify({ error: "Use ?team=<name> or ?live=<id>." }) };
   } catch (e) {
