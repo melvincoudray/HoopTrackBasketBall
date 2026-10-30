@@ -14553,11 +14553,16 @@ const FAT_BUCKET_SEC = 30, FAT_BUCKET_N = 24;
 // un autre nom), x/y valent null et la carte affiche "pas de données" plutôt que des zones fausses.
 const LS_ZONE_LABELS = { paint: "Raquette", mid: "Mid Range", three: "3 Pts" };
 function lsShotZoneFor(xm, ym) {
-  const HX = 7.5, HY = 1.575; // position du panier : milieu de la largeur, 1,575 m de la ligne de fond
-  const dx = xm - HX, dy = Math.max(0, ym - HY);
-  const dist = Math.hypot(dx, dy);
-  if (Math.abs(dx) <= 2.45 && ym <= 5.8) return "paint"; // raquette
-  const corner = (xm <= 1.8 || xm >= 13.2) && ym <= 4.5; // bande des coins (3 pts à 6,60 m au lieu de 6,75 m)
+  // xm, ym en mètres sur le terrain ENTIER (28 x 15 m) : les deux équipes changent de côté entre les
+  // périodes 1-2 et 3-4 (vérifié sur un vrai match), donc on calcule la zone par rapport au panier le
+  // plus proche plutôt que de supposer un camp fixe.
+  const HY = 7.5; // milieu de la largeur (15 m)
+  const basket = xm <= 14 ? { hx: 1.575, near0: true } : { hx: 26.425, near0: false };
+  const depth = basket.near0 ? xm : 28 - xm; // distance au fond de terrain le plus proche
+  const dy = ym - HY;
+  const dist = Math.hypot(xm - basket.hx, dy);
+  if (Math.abs(dy) <= 2.45 && depth <= 5.8) return "paint"; // raquette
+  const corner = depth <= 4.5 && (ym <= 1.8 || ym >= 13.2); // bande des coins (3 pts à 6,60 m au lieu de 6,75 m)
   const arcR = corner ? 6.60 : 6.75;
   return dist > arcR ? "three" : "mid";
 }
@@ -14621,7 +14626,7 @@ function lsAnalyzeGame(g, our) {
     last = t;
   };
   const add = (side, field, v = 1) => { tot[side][field] += v; on[our].forEach(s => { getPl(s).on[side][field] += v; }); };
-  for (const [t, an, tno, shirt, type, sub, s1, s2, prev, sx, sy] of g.ev) {
+  for (const [t, an, tno, shirt, type, sub, s1, s2, prev] of g.ev) {
     if (!half && t >= 1200) { flush(1200); half = true; on[our].forEach(s => { start[s] = Math.max(start[s] ?? 0, 1200); }); }
     flush(t);
     if (type === "substitution") {
@@ -14649,13 +14654,6 @@ function lsAnalyzeGame(g, our) {
     if (isShot) add(side, "fga"); else if (type === "freethrow") add(side, "fta");
     else if (type === "rebound") add(side, /^off/i.test(sub) ? "oreb" : "dreb");
     else if (type === "turnover") add(side, "tov"); else if (type === "assist") add(side, "ast");
-    // carte de tir par zone : uniquement les tirs avec coordonnées exploitables
-    if (ours && shirt && isShot && sx != null && sy != null) {
-      const xm = (sx / 100) * 15, ym = (sy / 100) * 14; // conversion % -> mètres (demi-terrain 15 x 14 m)
-      const zk = lsShotZoneFor(xm, ym);
-      const Z = getSZ(shirt), zz = Z[zk] || (Z[zk] = { m: 0, a: 0 });
-      zz.a++; if (madeOurs) zz.m++;
-    }
     // fatigue : événements attribués au joueur selon sa durée continue sur le terrain
     if (ours && shirt && on[our].has(shirt)) {
       const F = getFat(shirt)[bucketOf(shirt, t)];
@@ -14676,6 +14674,15 @@ function lsAnalyzeGame(g, our) {
     }
     sc[1] = mx1; sc[2] = mx2;
   }
+  // Carte de tir par zone : traitée séparément car les tirs vivent dans g.shots (tm[k].shot dans le
+  // flux LiveStats), pas dans g.ev (play-by-play) qui ne porte pas de coordonnées.
+  (g.shots || []).forEach(([tno, shirt, made, sx, sy]) => {
+    if (tno !== our || !shirt || sx == null || sy == null) return;
+    const xm = (sx / 100) * 28, ym = (sy / 100) * 15; // conversion % -> mètres (terrain entier 28 x 15 m)
+    const zk = lsShotZoneFor(xm, ym);
+    const Z = getSZ(shirt), zz = Z[zk] || (Z[zk] = { m: 0, a: 0 });
+    zz.a++; if (made) zz.m++;
+  });
   const endT = Math.max(g.ev.length ? g.ev[g.ev.length - 1][0] : 0, 2400);
   flush(endT);
   on[our].forEach(s => stintList(s).push([inAt[s] ?? 0, endT]));
@@ -14779,12 +14786,12 @@ async function lsLoadAggregate(teamName) {
       const g = queue.shift();
       try {
         let d = null;
-        try { d = await storeGet("livestats2:" + g.live); } catch { /* pas de cache */ }
+        try { d = await storeGet("livestats3:" + g.live); } catch { /* pas de cache */ }
         if (!d) {
           const x = await fetch("/.netlify/functions/livestats?live=" + g.live);
           if (!x.ok) continue;
           d = await x.json();
-          try { await storeSet("livestats2:" + g.live, d); } catch { /* cache facultatif */ }
+          try { await storeSet("livestats3:" + g.live, d); } catch { /* cache facultatif */ }
         }
         const our = lsTeamSide(d, teamName);
         if (our) results[g.i] = lsAnalyzeGame(d, our);
@@ -16364,7 +16371,7 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
   const [exportReport, setExportReport] = useState(null);
   const [exportMsg, setExportMsg] = useState("");
   const report = useScoutingReport(selectedTeam || null);
-  const [subtab, setSubtab] = useState("collectif");
+  const [subtab, setSubtab] = useState("stats"); // ouvre directement sur "Stats" (le plus consulté)
   const [editing, setEditing] = useState(null); // null | "new" | player object
   const [confirmDeletePlayerId, setConfirmDeletePlayerId] = useState(null);
   const [busy, setBusy] = useState(false);
