@@ -14551,25 +14551,21 @@ const FAT_BUCKET_SEC = 30, FAT_BUCKET_N = 24;
 // LiveStats (voir netlify/functions/livestats.js) : le nom exact du champ source n'a pas pu être
 // vérifié depuis cet environnement (accès web restreint) — si le flux ne les fournit pas (ou sous
 // un autre nom), x/y valent null et la carte affiche "pas de données" plutôt que des zones fausses.
-const LS_ZONE_LABELS = { paint: "Paint", c3L: "Corner 3 (L)", c3R: "Corner 3 (R)", scL: "Short corner (L)", scR: "Short corner (R)", w3L: "45° 3 (L)", w3R: "45° 3 (R)", mwL: "Mid 45° (L)", mwR: "Mid 45° (R)", t3: "Axe 3", ma: "Mid axe" };
+const LS_ZONE_LABELS = { paint: "Raquette", mid: "Mid Range", three: "3 Pts" };
 function lsShotZoneFor(xm, ym) {
   const HX = 7.5, HY = 1.575; // position du panier : milieu de la largeur, 1,575 m de la ligne de fond
   const dx = xm - HX, dy = Math.max(0, ym - HY);
   const dist = Math.hypot(dx, dy);
-  const angle = Math.atan2(Math.abs(dx), Math.max(0.1, dy)) * 180 / Math.PI; // 0° = dans l'axe, 90° = ligne de fond
-  const side = dx < 0 ? "L" : "R";
   if (Math.abs(dx) <= 2.45 && ym <= 5.8) return "paint"; // raquette
-  const beyondArc = dist > 6.75; // ligne à 3 pts (hors coins)
-  const corner = (xm <= 1.8 || xm >= 13.2) && ym <= 4.5; // bande des coins (3 pts à 6,60 m)
-  if (corner) return beyondArc ? "c3" + side : "sc" + side;
-  if (beyondArc) return angle < 20 ? "t3" : "w3" + side;
-  return angle < 20 ? "ma" : "mw" + side;
+  const corner = (xm <= 1.8 || xm >= 13.2) && ym <= 4.5; // bande des coins (3 pts à 6,60 m au lieu de 6,75 m)
+  const arcR = corner ? 6.60 : 6.75;
+  return dist > arcR ? "three" : "mid";
 }
 // Repères visuels (pas une tessellation exacte) dans un viewBox 300x220, panier en haut.
-const LS_ZONE_POS = { paint: [150, 80], c3L: [22, 40], c3R: [278, 40], scL: [55, 48], scR: [245, 48], w3L: [48, 125], w3R: [252, 125], mwL: [88, 95], mwR: [212, 95], t3: [150, 200], ma: [150, 145] };
+const LS_ZONE_POS = { paint: [150, 75], mid: [150, 152], three: [150, 218] };
 function lsShotChartSvg(zones, line) {
   const l = line || "#C7CCD6";
-  let s = `<rect x="0" y="0" width="300" height="220" fill="none" stroke="${l}" stroke-width="1.5"/>`;
+  let s = `<rect x="0" y="0" width="300" height="260" fill="none" stroke="${l}" stroke-width="1.5"/>`;
   s += `<rect x="101" y="0" width="98" height="116" fill="none" stroke="${l}" stroke-width="1.3"/>`;
   s += `<circle cx="150" cy="116" r="36" fill="none" stroke="${l}" stroke-width="1.1"/>`;
   s += `<path d="M18 0 V59.8 A135 135 0 0 0 282 59.8 V0" fill="none" stroke="${l}" stroke-width="1.3"/>`;
@@ -14579,10 +14575,11 @@ function lsShotChartSvg(zones, line) {
     const z = zones && zones[k];
     const pct = z && z.a >= 2 ? (100 * z.m / z.a) : null;
     const c = pct === null ? "#9aa3b2" : pct >= 45 ? "#1f9d6b" : pct >= 30 ? "#f2a93b" : "#d9453b";
-    s += `<circle cx="${x}" cy="${y}" r="16" fill="${c}" fill-opacity="0.88"/>`;
-    s += `<text x="${x}" y="${y + 4}" text-anchor="middle" font-size="11" font-weight="700" fill="#fff" font-family="Arial,Helvetica,sans-serif">${pct === null ? "–" : Math.round(pct) + "%"}</text>`;
+    s += `<circle cx="${x}" cy="${y}" r="20" fill="${c}" fill-opacity="0.88"/>`;
+    s += `<text x="${x}" y="${y + 4}" text-anchor="middle" font-size="13" font-weight="700" fill="#fff" font-family="Arial,Helvetica,sans-serif">${pct === null ? "–" : Math.round(pct) + "%"}</text>`;
+    s += `<text x="${x}" y="${y + 33}" text-anchor="middle" font-size="9" font-weight="600" fill="${l}" font-family="Arial,Helvetica,sans-serif">${LS_ZONE_LABELS[k]}</text>`;
   });
-  return { inner: s, vb: "0 0 300 220" };
+  return { inner: s, vb: "0 0 300 260" };
 }
 
 function lsAnalyzeGame(g, our) {
@@ -15516,7 +15513,7 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
       }
       // Carte de tir par zone (demandé par l'utilisateur) : à gauche sous les infos précédentes ;
       // "3 most used playtypes" repoussé à droite du graphique plutôt qu'en dessous.
-      const chartW = Math.min(150, cw2 * 0.52), chartH = chartW * 220 / 300;
+      const chartW = Math.min(150, cw2 * 0.52), chartH = chartW * 260 / 300;
       text("SHOT CHART (LIVESTATS)", x + 10, y + 94, { size: 6, bold: true, color: REP.MUTE });
       const sz = szFor(fp.name);
       try {
