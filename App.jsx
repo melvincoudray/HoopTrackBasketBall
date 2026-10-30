@@ -14567,7 +14567,7 @@ function lsShotZoneFor(xm, ym) {
   return dist > arcR ? "three" : "mid";
 }
 // Repères visuels (pas une tessellation exacte) dans un viewBox 300x220, panier en haut.
-const LS_ZONE_POS = { paint: [150, 75], mid: [150, 152], three: [150, 218] };
+const LS_ZONE_POS = { paint: [150, 75], mid: [235, 116], three: [150, 205] };
 function lsShotChartSvg(zones, line) {
   const l = line || "#C7CCD6";
   let s = `<rect x="0" y="0" width="300" height="260" fill="none" stroke="${l}" stroke-width="1.5"/>`;
@@ -15492,7 +15492,7 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
     const szFor = name => { if (!LS || !LS.shotZones) return null; const k = Object.keys(LS.shotZones).find(n => repNameMatch(n, name)); return k ? LS.shotZones[k] : null; };
     const myPlaysAll = (PT.myPlays || []).filter(isOffense);
     const sortedPT = ptList("off"), topS = new Set(sortedPT.slice(0, 3).map(x => x.label)), botS = new Set(sortedPT.slice(-3).map(x => x.label));
-    const cw2 = (W - 2 * M - 14) / 2, ch2 = 230;
+    const cw2 = (W - 2 * M - 14) / 2, ch2 = 270; // agrandi : la carte de tir (chartW ~ cw2*0.52) prend plus de place que les 230pt d'origine
     for (let pg = 0; pg < Math.max(1, Math.ceil(cardPlayers.length / perPage)); pg++) {
       newPage(scTitle, scSub);
       if (!cardPlayers.length) { text("No FFBB player stats for this team yet.", M, 100, { size: 10, color: REP.MUTE }); break; }
@@ -15512,35 +15512,43 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
         if (rk) { const top = rk.rank <= Math.ceil(rk.total * 0.1), bot = rk.rank > rk.total * 0.9; rect(bx + (cw2 - 20) / 10 - 17, y + 55, 34, 9, top ? REP.GRN : bot ? REP.RED : REP.GREY, 3); text(`#${rk.rank}/${rk.total}`, bx + (cw2 - 20) / 10, y + 61.5, { size: 5.5, bold: true, color: REP.WHITE, align: "center" }); }
       });
       const p2 = 2 * (s.r2 || 0), p3 = 3 * (s.r3 || 0), pf = s.lfr || 0, pt = Math.max(0.1, p2 + p3 + pf);
-      let bx = x + 10; const bwid = cw2 - 20;
-      [[p2, REP.OR, "2PT"], [p3, REP.GREY, "3PT"], [pf, REP.GRN, "FT"]].forEach(([v, c, l]) => { const w = bwid * v / pt; if (w > 0) { rect(bx, y + 68, w, 10, c); if (w > 28) text(`${l} ${(100 * v / pt).toFixed(0)}%`, bx + w / 2, y + 75.5, { size: 5.5, bold: true, color: REP.WHITE, align: "center" }); bx += w; } });
       if (LEAGUE_POULE.length) {
         const rkp = [["PTS", repLeagueRank(LEAGUE_POULE, { st: s }, q => q.pts, q => q.mj >= 3)], ["TS%", repLeagueRank(LEAGUE_POULE, { st: s }, q => { const f = (q.t2 || 0) + (q.t3 || 0) + 0.44 * (q.lft || 0); return f > 0 ? q.pts / (2 * f) : null; }, q => q.mj >= 3 && (q.min || 0) >= 10)], ["3PT%", repLeagueRank(LEAGUE_POULE, { st: s }, q => (q.t3 > 0 ? q.r3 / q.t3 : null), q => q.mj >= 3 && q.t3 * q.mj >= 15)]].filter(([, r]) => r);
-        if (rkp.length) text(`${pouleName || "Poule"} rank — ` + rkp.map(([l, r]) => `${l} #${r.rank}/${r.total}`).join(" · "), x + 10, y + 86, { size: 6, color: REP.MUTE, maxW: cw2 - 20 });
+        if (rkp.length) text(`${pouleName || "Poule"} rank — ` + rkp.map(([l, r]) => `${l} #${r.rank}/${r.total}`).join(" · "), x + 10, y + 70, { size: 6, color: REP.MUTE, maxW: cw2 - 20 });
       }
       // Carte de tir par zone (demandé par l'utilisateur) : à gauche sous les infos précédentes ;
       // "3 most used playtypes" repoussé à droite du graphique plutôt qu'en dessous.
       const chartW = Math.min(150, cw2 * 0.52), chartH = chartW * 260 / 300;
-      text("SHOT CHART (LIVESTATS)", x + 10, y + 94, { size: 6, bold: true, color: REP.MUTE });
+      text("SHOT CHART (LIVESTATS)", x + 10, y + 78, { size: 6, bold: true, color: REP.MUTE });
       const sz = szFor(fp.name);
       try {
         const svg = lsShotChartSvg(sz, "969CAD");
         const img = await repSvgToPng(svg.inner, svg.vb, 400);
-        if (img) doc.addImage(img.png, "PNG", x + 10, y + 99, chartW, chartW * img.ratio);
-      } catch { text("Shot chart unavailable.", x + 10, y + 112, { size: 6.5, color: REP.MUTE }); }
-      if (!LS || !LS.shotZones) text("No LiveStats shot data for this team yet.", x + 10, y + 99 + chartH + 10, { size: 6, color: REP.MUTE, maxW: chartW });
+        if (img) doc.addImage(img.png, "PNG", x + 10, y + 83, chartW, chartW * img.ratio);
+      } catch { text("Shot chart unavailable.", x + 10, y + 96, { size: 6.5, color: REP.MUTE }); }
+      if (!LS || !LS.shotZones) text("No LiveStats shot data for this team yet.", x + 10, y + 83 + chartH + 10, { size: 6, color: REP.MUTE, maxW: chartW });
 
       const ptX = x + 20 + chartW;
-      text("3 MOST USED PLAYTYPES", ptX, y + 94, { size: 6, bold: true, color: REP.MUTE });
+      text("3 MOST USED PLAYTYPES", ptX, y + 78, { size: 6, bold: true, color: REP.MUTE });
       const last = String(fp.name).split(/\s+/).pop();
       const mine = myPlaysAll.filter(p => p.player && normTag(p.player).includes(normTag(last)));
       const used = PT.labels.map(l => ({ l, n: mine.filter(p => tagIsSet(p.tags, l)).length })).filter(o => o.n > 0).sort((a, b) => b.n - a.n).slice(0, 3);
       const ptW = x + cw2 - 10 - ptX;
-      if (!used.length) text("No coded plays matched to this player", ptX, y + 108, { size: 6.5, color: REP.MUTE, maxW: ptW });
+      if (!used.length) text("No coded plays matched to this player", ptX, y + 92, { size: 6.5, color: REP.MUTE, maxW: ptW });
       used.forEach((o, j) => {
         const c = topS.has(o.l) ? REP.GRN : botS.has(o.l) ? REP.RED : REP.GREY;
-        rect(ptX, y + 99 + j * 16, ptW, 14, REP.WHITE, 3); rect(ptX, y + 99 + j * 16, 4, 14, c, 2);
-        text(o.l, ptX + 10, y + 109 + j * 16, { size: 7.5, maxW: ptW - 46 }); text(`${(100 * o.n / mine.length).toFixed(0)}%`, ptX + ptW - 6, y + 109 + j * 16, { size: 7.5, bold: true, color: c, align: "right" });
+        rect(ptX, y + 83 + j * 16, ptW, 14, REP.WHITE, 3); rect(ptX, y + 83 + j * 16, 4, 14, c, 2);
+        text(o.l, ptX + 10, y + 93 + j * 16, { size: 7.5, maxW: ptW - 46 }); text(`${(100 * o.n / mine.length).toFixed(0)}%`, ptX + ptW - 6, y + 93 + j * 16, { size: 7.5, bold: true, color: c, align: "right" });
+      });
+      // Graphique de scoring (2PT/3PT/FT) relégué en bas de carte : respire mieux (demandé),
+      // séparé du reste par de l'espace plutôt que collé sous les tuiles de stats.
+      let bx = x + 10; const bwid = cw2 - 20;
+      [[p2, REP.OR, "2PT"], [p3, REP.GREY, "3PT"], [pf, REP.GRN, "FT"]].forEach(([v, c, l]) => { const w = bwid * v / pt; if (w > 0) { rect(bx, y + 228, w, 10, c); if (w > 28) text(`${l} ${(100 * v / pt).toFixed(0)}%`, bx + w / 2, y + 235.5, { size: 5.5, bold: true, color: REP.WHITE, align: "center" }); bx += w; } });
+      const lw = bwid / 3;
+      [["2PT", REP.OR, p2], ["3PT", REP.GREY, p3], ["FT", REP.GRN, pf]].forEach(([l, c, v], j) => {
+        const lx = x + 10 + j * lw;
+        rect(lx, y + 241, 5, 5, c, 1);
+        text(`${l} ${(100 * v / pt).toFixed(0)}%`, lx + 8, y + 245.5, { size: 5.5, color: REP.MUTE });
       });
       }
     }
@@ -16172,9 +16180,6 @@ function RsPlayerCards({ FF, LEAGUE, LEAGUE_POULE, pouleName, PT, ptList, teamNa
                 </div>
               ))}
             </div>
-            <div style={{ display: "flex", height: 10, borderRadius: 3, overflow: "hidden", marginBottom: 10 }}>
-              {[[p2, AMBER], [p3, "#5C6470"], [pf, RS_GRN]].map(([v, c], i) => <div key={i} style={{ width: `${100 * v / pt}%`, background: c }} />)}
-            </div>
             <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
               <div style={{ flexShrink: 0, width: 150 }}>
                 <div style={{ fontSize: 9, fontWeight: 700, color: "#8B93A1", marginBottom: 4 }}>SHOT CHART (LIVESTATS)</div>
@@ -16193,6 +16198,16 @@ function RsPlayerCards({ FF, LEAGUE, LEAGUE_POULE, pouleName, PT, ptList, teamNa
                   );
                 })}
               </div>
+            </div>
+            {/* Graphique de scoring (2PT/3PT/FT) relégué en bas de carte (demandé) : respire mieux,
+                séparé du reste par de l'espace plutôt que collé sous les tuiles de stats. */}
+            <div style={{ display: "flex", height: 10, borderRadius: 3, overflow: "hidden", marginTop: 16, marginBottom: 4 }}>
+              {[[p2, AMBER], [p3, "#5C6470"], [pf, RS_GRN]].map(([v, c], i) => <div key={i} style={{ width: `${100 * v / pt}%`, background: c }} />)}
+            </div>
+            <div style={{ display: "flex", gap: 10 }}>
+              {[["2PT", AMBER, p2], ["3PT", "#5C6470", p3], ["FT", RS_GRN, pf]].map(([l, c, v]) => (
+                <div key={l} style={{ fontSize: 8, color: "#8B93A1" }}><span style={{ display: "inline-block", width: 7, height: 7, background: c, borderRadius: 2, marginRight: 3 }} />{l} {(100 * v / pt).toFixed(0)}%</div>
+              ))}
             </div>
           </div>
         );
