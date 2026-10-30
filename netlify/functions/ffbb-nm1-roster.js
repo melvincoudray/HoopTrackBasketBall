@@ -143,7 +143,8 @@ export const handler = async (event) => {
     const yy = Number(season);
     const seasonLabel = String(yy % 100).padStart(2, "0") + "-" + String((yy + 1) % 100).padStart(2, "0");
     await Promise.all(players.map(async p => {
-      const [photo, stats] = await Promise.all([getPhoto(p.photoUrl), getPlayerStats(p.slug, link.name, seasonLabel)]);
+      const noPhoto = (event.queryStringParameters || {}).photos === "0";
+      const [photo, stats] = await Promise.all([noPhoto ? null : getPhoto(p.photoUrl), getPlayerStats(p.slug, link.name, seasonLabel)]);
       p.photo = photo; p.stats = stats; delete p.photoUrl; delete p.slug;
     }));
     return {
