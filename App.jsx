@@ -1943,8 +1943,8 @@ function MontageClipCard({ item, index, count, url, isCoach, onChange, onRemove,
         {isCoach && (
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <span title="Drag to reorder" draggable onDragStart={drag.onDragStart} style={{ cursor: "grab", color: "#5C6470", fontSize: 16, lineHeight: 1 }}>⠿</span>
-            <button disabled={index === 0} onClick={() => onMove(-1)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", cursor: index === 0 ? "default" : "pointer", padding: "2px 8px", opacity: index === 0 ? 0.4 : 1 }}>↑</button>
-            <button disabled={index === count - 1} onClick={() => onMove(1)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", cursor: index === count - 1 ? "default" : "pointer", padding: "2px 8px", opacity: index === count - 1 ? 0.4 : 1 }}>↓</button>
+            <button disabled={index === 0} onClick={() => onMove(-1)} title="Move earlier" style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", cursor: index === 0 ? "default" : "pointer", padding: "2px 8px", opacity: index === 0 ? 0.4 : 1 }}>←</button>
+            <button disabled={index === count - 1} onClick={() => onMove(1)} title="Move later" style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", cursor: index === count - 1 ? "default" : "pointer", padding: "2px 8px", opacity: index === count - 1 ? 0.4 : 1 }}>→</button>
             <button onClick={onRemove} title="Remove from montage" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
           </div>
         )}
@@ -2285,7 +2285,17 @@ async function loadMine() {
     const r = rows[m.key];
     return { ...m, myScore: r && r.pts !== null && r.pts !== undefined ? r.pts : null, oppScore: r && r.opponentScore !== undefined ? r.opponentScore : null };
   }).sort((a, b) => String(b.date).localeCompare(String(a.date)));
-  return { list, rows, plays, season: await storeGet("current_season") };
+  // Rebound Contest / Screen Contest : séances chargées telles quelles (reliées à un match par
+  // leur date, comme dans la fiche joueur) — pour les blocs de stats des slides (sources "rc"/"sc").
+  const rcIdxAll = (await storeGet("rebound_contest_index")) || [];
+  const rcSessions = []; for (const s of rcIdxAll) { const rec = await storeGet("rebound_contest:" + s.id); if (rec) rcSessions.push(rec); }
+  const scIdxAll = (await storeGet("screen_contest_index")) || [];
+  const scSessions = []; for (const s of scIdxAll) { const rec = await storeGet("screen_contest:" + s.id); if (rec) scSessions.push(rec); }
+  return {
+    list, rows, plays, season: await storeGet("current_season"),
+    rcSessions, rcCats: (await storeGet("rebound_contest_categories")) || DEFAULT_REBOUND_CONTEST_CATEGORIES, rcTabName: (await storeGet("rebound_contest_tab_name")) || DEFAULT_REBOUND_CONTEST_TAB_NAME,
+    scSessions, scCats: (await storeGet("screen_contest_categories")) || DEFAULT_SCREEN_CONTEST_CATEGORIES, scTabName: (await storeGet("screen_contest_tab_name")) || DEFAULT_SCREEN_CONTEST_TAB_NAME,
+  };
 }
 async function loadSlideData(names, playerTeams, needMine) {
   const teamNames = (await storeGet("scouting_teams")) || [];
@@ -2320,7 +2330,7 @@ function slideDataNeeds(slides) {
   slides.forEach(s => {
     const c = s.ctx || {};
     if (isFeedbackKind(s.kind)) mine = true;
-    if ((s.elements || []).some(e => e.type === "stat" && (e.source === "box" || e.source === "team"))) mine = true;
+    if ((s.elements || []).some(e => e.type === "stat" && (e.source === "box" || e.source === "team" || e.source === "rc" || e.source === "sc"))) mine = true;
     if (c.myTeam) names.add(c.myTeam);
     if (c.opponent) names.add(c.opponent);
     (s.elements || []).forEach(e => {
@@ -2389,6 +2399,33 @@ function boxStatValue(mine, keys, stat) {
   }
   return { v: v === undefined ? null : v, n: rows.length };
 }
+// Agrège les événements Rebound/Screen Contest de plusieurs séances en un total d'ÉQUIPE — somme
+// des points obtenus / possibles sur l'ensemble (jamais une moyenne de pourcentages individuels),
+// même logique que "Team Total" dans l'onglet Rebound/Screen Contest.
+function contestTeamTotals(events, categories, maxPts) {
+  const cats = {}; let grandE = 0, grandP = 0;
+  for (const cat of categories) cats[cat.key] = { earned: 0, possible: 0 };
+  for (const ev of events) {
+    const c = cats[ev.categoryKey];
+    if (!c) continue;
+    for (const v of Object.values(ev.scores || {})) { c.earned += v; c.possible += maxPts; grandE += v; grandP += maxPts; }
+  }
+  for (const cat of categories) { const c = cats[cat.key]; c.pct = c.possible > 0 ? (100 * c.earned) / c.possible : null; }
+  return { ...cats, total: { earned: grandE, possible: grandP, pct: grandP > 0 ? (100 * grandE) / grandP : null } };
+}
+// Valeur d'une stat Rebound/Screen Contest ("mine") sur un ensemble de clés de match — relie
+// séance et match par la date, comme rcStatsFor/scStatsFor (fiche joueur).
+function contestStatValue(mine, keys, which, catKey) {
+  const sessions = which === "sc" ? (mine.scSessions || []) : (mine.rcSessions || []);
+  const categories = which === "sc" ? (mine.scCats || DEFAULT_SCREEN_CONTEST_CATEGORIES) : (mine.rcCats || DEFAULT_REBOUND_CONTEST_CATEGORIES);
+  const maxPts = which === "sc" ? 1 : 2;
+  const dates = new Set(keys.map(k => (mine.list.find(m => m.key === k) || {}).date).filter(Boolean));
+  const events = sessions.filter(s => dates.has(s.date)).flatMap(s => s.events || []);
+  if (!events.length) return { v: null, n: 0 };
+  const totals = contestTeamTotals(events, categories, maxPts);
+  const v = (!catKey || catKey === "total") ? totals.total.pct : (totals[catKey] ? totals[catKey].pct : null);
+  return { v, n: events.length };
+}
 const SCOPE_LABELS = { match: "this match", season: "current season", all: "all matches" };
 // Contenu d'un bloc de stats : { label, items:[{text, name, color}], note }
 function slideStatInfo(el, slide, data) {
@@ -2420,6 +2457,20 @@ function slideStatInfo(el, slide, data) {
     let text = "–";
     if (st.count || metric === "count") text = metric === "freq" ? `${st.freq.toFixed(0)}%` : metric === "pppp" ? st.pppp.toFixed(2) : metric === "open" ? (st.open === null ? "–" : `${st.open.toFixed(0)}%`) : metric === "tov" ? (st.tov === null ? "–" : `${st.tov.toFixed(0)}%`) : String(st.count);
     return { label, items: [{ text, color: el.color || AMBER }], note: st.count ? `${st.count} action${st.count > 1 ? "s" : ""} · ${side === "def" ? "defense" : "offense"} · ${SCOPE_LABELS[scope]}` : (plays.length ? "" : "no coded match") };
+  }
+  if (el.source === "rc" || el.source === "sc") {
+    const which = el.source;
+    const cats = (data.mine && (which === "sc" ? data.mine.scCats : data.mine.rcCats)) || (which === "sc" ? DEFAULT_SCREEN_CONTEST_CATEGORIES : DEFAULT_REBOUND_CONTEST_CATEGORIES);
+    const tabName = (data.mine && (which === "sc" ? data.mine.scTabName : data.mine.rcTabName)) || (which === "sc" ? DEFAULT_SCREEN_CONTEST_TAB_NAME : DEFAULT_REBOUND_CONTEST_TAB_NAME);
+    const def = (!el.key || el.key === "total") ? null : cats.find(x => x.key === el.key);
+    const label = el.label || ((!el.key || el.key === "total") ? `${tabName} (total)` : (def ? `${tabName} — ${def.label}` : "Choose a stat"));
+    const scope = el.scope || (isFeedbackKind(slide.kind) ? "match" : "all");
+    if (!data.mine) return { label, items: [{ text: "–", color: el.color || AMBER }], note: "loading…" };
+    const fmt = (v) => (v === null || v === undefined ? "–" : `${Math.round(v)}%`);
+    const a = contestStatValue(data.mine, slideScopeKeys(slide, scope, data.mine), which, el.key);
+    const items = [{ text: fmt(a.v), name: el.compare && scope === "match" ? "Match" : "", color: el.color || AMBER }];
+    if (el.compare && scope === "match") items.push({ text: fmt(contestStatValue(data.mine, slideScopeKeys(slide, "all", data.mine), which, el.key).v), name: "Average", color: TEAL });
+    return { label, items, note: a.n ? (scope === "match" ? "" : `${SCOPE_LABELS[scope]} · ${a.n} event${a.n > 1 ? "s" : ""}`) : (scope === "match" ? "no session for this match" : "no data") };
   }
   if (el.source === "obs") {
     const tag = el.tag === "@play" ? (c.play || "") : (el.tag || "");
@@ -3344,14 +3395,16 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
                           <option value="obs">Scouting observation (opponent tendencies)</option>
                           <option value="box">My team — box score stats</option>
                           <option value="team">My team — Team Play (coded actions)</option>
+                          <option value="rc">My team — {(data.mine && data.mine.rcTabName) || DEFAULT_REBOUND_CONTEST_TAB_NAME}</option>
+                          <option value="sc">My team — {(data.mine && data.mine.scTabName) || DEFAULT_SCREEN_CONTEST_TAB_NAME}</option>
                         </select>
                       </SField>
-                      {(sel.source === "box" || sel.source === "team") && (
+                      {(sel.source === "box" || sel.source === "team" || sel.source === "rc" || sel.source === "sc") && (
                         <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", fontSize: 12, color: PAPER }}>
                           <select value={sel.scope || (isFeedbackKind(slide.kind) ? "match" : "all")} onChange={e => patchEl(sel.id, { scope: e.target.value })} style={{ ...sInp, width: "auto" }}>
                             <option value="match">This slide's match</option><option value="season">Current season</option><option value="all">All matches</option>
                           </select>
-                          {sel.source === "box" && <label><input type="checkbox" checked={!!sel.compare} onChange={e => patchEl(sel.id, { compare: e.target.checked })} /> Compare with average</label>}
+                          {(sel.source === "box" || sel.source === "rc" || sel.source === "sc") && <label><input type="checkbox" checked={!!sel.compare} onChange={e => patchEl(sel.id, { compare: e.target.checked })} /> Compare with average</label>}
                         </div>
                       )}
                       {sel.source === "box" ? (
@@ -3368,6 +3421,13 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
                             <SField label="Side"><select value={sel.obsSide || "slide"} onChange={e => patchEl(sel.id, { obsSide: e.target.value })} style={sInp}><option value="slide">Slide's side</option><option value="off">Offense</option><option value="def">Defense</option></select></SField>
                           </div>
                         </>
+                      ) : sel.source === "rc" || sel.source === "sc" ? (
+                        <SField label="Stat">
+                          <select value={sel.key || "total"} onChange={e => patchEl(sel.id, { key: e.target.value })} style={sInp}>
+                            {((sel.source === "sc" ? (data.mine && data.mine.scCats) : (data.mine && data.mine.rcCats)) || (sel.source === "sc" ? DEFAULT_SCREEN_CONTEST_CATEGORIES : DEFAULT_REBOUND_CONTEST_CATEGORIES)).map(cat => <option key={cat.key} value={cat.key}>{cat.label}</option>)}
+                            <option value="total">Total</option>
+                          </select>
+                        </SField>
                       ) : (sel.source || "cmp") === "cmp" ? (
                         <>
                           <SField label="Stat">
@@ -3435,8 +3495,8 @@ function MontageSlideCard({ item, index, count, data, imgs, isCoach, onChange, o
         {isCoach && (
           <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
             <span title="Drag to reorder" draggable onDragStart={drag.onDragStart} style={{ cursor: "grab", color: "#5C6470", fontSize: 16, lineHeight: 1 }}>⠿</span>
-            <button disabled={index === 0} onClick={() => onMove(-1)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", cursor: index === 0 ? "default" : "pointer", padding: "2px 8px", opacity: index === 0 ? 0.4 : 1 }}>↑</button>
-            <button disabled={index === count - 1} onClick={() => onMove(1)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", cursor: index === count - 1 ? "default" : "pointer", padding: "2px 8px", opacity: index === count - 1 ? 0.4 : 1 }}>↓</button>
+            <button disabled={index === 0} onClick={() => onMove(-1)} title="Move earlier" style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", cursor: index === 0 ? "default" : "pointer", padding: "2px 8px", opacity: index === 0 ? 0.4 : 1 }}>←</button>
+            <button disabled={index === count - 1} onClick={() => onMove(1)} title="Move later" style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", cursor: index === count - 1 ? "default" : "pointer", padding: "2px 8px", opacity: index === count - 1 ? 0.4 : 1 }}>→</button>
             <button onClick={onRemove} title="Remove from montage" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={15} /></button>
           </div>
         )}
@@ -3496,6 +3556,17 @@ function MontageTab({ isCoach }) {
   const sdata = useSlideData(slideNeeds.names, slideNeeds.pteams, slideNeeds.mine, 0);
   const simgs = useSlideImgs(Array.from(new Set(slideItems.flatMap(slideImageIds))));
   const editingSlide = items.find(i => i.id === editingId && i.type === "slide") || null;
+  // Timeline en MINIATURES (demandé par l'utilisateur — avec beaucoup d'éléments, des cartes
+  // pleine taille côte à côte restent trop longues à parcourir) : un bandeau de petites vignettes
+  // pour naviguer/réordonner vite, et une seule carte détaillée (vidéo + trim, ou slide + édition)
+  // affichée pour l'élément sélectionné — jamais 80 lecteurs vidéo montés à la fois.
+  const [selectedId, setSelectedId] = useState(null);
+  useEffect(() => {
+    if (!items.length) { if (selectedId !== null) setSelectedId(null); return; }
+    if (!items.some(i => i.id === selectedId)) setSelectedId(items[0].id);
+  }, [items.map(i => i.id).join(","), items.length]);
+  const selectedItem = items.find(i => i.id === selectedId) || null;
+  const selectedIndex = selectedItem ? items.indexOf(selectedItem) : -1;
 
   // Enregistrement : immédiat pour les actions ponctuelles, différé (600 ms) pour les curseurs.
   function persist(next, soon) {
@@ -3740,22 +3811,45 @@ function MontageTab({ isCoach }) {
             </div>
           )}
 
-          <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 18 }}>
+          {/* Timeline HORIZONTALE EN MINIATURES (demandé par l'utilisateur : avec un gros montage —
+              80 éléments par exemple —, des cartes pleine taille côte à côte restent trop longues
+              à parcourir). Chaque vignette est petite et fixe (clic = sélection, glisser = réordonner,
+              même logique d'index qu'avant) ; la carte complète (vidéo + trim, ou slide + édition)
+              ne s'affiche que pour l'élément sélectionné — jamais tous les lecteurs vidéo à la fois. */}
+          <div style={{ display: "flex", flexDirection: "row", gap: 6, marginBottom: 14, overflowX: "auto", paddingBottom: 8 }}>
             {items.length === 0 && <EmptyState text="This montage is empty." />}
             {items.map((it, i) => {
-              const drag = { onDragStart: () => setDragFrom(i), onDragOver: e => { if (isCoach) e.preventDefault(); }, onDrop: () => { if (isCoach && dragFrom !== null) moveItem(dragFrom, i); setDragFrom(null); } };
-              if (it.type === "clip") return (
-                <MontageClipCard key={it.id} item={it} index={i} count={items.length} url={urls[it.sourceKey]} isCoach={isCoach}
-                  onChange={patch => updateItem(it.id, patch, true)} onRemove={() => removeItem(it.id)} onMove={d => moveItem(i, i + d)} onImport={importVideo} drag={drag} />
+              const sel = it.id === selectedId;
+              const dur = it.type === "slide" ? Number(it.duration || 0) : (it.trimEnd - it.trimStart);
+              return (
+                <div key={it.id} title={it.type === "slide" ? slideTitle(it) : it.label}
+                  draggable={isCoach} onDragStart={() => setDragFrom(i)} onDragOver={e => { if (isCoach) e.preventDefault(); }}
+                  onDrop={() => { if (isCoach && dragFrom !== null) moveItem(dragFrom, i); setDragFrom(null); }}
+                  onClick={() => setSelectedId(it.id)}
+                  style={{
+                    flex: "0 0 72px", width: 72, height: 60, borderRadius: 8, cursor: "pointer", position: "relative", overflow: "hidden",
+                    border: `2px solid ${sel ? AMBER : LINE}`, background: it.type === "slide" ? AMBER_DIM : PANEL2,
+                    display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 2,
+                  }}>
+                  <span style={{ position: "absolute", top: 3, left: 5, fontSize: 9, color: "#5C6470", fontFamily: "ui-monospace, monospace" }}>{i + 1}</span>
+                  {it.type === "slide" ? <LayoutGrid size={16} color={AMBER} /> : <Film size={16} color="#8B93A1" />}
+                  <span style={{ fontSize: 8.5, color: "#8B93A1" }}>{dur.toFixed(1)}s</span>
+                </div>
               );
-              if (it.type === "slide") return (
-                <MontageSlideCard key={it.id} item={it} index={i} count={items.length} data={sdata} imgs={simgs} isCoach={isCoach}
-                  onChange={patch => updateItem(it.id, patch, true)} onRemove={() => removeItem(it.id)} onMove={d => moveItem(i, i + d)}
-                  onEdit={() => setEditingId(it.id)} onDuplicate={() => duplicateSlide(it)} drag={drag} />
-              );
-              return null;
             })}
           </div>
+
+          {selectedItem && (selectedItem.type === "clip" ? (
+            <MontageClipCard key={selectedItem.id} item={selectedItem} index={selectedIndex} count={items.length} url={urls[selectedItem.sourceKey]} isCoach={isCoach}
+              onChange={patch => updateItem(selectedItem.id, patch, true)} onRemove={() => removeItem(selectedItem.id)} onMove={d => moveItem(selectedIndex, selectedIndex + d)} onImport={importVideo}
+              drag={{ onDragOver: e => e.preventDefault(), onDrop: () => {} }} />
+          ) : (
+            <MontageSlideCard key={selectedItem.id} item={selectedItem} index={selectedIndex} count={items.length} data={sdata} imgs={simgs} isCoach={isCoach}
+              onChange={patch => updateItem(selectedItem.id, patch, true)} onRemove={() => removeItem(selectedItem.id)} onMove={d => moveItem(selectedIndex, selectedIndex + d)}
+              onEdit={() => setEditingId(selectedItem.id)} onDuplicate={() => duplicateSlide(selectedItem)}
+              drag={{ onDragOver: e => e.preventDefault(), onDrop: () => {} }} />
+          ))}
+          <div style={{ marginBottom: 18 }} />
 
           {isCoach && (
             <div style={{ padding: 12, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, marginBottom: 18 }}>
@@ -18534,7 +18628,14 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
       </div>
 
       {subtab === "comparaison" && (isCoach || v.comparison) && (scouting.loading ? <EmptyState text="Loading…" /> : <ScoutingComparison teams={allTeams} />)}
-      {subtab === "rapport" && (isCoach || v.scoutingReport) && <ScoutingReportTab isCoach={isCoach} teamNames={Object.keys(scouting.teams)} scoutingTeams={scouting.teams} onSaveLogo={scouting.saveLogo} initialTeam={initialReportTeam} ourStats={ourStats} ourTeamName={ourTeamName} ourTeamLogo={team?.logo} />}
+      {subtab === "rapport" && (isCoach || v.scoutingReport) && (scouting.loading ? <EmptyState text="Loading…" /> : (
+        // CORRECTIF : la liste des équipes (scouting.teams) se charge de façon asynchrone depuis le
+        // stockage local ; sans ce garde-fou, ScoutingReportTab pouvait se monter avant la fin du
+        // chargement (teams encore vide) et afficher "Team not found" en boucle, sans jamais se
+        // réessayer tout seul une fois les données arrivées (même principe déjà utilisé ci-dessus
+        // pour l'onglet Comparison).
+        <ScoutingReportTab isCoach={isCoach} teamNames={Object.keys(scouting.teams)} scoutingTeams={scouting.teams} onSaveLogo={scouting.saveLogo} initialTeam={initialReportTeam} ourStats={ourStats} ourTeamName={ourTeamName} ourTeamLogo={team?.logo} />
+      ))}
       {subtab === "observation" && (isCoach || v.observation) && <ObservationTab isCoach={isCoach} />}
       {subtab === "classement" && (isCoach || v.rankings) && <ScoutingRankingsTab matchFilter={matchFilter} />}
 
