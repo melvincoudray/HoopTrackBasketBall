@@ -1179,6 +1179,70 @@ async function parseDnkCodingFile(arrayBuffer, cats, unknownColumnDefault = "pla
   }
 }
 
+// Demandé par l'utilisateur : dans un export SportsCode, le numéro de maillot est collé devant
+// le nom ("#21 Adrien Sclear"), ce qui ne correspondait jamais à un nom d'effectif enregistré
+// dans Réglages ("Adrien Sclear") — retiré avant toute comparaison/attribution.
+function stripJerseyPrefix(name) {
+  return String(name).replace(/^#\s*\d+\s+/, "").trim();
+}
+// Groupes SportsCode qui décrivent le système qui a lancé TOUTE la possession (pas un tir en
+// particulier) : "Plays" (l'entrée en attaque) et les deux catégories PnR. Jamais découpés par
+// tir — attribués uniquement au 1er tir de l'action (voir splitSCInstanceByShooter) : un
+// rebond-putback qui suit n'est pas issu de ce système.
+const SC_WHOLE_POSSESSION_GROUPS = new Set(["Plays", "PnR Ogranisation", "PnR Organisation", "PNR Defense", "PnR Defense"]);
+
+// Construit les tags + joueurs détectés pour un lot de labels SportsCode. Un label est un
+// "joueur" si son groupe est "Player(s)" ou "Shooter" (toujours, numéro de maillot retiré), ou
+// si — comme avant — son nom brut correspond déjà à un joueur connu dans Réglages.
+function extractSCLabelTags(labels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault) {
+  const tags = {};
+  const flaggedPlayers = [];
+  for (const label of labels) {
+    const rawName = String(label.name ?? "").trim();
+    if (!rawName) continue;
+    const group = String(label.group || "").trim();
+    const isPlayerGroup = /^players?$/i.test(group) || group === "Shooter";
+    if (isPlayerGroup || knownPlayers.has(normTag(rawName))) {
+      flaggedPlayers.push(isPlayerGroup ? stripJerseyPrefix(rawName) : rawName);
+      continue;
+    }
+    tags[rawName] = 1;
+    if (!knownTags.has(normTag(rawName)) && unknownColumnDefault === "tag") unconfirmedTagsSet.add(rawName);
+  }
+  return { tags, flaggedPlayers };
+}
+
+// Demandé par l'utilisateur : une même action SportsCode peut contenir PLUSIEURS tirs (ex.
+// rebond offensif → 2e tir), chacun avec son propre joueur et son propre Playtype. Repéré par
+// plusieurs labels "Shooter" dans la même action — un tir par "Shooter". Ce qui précède le 1er
+// "Shooter" est le contexte partagé de la possession (Ball Handler, Receiver…) ; chaque bloc
+// Shooter → Shooter suivant porte les tags propres à CE tir ; "Plays"/"PnR Ogranisation"/
+// "PNR Defense" ne vont que sur le 1er tir (voir SC_WHOLE_POSSESSION_GROUPS).
+function splitSCInstanceByShooter(labels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault) {
+  const shooterIdx = [];
+  labels.forEach((l, j) => { if (String(l.group || "").trim() === "Shooter") shooterIdx.push(j); });
+
+  if (shooterIdx.length <= 1) {
+    return [extractSCLabelTags(labels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault)];
+  }
+
+  const isWholePossession = (l) => SC_WHOLE_POSSESSION_GROUPS.has(String(l.group || "").trim());
+  const sharedLabels = labels.slice(0, shooterIdx[0]).filter(l => !isWholePossession(l));
+  const metaLabels = labels.filter(isWholePossession);
+  const { tags: sharedTags, flaggedPlayers: sharedFlagged } = extractSCLabelTags(sharedLabels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
+  const { tags: metaTags, flaggedPlayers: metaFlagged } = extractSCLabelTags(metaLabels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
+
+  return shooterIdx.map((start, k) => {
+    const end = k + 1 < shooterIdx.length ? shooterIdx[k + 1] : labels.length;
+    const blockLabels = labels.slice(start + 1, end).filter(l => !isWholePossession(l));
+    const shooterName = stripJerseyPrefix(labels[start].name);
+    const { tags: blockTags, flaggedPlayers: blockFlagged } = extractSCLabelTags(blockLabels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
+    const tags = { ...sharedTags, ...blockTags, ...(k === 0 ? metaTags : {}) };
+    const players = [shooterName, ...sharedFlagged, ...blockFlagged, ...(k === 0 ? metaFlagged : [])].filter((p, i, arr) => arr.indexOf(p) === i);
+    return { tags, flaggedPlayers: players };
+  });
+}
+
 // Demandé par l'utilisateur : lire aussi les fichiers ".SCTimeline" (autre logiciel de tagging).
 // C'est un fichier JSON : deux lignes (Offense / Defense) contenant chacune des "instances"
 // (une action = un début, une fin, et des labels { group, name }). On le traduit EXACTEMENT dans
@@ -1199,21 +1263,12 @@ function parseSCTimelineCodingFile(parsedJson, cats, unknownColumnDefault = "pla
   entries.sort((a, b) => (a.inst.startTime ?? 0) - (b.inst.startTime ?? 0));
 
   const plays = entries.flatMap(({ button, inst }) => {
-    const tags = {};
-    const flaggedPlayers = [];
-    for (const label of (inst.labels || [])) {
-      const name = String(label.name ?? "").trim();
-      if (!name) continue;
-      const norm = normTag(name);
-      // Même règle que le .dnk : joueur si le groupe est "Player(s)", ou si le nom correspond
-      // déjà à un joueur connu dans Settings.
-      if (/^players?$/i.test(String(label.group || "").trim()) || knownPlayers.has(norm)) { flaggedPlayers.push(name); continue; }
-      tags[name] = 1;
-      if (!knownTags.has(norm) && unknownColumnDefault === "tag") unconfirmedTagsSet.add(name);
-    }
-    const base = { category: "Possession", button: String(button), tags, timestampStart: inst.startTime, timestampEnd: inst.endTime };
-    if (flaggedPlayers.length === 0) return [{ ...base, player: null }];
-    return flaggedPlayers.map(player => ({ ...base, player }));
+    const base = { category: "Possession", button: String(button), timestampStart: inst.startTime, timestampEnd: inst.endTime };
+    const shots = splitSCInstanceByShooter(inst.labels || [], knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
+    return shots.flatMap(({ tags, flaggedPlayers }) => {
+      if (flaggedPlayers.length === 0) return [{ ...base, tags, player: null }];
+      return flaggedPlayers.map(player => ({ ...base, tags, player }));
+    });
   });
 
   const detectedPlayers = [...new Set(plays.map(p => p.player).filter(Boolean))];
@@ -10068,6 +10123,16 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
   const [trendStats, setTrendStats] = useState([]);
   const [trendMenuOpen, setTrendMenuOpen] = useState(false);
 
+  // Demandé par l'utilisateur : un bouton "Clips" (cercle simple, pas un donut/stat) sur la
+  // fiche joueur, pour retrouver vite les actions taguées spécifiquement pour lui dans le
+  // fichier de codage (bouton "Prénom Nom Clip" côté .dnk — même convention que les tags
+  // joueur habituels, juste avec le suffixe " Clip"). Recherché sur TOUTES les actions, pas
+  // seulement celles déjà attribuées à ce joueur : ce tag peut viser une action où il n'est pas
+  // le porteur de balle (ex. une rotation défensive à lui montrer).
+  const clipTagName = `${playerName} Clip`;
+  const clipPlays = useMemo(() => allPlays.filter(p => tagIsSet(p.tags, clipTagName)), [allPlays, clipTagName]);
+  const [showClipsModal, setShowClipsModal] = useState(false);
+
   return (
     <div>
       {isCoach && (
@@ -10108,6 +10173,19 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
           <div style={{ fontSize: 12.5, color: "#5C6470" }}>{games.length} match{games.length !== 1 ? "s" : ""} coded · {box.entries.length} box score{box.entries.length !== 1 ? "s" : ""}</div>
+          {/* Cercle "Clips" demandé par l'utilisateur : ni donut ni stat, juste un bouton rond
+              qui ouvre directement les clips tagués pour ce joueur ("Prénom Nom Clip"). */}
+          <button onClick={() => setShowClipsModal(true)} title="Clips to show this player" style={{
+            position: "relative", width: 46, height: 46, borderRadius: "50%", background: PANEL2,
+            border: `2px solid ${AMBER}`, display: "flex", flexDirection: "column", alignItems: "center",
+            justifyContent: "center", color: AMBER, cursor: "pointer", fontFamily: "inherit", flexShrink: 0, padding: 0,
+          }}>
+            <Video size={14} />
+            <span style={{ fontSize: 8.5, fontWeight: 700, marginTop: 1, lineHeight: 1 }}>Clips</span>
+            {clipPlays.length > 0 && (
+              <span style={{ position: "absolute", top: -4, right: -4, background: AMBER, color: "#1A1E24", borderRadius: "50%", minWidth: 16, height: 16, fontSize: 9.5, fontWeight: 800, display: "flex", alignItems: "center", justifyContent: "center", padding: "0 3px" }}>{clipPlays.length}</span>
+            )}
+          </button>
           <button onClick={async () => {
             const filename = `fiche_${playerName}_${todayLocal()}.html`;
             const pdfOk = await tryExportPdf("player-print-content", filename, "light");
@@ -10237,6 +10315,14 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
         <PlayerPrintReport playerName={playerName} position={position} off={off} def={def} box={box} allBox={allBox} roster={roster} />
       </div>
       <ExportModal report={exportReport} onClose={() => setExportReport(null)} />
+      {showClipsModal && (
+        <ClipExportModal
+          playName={`${playerName} — Clips`}
+          sideLabel=""
+          plays={clipPlays}
+          onClose={() => setShowClipsModal(false)}
+        />
+      )}
     </div>
   );
 }
