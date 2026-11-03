@@ -1111,12 +1111,19 @@ async function parseDnkCodingFile(arrayBuffer, cats, unknownColumnDefault = "pla
       if (!tableNames.has(required)) throw new Error(`Unrecognized .dnk file (missing "${required}" table).`);
     }
 
+    // Indice d'affichage : nom de la vidéo associée au projet au moment du coding — purement
+    // informatif (ex. pour aider à reconnaître quel match on vient d'importer).
     let videoPathHint = null;
     try {
       const cfgRes = db.exec("SELECT value FROM configuration WHERE name = 'video_path'");
       if (cfgRes.length && cfgRes[0].values.length) videoPathHint = cfgRes[0].values[0][0];
     } catch (e) { /* non bloquant */ }
 
+    // Catégories nommées "Player"/"Players" dans le PROJET DNK lui-même : c'est cette
+    // classification (fiable, posée par le coach au moment du tagging) qui décide si un tag
+    // est un joueur ou non — pas seulement la correspondance avec le roster HoopTrack (Settings),
+    // qui sert uniquement ensuite à distinguer "joueur confirmé" de "joueur à confirmer",
+    // exactement comme le faisait l'ancien import Excel.
     const catRows = db.exec("SELECT id, name FROM category");
     const playerCategoryIds = new Set((catRows[0]?.values || []).filter(([, name]) => /^players?$/i.test(String(name).trim())).map(([id]) => id));
 
@@ -1139,7 +1146,7 @@ async function parseDnkCodingFile(arrayBuffer, cats, unknownColumnDefault = "pla
 
     const knownPlayers = knownPlayersSet(cats);
     const knownTags = allKnownTagsSet(cats);
-    const unconfirmedTagsSet = new Set();
+    const unconfirmedTagsSet = new Set(); // seulement peuplé si unknownColumnDefault === "tag", comme l'ancien import Excel
 
     const plays = entries.flatMap(([entryId, buttonId, tStart, tEnd]) => {
       const button = buttonNameById.get(buttonId) || "";
@@ -1150,10 +1157,17 @@ async function parseDnkCodingFile(arrayBuffer, cats, unknownColumnDefault = "pla
         const info = tagInfoById.get(tagId);
         if (!info) continue;
         const norm = normTag(info.name);
+        // Un tag compte comme "joueur" si sa catégorie DNK est Player/Players, OU s'il
+        // correspond déjà à un joueur connu dans Settings (filet de sécurité si un projet
+        // DNK nomme sa catégorie différemment).
         if (playerCategoryIds.has(info.categoryId) || knownPlayers.has(norm)) { flaggedPlayers.push(info.name); continue; }
         tags[info.name] = 1;
         if (!knownTags.has(norm) && unknownColumnDefault === "tag") unconfirmedTagsSet.add(info.name);
       }
+      // Même règle que l'ancien import Excel : une action peut concerner plusieurs joueurs à la
+      // fois (porteur de balle + écran sur la même possession) → une entrée par joueur tagué,
+      // pour ne perdre aucune donnée. Si aucun joueur n'est tagué (scouting d'équipe adverse
+      // sans suivi individuel), on garde quand même l'action au niveau de l'équipe.
       const base = { category: "Possession", button: String(button), tags, timestampStart: tStart, timestampEnd: tEnd };
       if (flaggedPlayers.length === 0) return [{ ...base, player: null }];
       return flaggedPlayers.map(player => ({ ...base, player }));
@@ -1191,12 +1205,26 @@ function stripJerseyPrefix(name) {
 // rebond-putback qui suit n'est pas issu de ce système.
 const SC_WHOLE_POSSESSION_GROUPS = new Set(["Plays", "PnR Ogranisation", "PnR Organisation", "PNR Defense", "PnR Defense"]);
 
+// Demandé par l'utilisateur : traduire le tir au format SportsCode ("+2"/"-3"…) en valeur
+// {made, n} exploitable, pour le réécrire ensuite dans le vocabulaire canonique du site.
+function translateSCShotValue(rawName) {
+  const m = String(rawName).trim().match(/^([+-])(\d+)$/);
+  if (!m) return null;
+  return { made: m[1] === "+", n: parseInt(m[2], 10) };
+}
+
 // Construit les tags + joueurs détectés pour un lot de labels SportsCode. Un label est un
 // "joueur" si son groupe est "Player(s)" ou "Shooter" (toujours, numéro de maillot retiré), ou
-// si — comme avant — son nom brut correspond déjà à un joueur connu dans Réglages.
+// si — comme avant — son nom brut correspond déjà à un joueur connu dans Réglages. Le tir
+// ("Shot": "+2"/"-3"…) est traduit vers le vocabulaire canonique du site ("2PT+"/"3PT-"…), sauf
+// pour un lancer-franc isolé ("Shot Characteristics: Free Throw") : il n'a pas de Playtype
+// propre, donc ses points sont renvoyés à part (ftPoints) plutôt que posés comme un tag ici —
+// voir mergeFreeThrowsIntoPriorAction, qui les fusionne dans l'action qui a provoqué la faute.
 function extractSCLabelTags(labels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault) {
   const tags = {};
   const flaggedPlayers = [];
+  let ftPoints = null;
+  const isFreeThrow = labels.some(l => String(l.group || "").trim() === "Shot Characteristics" && String(l.name || "").trim() === "Free Throw");
   for (const label of labels) {
     const rawName = String(label.name ?? "").trim();
     if (!rawName) continue;
@@ -1206,10 +1234,18 @@ function extractSCLabelTags(labels, knownPlayers, knownTags, unconfirmedTagsSet,
       flaggedPlayers.push(isPlayerGroup ? stripJerseyPrefix(rawName) : rawName);
       continue;
     }
-    tags[rawName] = 1;
-    if (!knownTags.has(normTag(rawName)) && unknownColumnDefault === "tag") unconfirmedTagsSet.add(rawName);
+    let tagName = rawName;
+    if (group === "Shot") {
+      const shot = translateSCShotValue(rawName);
+      if (shot) {
+        if (isFreeThrow) { ftPoints = shot.made ? 1 : 0; continue; }
+        tagName = `${shot.n}PT${shot.made ? "+" : "-"}`;
+      }
+    }
+    tags[tagName] = 1;
+    if (!knownTags.has(normTag(tagName)) && unknownColumnDefault === "tag") unconfirmedTagsSet.add(tagName);
   }
-  return { tags, flaggedPlayers };
+  return { tags, flaggedPlayers, ftPoints };
 }
 
 // Demandé par l'utilisateur : une même action SportsCode peut contenir PLUSIEURS tirs (ex.
@@ -1236,11 +1272,41 @@ function splitSCInstanceByShooter(labels, knownPlayers, knownTags, unconfirmedTa
     const end = k + 1 < shooterIdx.length ? shooterIdx[k + 1] : labels.length;
     const blockLabels = labels.slice(start + 1, end).filter(l => !isWholePossession(l));
     const shooterName = stripJerseyPrefix(labels[start].name);
-    const { tags: blockTags, flaggedPlayers: blockFlagged } = extractSCLabelTags(blockLabels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
+    const { tags: blockTags, flaggedPlayers: blockFlagged, ftPoints: blockFtPoints } = extractSCLabelTags(blockLabels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
     const tags = { ...sharedTags, ...blockTags, ...(k === 0 ? metaTags : {}) };
     const players = [shooterName, ...sharedFlagged, ...blockFlagged, ...(k === 0 ? metaFlagged : [])].filter((p, i, arr) => arr.indexOf(p) === i);
-    return { tags, flaggedPlayers: players };
+    return { tags, flaggedPlayers: players, ftPoints: blockFtPoints };
   });
+}
+
+// Demandé par l'utilisateur : un lancer-franc isolé n'a pas de Playtype propre — ses points
+// doivent être comptés comme si c'était la dernière action du MÊME joueur qui les avait
+// marqués (ex. Spot Up qui provoque 2 LF : les 2 LF comptent pour le Spot Up), SAUF si cette
+// action est une faute technique ("Foul Class": "Technical"), qui ne découle d'aucun Playtype.
+// Si plusieurs LF se suivent pour le même joueur (2 ou 3 shots d'affilée), ils se cumulent sur
+// cette même action. Les lancers-francs "orphelins" (aucune action précédente du joueur, ou
+// faute technique) restent des actions à part, non fusionnées.
+function mergeFreeThrowsIntoPriorAction(plays) {
+  const lastActionIdx = new Map();
+  const ftTotals = new Map();
+  const toRemove = new Set();
+  plays.forEach((p, i) => {
+    if (p.__ftPoints !== undefined) {
+      const targetIdx = lastActionIdx.get(p.player);
+      if (targetIdx !== undefined && !tagIsSet(plays[targetIdx].tags, "Technical")) {
+        ftTotals.set(targetIdx, (ftTotals.get(targetIdx) || 0) + p.__ftPoints);
+        toRemove.add(i);
+      }
+      return;
+    }
+    if (p.player) lastActionIdx.set(p.player, i);
+  });
+  const withMerged = plays.map((p, i) => {
+    const { __ftPoints, ...rest } = p;
+    if (ftTotals.has(i)) return { ...rest, tags: { ...rest.tags, [`${ftTotals.get(i)}FT+`]: 1 } };
+    return rest;
+  });
+  return withMerged.filter((_, i) => !toRemove.has(i));
 }
 
 // Demandé par l'utilisateur : lire aussi les fichiers ".SCTimeline" (autre logiciel de tagging).
@@ -1248,7 +1314,7 @@ function splitSCInstanceByShooter(labels, knownPlayers, knownTags, unconfirmedTa
 // (une action = un début, une fin, et des labels { group, name }). On le traduit EXACTEMENT dans
 // le même format de sortie que parseDnkCodingFile (même contrat), pour que tout le reste du
 // site — stats, joueurs, clips — fonctionne sans aucun changement.
-function parseSCTimelineCodingFile(parsedJson, cats, unknownColumnDefault = "player") {
+function parseSCTimelineCodingFile(parsedJson, cats, unknownColumnDefault = "player", teamName) {
   const timeline = parsedJson && parsedJson.timeline;
   if (!timeline || !Array.isArray(timeline.rows)) throw new Error("Unrecognized coding file (no timeline found).");
   const knownPlayers = knownPlayersSet(cats);
@@ -1257,19 +1323,32 @@ function parseSCTimelineCodingFile(parsedJson, cats, unknownColumnDefault = "pla
 
   const entries = [];
   for (const row of timeline.rows) {
-    for (const inst of (row.instances || [])) entries.push({ button: row.name || "", inst });
+    for (const inst of (row.instances || [])) {
+      // Demandé par l'utilisateur : un export "Full Game" n'a qu'une seule ligne (pas
+      // "...Offense"/"...Defense" comme avant) — or TOUT le site (statistiques équipe/joueur,
+      // Scouting…) détermine attaque/défense UNIQUEMENT via ce "button" (voir isOffense/
+      // isDefense). On le déduit donc ici du label "Offensive Team" comparé au nom de l'équipe ;
+      // si l'info n'est pas disponible (ancien format, nom d'équipe inconnu ici), on retombe
+      // sur le nom de la ligne comme avant, sans rien changer pour les fichiers .dnk/Fougères.
+      const offLabel = (inst.labels || []).find(l => String(l.group || "").trim() === "Offensive Team");
+      const side = (teamName && offLabel) ? (normTag(offLabel.name) === normTag(teamName) ? "Offense" : "Defense") : null;
+      entries.push({ button: side || row.name || "", inst });
+    }
   }
   if (!entries.length) throw new Error("This coding file contains no coded action yet.");
   entries.sort((a, b) => (a.inst.startTime ?? 0) - (b.inst.startTime ?? 0));
 
-  const plays = entries.flatMap(({ button, inst }) => {
+  const rawPlays = entries.flatMap(({ button, inst }) => {
     const base = { category: "Possession", button: String(button), timestampStart: inst.startTime, timestampEnd: inst.endTime };
     const shots = splitSCInstanceByShooter(inst.labels || [], knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
-    return shots.flatMap(({ tags, flaggedPlayers }) => {
-      if (flaggedPlayers.length === 0) return [{ ...base, tags, player: null }];
-      return flaggedPlayers.map(player => ({ ...base, tags, player }));
+    return shots.flatMap(({ tags, flaggedPlayers, ftPoints }) => {
+      const list = flaggedPlayers.length === 0 ? [{ ...base, tags, player: null }] : flaggedPlayers.map(player => ({ ...base, tags, player }));
+      if (ftPoints !== null && ftPoints !== undefined) list.forEach(p => { p.__ftPoints = ftPoints; });
+      return list;
     });
   });
+
+  const plays = mergeFreeThrowsIntoPriorAction(rawPlays);
 
   const detectedPlayers = [...new Set(plays.map(p => p.player).filter(Boolean))];
   const unconfirmedPlayers = detectedPlayers.filter(p => !knownPlayers.has(normTag(p)));
@@ -1419,12 +1498,12 @@ async function renameTagInData(oldName, newName, scope) {
 
 // Point d'entrée unique pour tous les imports de codage : reconnaît le type de fichier d'après
 // son CONTENU (une base SQLite commence par "SQLite format 3"), pas d'après son extension.
-async function parseCodingFile(arrayBuffer, cats, unknownColumnDefault = "player") {
+async function parseCodingFile(arrayBuffer, cats, unknownColumnDefault = "player", teamName) {
   const head = new Uint8Array(arrayBuffer, 0, Math.min(15, arrayBuffer.byteLength));
   const isSqlite = String.fromCharCode(...head) === "SQLite format 3";
   let parsed = null;
   if (isSqlite) parsed = await parseDnkCodingFile(arrayBuffer, cats, unknownColumnDefault);
-  else parsed = await parseTextCodingFile(arrayBuffer, cats, unknownColumnDefault);
+  else parsed = await parseTextCodingFile(arrayBuffer, cats, unknownColumnDefault, teamName);
   // Équivalences de tags déclarées dans Backup : appliquées dès l'import.
   const aliasMap = buildTagAliasMap(await loadTagAliases());
   if (aliasMap.size) {
@@ -1440,12 +1519,12 @@ async function parseCodingFile(arrayBuffer, cats, unknownColumnDefault = "player
   return parsed;
 }
 
-async function parseTextCodingFile(arrayBuffer, cats, unknownColumnDefault = "player") {
+async function parseTextCodingFile(arrayBuffer, cats, unknownColumnDefault = "player", teamName) {
   let json = null;
   try {
     json = JSON.parse(new TextDecoder("utf-8").decode(arrayBuffer).replace(/^\uFEFF/, ""));
   } catch (e) { /* pas du JSON non plus */ }
-  if (json && json.timeline) return parseSCTimelineCodingFile(json, cats, unknownColumnDefault);
+  if (json && json.timeline) return parseSCTimelineCodingFile(json, cats, unknownColumnDefault, teamName);
   throw new Error("Unrecognized coding file (expected a .dnk project or a .SCTimeline file).");
 }
 
@@ -1522,6 +1601,12 @@ async function unmountVideoForFfmpeg(ffmpeg, dir) {
 // sélectionnés en haut de page), demande une vidéo locale par match, puis découpe et concatène
 // tous les clips dans l'ordre. "plays" est déjà filtré par l'appelant (bon Play, bon côté
 // attaque/défense, matchs sélectionnés) — rien d'autre à filtrer ici.
+// "grouping" (optionnel) : comment regrouper "plays" en lots nécessitant chacun une vidéo
+// locale — par défaut, un match (matchId / date vs adversaire), comme pour Team Play et la
+// fiche joueur. Demandé par l'utilisateur pour le Scouting : les fichiers importés dans
+// Observation n'ont pas de matchId/date/adversaire (une équipe observée peut combiner plusieurs
+// fichiers sans qu'on connaisse la date de chacun) — on regroupe alors par "importId" (un
+// fichier = un lot), avec le nom de fichier comme libellé.
 // Pluriel anglais basique pour le "noun" de regroupement ("Match" → "Matches", "File" →
 // "Files") — les deux seuls cas utilisés aujourd'hui, pas une tentative de couvrir tout l'anglais.
 function pluralizeNoun(noun, count) {
@@ -1583,12 +1668,6 @@ function SecondaryTagPickerModal({ name, side, category, cats, onConfirm, onClos
   );
 }
 
-// "grouping" (optionnel) : comment regrouper "plays" en lots nécessitant chacun une vidéo
-// locale — par défaut, un match (matchId / date vs adversaire), comme pour Team Play et la
-// fiche joueur. Demandé par l'utilisateur pour le Scouting : les fichiers importés dans
-// Observation n'ont pas de matchId/date/adversaire (une équipe observée peut combiner plusieurs
-// fichiers sans qu'on connaisse la date de chacun) — on regroupe alors par "importId" (un
-// fichier = un lot), avec le nom de fichier comme libellé.
 // Demandé par l'utilisateur : ne pas avoir à redonner les mêmes vidéos de match à chaque
 // ouverture de la fenêtre de clips (autre joueur, autre action, même match). On garde en mémoire
 // (le temps que le site reste ouvert) la RÉFÉRENCE vers chaque fichier choisi — pas une copie :
@@ -3996,7 +4075,11 @@ function playPoints(tags) {
     if (!val) continue;
     const m2 = String(name).match(/^(\d)\s*PT\+$/i);
     if (m2) { pts += parseInt(m2[1], 10); continue; }
-    if (/FT\+$/i.test(name)) pts += 1;
+    // Correction : "{N}FT+" représente le TOTAL de lancers-francs marqués sur l'action (ex.
+    // "0FT+" = raté, "2FT+" = 2 marqués) — ce n'était pas pris en compte avant (1 point ajouté
+    // systématiquement, y compris pour "0FT+" qui est un échec).
+    const mFt = String(name).match(/^(\d+)\s*FT\+$/i);
+    if (mFt) pts += parseInt(mFt[1], 10);
   }
   return pts;
 }
@@ -5441,6 +5524,9 @@ function computeWeightedTeamPercentages(perMatch) {
   const astOpportunities = sumFgm + 0.44 * sumMadeFT;
   const astPct = (has("ast") && has("fgm") && has("madeFT") && astOpportunities > 0) ? (100 * sumAst) / astOpportunities : null;
 
+  // Demandé par l'utilisateur : % 3pts/Poss (part des possessions terminées par un tir à
+  // 3pts tenté), déjà calculée pour les équipes scoutées (import "Classic") mais jamais pour
+  // notre propre équipe — même formule, à partir des mêmes totaux déjà disponibles ici.
   const sumPoss3 = sumPoss;
   const pct3poss = (has("made3") && has("missed3") && has("poss") && sumPoss3 > 0) ? (100 * (sumMade3 + sumMissed3)) / sumPoss3 : null;
 
@@ -5558,6 +5644,8 @@ async function loadTeamAdvancedStats(filterKeys) {
       const reb = s(columns.reb); // rebonds totaux (non séparés off/def) — informatif
       const tov = s(columns.tov);
       const ast = s(columns.ast);
+      // Demandé par l'utilisateur : Blocks/Steals/Fouls, jusqu'ici jamais reconnus pour TA
+      // propre équipe (contrairement au format "Classic" du scouting, qui les avait déjà).
       const blk = s(columns.blk);
       const stl = s(columns.stl);
       const fouls = s(columns.fouls);
@@ -6730,6 +6818,7 @@ export default function App() {
         {tab === "import" && session.role === "coach" && (
           <ImportTab
             roster={roster}
+            teamName={team.name}
             onImported={async (parsed, meta) => {
               const id = uid();
               const record = { id, date: meta.date, opponent: meta.opponent, season: currentSeason, matchType: meta.matchType || "", plays: parsed.plays };
@@ -9301,7 +9390,7 @@ function ScreenContestImportPanel({ roster }) {
   );
 }
 
-function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatch, onReplaceFile }) {
+function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatch, onReplaceFile, teamName }) {
   const [preview, setPreview] = useState(null);
   const [fileErr, setFileErr] = useState("");
   const [date, setDate] = useState(todayLocal());
@@ -9346,7 +9435,7 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatc
     try {
       await syncPlayerCategoryFromRoster(roster);
       const buf = await file.arrayBuffer();
-      const parsed = await parseCodingFile(buf);
+      const parsed = await parseCodingFile(buf, undefined, undefined, teamName);
       if (!parsed.plays.length) throw new Error("No action attributed to a roster player was found.");
       const fileDataUrl = await new Promise((resolve, reject) => {
         const reader = new FileReader();
@@ -9376,7 +9465,7 @@ function ImportTab({ roster, onImported, matchesIndex, onDeleteMatch, onEditMatc
     try {
       await syncPlayerCategoryFromRoster(roster);
       const buf = await file.arrayBuffer();
-      const parsed = await parseCodingFile(buf);
+      const parsed = await parseCodingFile(buf, undefined, undefined, teamName);
       if (!parsed.plays.length) throw new Error("No action attributed to a roster player was found.");
       // Garde une copie du fichier original en base64, pour pouvoir le rouvrir plus tard —
       // taille raisonnable pour un projet .dnk (quelques centaines de Ko en général).
@@ -12522,6 +12611,11 @@ function ourTeamAsScoutStats(advanced, box) {
     return vals.length ? vals.reduce((s, v) => s + v, 0) / vals.length : undefined;
   };
   const weighted = computeWeightedTeamPercentages(advanced.perMatch);
+  // Demandé par l'utilisateur : "Our team" (comparaison Scouting) n'affichait jamais %Ass,
+  // %3pts/Poss, Net rating, Blocks, Steals ni Fouls — les trois premiers étaient déjà calculés
+  // ailleurs (weighted.astPct, weighted.pct3poss) mais jamais repris ici ; Net rating se déduit
+  // simplement d'ORTG et DRTG, déjà tous les deux disponibles ; Blocks/Steals/Fouls nécessitaient
+  // une vraie reconnaissance de colonnes, ajoutée à STAT_PATTERNS (blk/stl/fouls).
   const ortgVal = weighted.ortg ?? undefined, drtgVal = weighted.drtg ?? undefined;
   const stats = {
     mj: advanced.perMatch.length || undefined,
@@ -13269,6 +13363,12 @@ function StatShapeBadge({ label, value, size = 74, fontScale = 1, color = TEAL }
 // l'export garde sa mise en page fixe, déjà calibrée pour tenir à 2 joueurs par page). Les
 // valeurs par défaut reproduisent exactement la disposition actuelle, en pourcentages d'une
 // zone de référence de 900×560 — pour que rien ne change tant que le coach n'a pas personnalisé.
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur : les "Stat badges" restaient coupés en bas de
+// carte, même après plusieurs tentatives de correctif) : la carte elle-même n'était PAS assez
+// haute pour la mise en page PAR DÉFAUT — la zone "highlights" (y:544, h:90) se terminait à
+// y:634, alors que la carte ne faisait que 560 de haut. Autrement dit, même avec un seul badge,
+// une partie de la zone dépassait déjà le cadre de la carte, avant même de compter le nombre de
+// badges ajoutés. La carte est donc agrandie pour inclure réellement cet espace prévu.
 const SCOUTING_LAYOUT_REF_W = 900, SCOUTING_LAYOUT_REF_H = 640;
 const DEFAULT_SCOUTING_LAYOUT = {
   logo: { x: 850, y: 16, w: 30, h: 30 },
@@ -17100,6 +17200,9 @@ function ObservationPrintReport({ name, team }) {
   const plays = team?.plays || [];
   const off = plays.filter(isOffense);
   const def = plays.filter(isDefense);
+  // Demandé par l'utilisateur : la section "Shot chart" ne sert à rien si aucun tir localisé
+  // n'a été tagué pour cette équipe — elle s'affichait avant dès qu'il y avait au moins une
+  // action offensive, même sans la moindre donnée de zone (toutes les zones vides/grises).
   const zoneStats = computeShotZoneStats(off, cats);
   const hasShotData = Object.values(zoneStats).some(z => z.attempted > 0);
   return (
@@ -17427,6 +17530,20 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
                 <button onClick={() => setOpenPlayer(null)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer" }}><X size={20} /></button>
               </div>
               {(() => { const live = ffbbLive[openPlayer.id]; const stats = (live && typeof live === "object" ? live : null) || openPlayer.ffbbStats; return <FfbbBoxScoreTiles teammates={rosterStats ? [...rosterStats.filter(x => !ffbbSamePerson(openPlayer, x.fp)).map(x => x.st), stats] : [...players.filter(p => p.id !== openPlayer.id).map(p => p.ffbbStats), stats]} stats={stats} loading={!stats && (live === "loading" || live === undefined)} error={typeof live === "string" && live.startsWith("error:") ? live.slice(6) : ""} />; })()}
+              {/* Demandé par l'utilisateur : shot map PAR JOUEUR dans Scouting Observation (jusqu'ici
+                  le shot chart n'existait qu'au niveau de l'équipe entière). Mêmes zones ("Shot zone"
+                  dans Settings → Scouting Observation) et même composant que partout ailleurs sur le
+                  site — masqué si aucun tir localisé n'a été tagué pour ce joueur précis. */}
+              {(() => {
+                const zoneStats = computeShotZoneStats(playerOff, categories);
+                const hasShotData = Object.values(zoneStats).some(z => z.attempted > 0);
+                return hasShotData ? (
+                  <div style={{ marginTop: 16, marginBottom: 16 }}>
+                    <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 10 }}>Shot chart</div>
+                    <HalfCourtShotChart zoneStats={zoneStats} size={380} />
+                  </div>
+                ) : null;
+              })()}
               {playerOff.length + playerDef.length > 0
                 ? <OffenseDefenseBreakdown off={playerOff} def={playerDef} categories={categories} enableClipExport clipGrouping={clipGrouping} />
                 : <EmptyState text="No tagged action for this player in the observation yet." />}
@@ -18094,6 +18211,9 @@ function ObservationTab({ isCoach }) {
             <SectionTitle eyebrow="Breakdown" title={selected} />
             <button onClick={async () => {
               const filename = `observation_${selected}_${todayLocal()}.html`;
+              // Demandé par l'utilisateur : ce fichier était jugé trop lourd (1,6 Mo pour une
+              // seule équipe) — réglage encore réduit ICI SEULEMENT (les 3 autres exports du
+              // site restent inchangés, déjà ajustés par le passé pour le même motif).
               const pdfOk = await tryExportPdf("observation-print-content", filename, "light", "portrait", 0.9, 0.55);
               if (pdfOk) return;
               const r = buildReportHtml("observation-print-content", filename, "light");
