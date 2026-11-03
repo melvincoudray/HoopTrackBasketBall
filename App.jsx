@@ -18096,17 +18096,40 @@ function ObservationTab({ isCoach }) {
     setLoading(false);
   }
 
+  // BUG RÉEL CORRIGÉ : le fichier était lu (et le camp Attaque/Défense de chaque action déduit
+  // du nom d'équipe tapé) DÈS la sélection du fichier — si ce champ était encore vide à cet
+  // instant (ex. en ajoutant un 2e/3e fichier à une équipe déjà créée, le champ étant remis à
+  // vide après chaque import), tout était tagué "Full Game" (ni Attaque ni Défense) et restait
+  // ainsi même après avoir tapé le nom par la suite, car l'aperçu n'était jamais recalculé.
+  // Conséquence : ce fichier s'ajoutait bien à la liste combinée mais restait invisible dans les
+  // stats (décocher/recocher ne changeait donc rien). Le nom est maintenant exigé AVANT la
+  // lecture du fichier, et un changement de nom après coup annule l'aperçu pour forcer une
+  // nouvelle lecture avec le bon nom.
   async function handleFile(e) {
     const file = e.target.files[0];
     if (!file) return;
+    if (!teamName.trim()) {
+      setFileErr("Enter the observed team's name before choosing a file.");
+      e.target.value = "";
+      return;
+    }
     setFileErr(""); setPreview(null);
     try {
       const buf = await file.arrayBuffer();
       const parsed = await parseCodingFile(buf, currentObservationTagCategories(), "tag", teamName);
       if (!parsed.plays.length) throw new Error("No action attributed to a player was found.");
-      setPreview({ ...parsed, fileName: file.name });
+      setPreview({ ...parsed, fileName: file.name, forTeamName: teamName.trim() });
     } catch (err) { setFileErr(err.message || "Error reading the file."); }
   }
+
+  // Si le nom tapé change après la lecture du fichier, l'aperçu a été calculé avec l'ancien nom
+  // (donc potentiellement un mauvais camp Attaque/Défense) — on l'annule pour forcer à ré-importer.
+  useEffect(() => {
+    if (preview && preview.forTeamName !== teamName.trim()) {
+      setPreview(null);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }, [teamName]);
 
   // BUG RÉEL CORRIGÉ : importer un deuxième fichier pour une équipe déjà observée écrasait
   // complètement le premier import au lieu de s'y ajouter — impossible de combiner plusieurs
@@ -18114,6 +18137,7 @@ function ObservationTab({ isCoach }) {
   // pour pouvoir les combiner (et, si besoin, en retirer un seul plus tard) sans tout perdre.
   async function confirmImport() {
     if (!teamName.trim()) { setFileErr("Enter the observed team's name before confirming."); return; }
+    if (!preview || preview.forTeamName !== teamName.trim()) { setFileErr("The team name changed after reading the file — please choose the file again."); return; }
     setBusy(true);
     const name = teamName.trim();
     const existing = observed[name] || { plays: [], imports: [] };
