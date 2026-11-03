@@ -1309,6 +1309,19 @@ function mergeFreeThrowsIntoPriorAction(plays) {
   return withMerged.filter((_, i) => !toRemove.has(i));
 }
 
+// Demandé par l'utilisateur (BUG RÉEL CORRIGÉ, Scouting Observation : "No action coded yet" alors
+// que le fichier contient bien des actions) : le nom d'équipe tapé par le coach ("Chartres") ne
+// correspond presque jamais MOT POUR MOT au nom brut posé par SportsCode dans "Offensive Team"
+// ("C'Chartres Metropole Basket") — une égalité stricte ratait donc systématiquement la
+// comparaison. On accepte une correspondance "contient" dans un sens ou l'autre (après avoir
+// retiré accents/espaces/casse), suffisant pour les vrais cas rencontrés sans risquer de
+// confondre deux équipes différentes au nom proche.
+function teamNameLooselyMatches(rawName, teamName) {
+  const a = normTag(rawName), b = normTag(teamName);
+  if (!a || !b) return false;
+  return a === b || a.includes(b) || b.includes(a);
+}
+
 // Demandé par l'utilisateur : lire aussi les fichiers ".SCTimeline" (autre logiciel de tagging).
 // C'est un fichier JSON : deux lignes (Offense / Defense) contenant chacune des "instances"
 // (une action = un début, une fin, et des labels { group, name }). On le traduit EXACTEMENT dans
@@ -1331,7 +1344,7 @@ function parseSCTimelineCodingFile(parsedJson, cats, unknownColumnDefault = "pla
       // si l'info n'est pas disponible (ancien format, nom d'équipe inconnu ici), on retombe
       // sur le nom de la ligne comme avant, sans rien changer pour les fichiers .dnk/Fougères.
       const offLabel = (inst.labels || []).find(l => String(l.group || "").trim() === "Offensive Team");
-      const side = (teamName && offLabel) ? (normTag(offLabel.name) === normTag(teamName) ? "Offense" : "Defense") : null;
+      const side = (teamName && offLabel) ? (teamNameLooselyMatches(offLabel.name, teamName) ? "Offense" : "Defense") : null;
       entries.push({ button: side || row.name || "", inst });
     }
   }
@@ -17618,7 +17631,7 @@ function ObservationTeamPanel({ teamName, team, isCoach, onChangeTeam }) {
     setReplaceErr(""); setReplaceSuccessCount(null); setReplaceBusy(true);
     try {
       const buf = await file.arrayBuffer();
-      const parsed = await parseCodingFile(buf, currentObservationTagCategories(), "tag");
+      const parsed = await parseCodingFile(buf, currentObservationTagCategories(), "tag", teamName);
       if (!parsed.plays.length) throw new Error("No action attributed to a player was found.");
       const taggedPlays = parsed.plays.map(p => ({ ...p, importId }));
       await onChangeTeam({
@@ -18089,7 +18102,7 @@ function ObservationTab({ isCoach }) {
     setFileErr(""); setPreview(null);
     try {
       const buf = await file.arrayBuffer();
-      const parsed = await parseCodingFile(buf, currentObservationTagCategories(), "tag");
+      const parsed = await parseCodingFile(buf, currentObservationTagCategories(), "tag", teamName);
       if (!parsed.plays.length) throw new Error("No action attributed to a player was found.");
       setPreview({ ...parsed, fileName: file.name });
     } catch (err) { setFileErr(err.message || "Error reading the file."); }
