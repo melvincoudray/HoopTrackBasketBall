@@ -4277,7 +4277,12 @@ function shootingSelection(plays, cats) {
   // joueur) : le total de référence = la somme des actions taguées avec un playtype — pas
   // seulement celles qui ont un tag de résultat de tir explicite. C'est le même total qui
   // sert de base au "Ouvert" par playtype.
-  const relevant = plays.filter(p => PLAYTYPES_LIST(cats).some(label => tagIsSet(p.tags, label)));
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "Shooting Selection" restait gonflé après la
+  // correction générale de dédoublonnage, contrairement à Plays/Screen defense/Spacing) : cette
+  // fonction ne passait jamais par dedupeWholePossessionPlays, donc un même tir avec plusieurs
+  // joueurs flaggés par SportsCode continuait à compter plusieurs fois ici. Dédoublonné par
+  // __shotId comme partout ailleurs.
+  const relevant = dedupeWholePossessionPlays(plays.filter(p => PLAYTYPES_LIST(cats).some(label => tagIsSet(p.tags, label))));
   const open = relevant.filter(p => tagIsSet(p.tags, "Open") || tagIsSet(p.tags, "Ouvert")).length;
   const other = relevant.length - open;
   return [
@@ -18675,10 +18680,19 @@ function ObservationTeamPanel({ teamName, team, isCoach, onChangeTeam }) {
   const imports = team.imports || [];
   // Un fichier décoché est simplement ignoré (ses actions restent stockées, rien n'est supprimé) ;
   // le choix est enregistré avec l'import, donc conservé d'une visite à l'autre.
-  const includedPlays = observationIncludedPlays(team);
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : l'onglet Observation ramait énormément en
+  // tapant dans un champ ou en import ant un fichier) : includedPlays/off/def étaient recalculés
+  // (nouvelles références de tableau) à CHAQUE rendu de ce composant, y compris ceux déclenchés
+  // par un champ texte totalement sans rapport (ex. le nom d'équipe tapé dans ObservationTab,
+  // parent de ce composant). Comme tous les useMemo de OffenseDefenseBreakdown dépendent de ces
+  // tableaux "off"/"def" par référence, une nouvelle référence à chaque frappe invalidait TOUT
+  // leur cache et relançait tous les calculs de répartition (Plays, Playtypes, Screen defense,
+  // Spacing…) sur l'ensemble des actions importées à chaque caractère tapé. Désormais calculés
+  // une seule fois par "team" réellement modifiée (import, suppression, coche/décoche).
+  const includedPlays = useMemo(() => observationIncludedPlays(team), [team]);
   const includedImportCount = imports.filter(imp => !imp.excluded).length;
-  const off = includedPlays.filter(isOffense);
-  const def = includedPlays.filter(isDefense);
+  const off = useMemo(() => includedPlays.filter(isOffense), [includedPlays]);
+  const def = useMemo(() => includedPlays.filter(isDefense), [includedPlays]);
   const categories = currentObservationTagCategories();
   // Les actions observées n'ont pas de matchId/date/adversaire (une équipe peut combiner
   // plusieurs fichiers sans qu'on connaisse la date de chacun) — le regroupement pour l'export
