@@ -4306,10 +4306,19 @@ function tagIsSet(tags, canonicalLabel) {
 // découpe UNE possession SportsCode en plusieurs "tirs", qui pointent tous vers le MÊME clip
 // (même timestamp). Le tag "Plays"/"PnR Organisation"/"PnR Defense" décrit toute la possession
 // (posé une seule fois dans SportsCode, voir wpTags dans splitSCInstanceByShooter) : si CE tag
-// précis est présent sur plusieurs de ces lignes pour le même joueur et le même clip, elles ne
-// comptent/s'affichent qu'UNE fois. Les autres tags (zone, résultat du tir…) de ces mêmes lignes
-// restent comptés séparément ailleurs — rien n'est fusionné, on filtre juste les doublons pour
-// CE tag précis.
+// précis est présent sur plusieurs de ces lignes pour le MÊME clip, elles ne comptent/s'affichent
+// qu'UNE fois. Les autres tags (zone, résultat du tir…) de ces mêmes lignes restent comptés
+// séparément ailleurs — rien n'est fusionné, on filtre juste les doublons pour CE tag précis.
+//
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "certains clips apparaissent plusieurs fois alors
+// qu'il n'y a qu'un seul tir") : un SEUL tir peut avoir plusieurs joueurs flaggés par SportsCode
+// sur la même ligne (le Shooter + un autre nom reconnu comme joueur connu, ex. un passeur taggé
+// via le fallback "nom déjà dans l'effectif") — ce qui générait une ligne "play" PAR joueur, donc
+// plusieurs fois le même clip pour un tag d'équipe comme "Plays". La clé de dédoublonnage ne doit
+// PAS inclure le joueur : "Plays"/PnR décrivent l'action de TOUTE l'équipe, pas celle d'un joueur
+// en particulier — un même clip ne doit compter qu'une fois pour ce tag, quel que soit le nombre
+// de joueurs flaggés dessus. (Sans risque pour les stats par joueur : elles filtrent déjà sur UN
+// seul joueur avant d'appeler cette fonction, donc ce dédoublonnage n'y retire jamais rien.)
 function dedupeWholePossessionPlays(matching, label) {
   const seen = new Set();
   const out = [];
@@ -4318,7 +4327,7 @@ function dedupeWholePossessionPlays(matching, label) {
     // couvre aussi, sans planter, une donnée déjà en mémoire dans l'ancien format (Set).
     const wp = p.__wpTags;
     const isWP = Array.isArray(wp) ? wp.includes(label) : !!(wp && typeof wp.has === "function" && wp.has(label));
-    const key = isWP ? `${p.timestampStart}|${p.timestampEnd}|${p.player || ""}` : null;
+    const key = isWP ? `${p.timestampStart}|${p.timestampEnd}` : null;
     if (key) { if (seen.has(key)) continue; seen.add(key); }
     out.push(p);
   }
