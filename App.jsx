@@ -1296,7 +1296,9 @@ function splitSCInstanceByShooter(labels, knownPlayers, knownTags, unconfirmedTa
     const r = extractSCLabelTags(labels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
     // wpTags : noms de tags posés par un groupe "toute la possession" (voir plus bas) — ici une
     // seule ligne de toute façon, donc sans effet, gardé pour que la forme soit la même partout.
-    const wpTags = new Set(labels.filter(isWholePossession).map(l => String(l.name ?? "").trim()).filter(Boolean));
+    // Tableau (pas un Set) : ces plays sont ensuite enregistrés en JSON (storeSet), qui ne sait
+    // pas sérialiser un Set (il redeviendrait un objet vide sans .has au rechargement).
+    const wpTags = labels.filter(isWholePossession).map(l => String(l.name ?? "").trim()).filter(Boolean);
     return [{ ...r, wpTags }];
   }
 
@@ -1308,8 +1310,9 @@ function splitSCInstanceByShooter(labels, knownPlayers, knownTags, unconfirmedTa
   // rebond-putback génère ici PLUSIEURS tirs (lignes "play") à partir de CETTE MÊME possession,
   // qui pointent toutes vers le MÊME clip. metaWpTags identifie ces noms de tags pour que le
   // comptage (groupBreakdown, rankStat…) et le picker de clips ne comptent/affichent l'action
-  // qu'UNE fois pour ce tag précis, même si plusieurs lignes la portent (1er tir).
-  const metaWpTags = new Set(Object.keys(metaTags));
+  // qu'UNE fois pour ce tag précis, même si plusieurs lignes la portent (1er tir). Tableau (pas
+  // un Set) pour rester sérialisable en JSON par storeSet — voir commentaire ci-dessus.
+  const metaWpTags = Object.keys(metaTags);
 
   // BUG RÉEL CORRIGÉ (mis au jour en ajoutant la reconnaissance des groupes "*Defender") : sur
   // une séquence à plusieurs tirs dans la même possession (rebond offensif + putback, kick-out…),
@@ -1329,7 +1332,7 @@ function splitSCInstanceByShooter(labels, knownPlayers, knownTags, unconfirmedTa
     const tags = { ...blockTags, ...(k === 0 ? metaTags : {}) };
     const roles = mergeSCRoles(blockRoles, k === 0 ? metaRoles : {});
     const players = [shooterName, ...blockFlagged, ...(k === 0 ? metaFlagged : [])].filter((p, i, arr) => arr.indexOf(p) === i);
-    return { tags, flaggedPlayers: players, ftPoints: blockFtPoints, roles, wpTags: k === 0 ? metaWpTags : new Set() };
+    return { tags, flaggedPlayers: players, ftPoints: blockFtPoints, roles, wpTags: k === 0 ? metaWpTags : [] };
   });
 }
 
@@ -4311,7 +4314,10 @@ function dedupeWholePossessionPlays(matching, label) {
   const seen = new Set();
   const out = [];
   for (const p of matching) {
-    const isWP = p.__wpTags && p.__wpTags.has(label);
+    // __wpTags est un tableau simple (JSON-safe, voir splitSCInstanceByShooter) — Array.isArray
+    // couvre aussi, sans planter, une donnée déjà en mémoire dans l'ancien format (Set).
+    const wp = p.__wpTags;
+    const isWP = Array.isArray(wp) ? wp.includes(label) : !!(wp && typeof wp.has === "function" && wp.has(label));
     const key = isWP ? `${p.timestampStart}|${p.timestampEnd}|${p.player || ""}` : null;
     if (key) { if (seen.has(key)) continue; seen.add(key); }
     out.push(p);
