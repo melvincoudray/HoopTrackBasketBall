@@ -1248,7 +1248,16 @@ function extractSCLabelTags(labels, knownPlayers, knownTags, unconfirmedTagsSet,
     const rawName = String(label.name ?? "").trim();
     if (!rawName) continue;
     const group = String(label.group || "").trim();
-    const isPlayerGroup = /^players?$/i.test(group) || group === "Shooter";
+    // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : aucune action en défense sur les fiches
+    // joueurs Scouting, alors que les défenseurs SONT bien tagués dans les fichiers) : les
+    // groupes SportsCode qui identifient QUI défend ("Receiver Defender", "Handler Defender",
+    // "Cutter Defender", "Screener Defender", "Screen User Defender", "Handoff Defender"…)
+    // n'étaient jamais reconnus comme un joueur — seuls "Player(s)" et "Shooter" l'étaient.
+    // Résultat : un défenseur n'était jamais ajouté à flaggedPlayers, donc aucune action
+    // défensive ne lui était jamais attribuée (0 partout dans "Defense — what we defend
+    // against"), même une fois son tag confirmé dans Review. Tout groupe se terminant par
+    // "Defender" est maintenant traité comme les autres groupes-joueur.
+    const isPlayerGroup = /^players?$/i.test(group) || group === "Shooter" || /defender$/i.test(group);
     if (SC_ROLE_GROUPS.has(group)) {
       const roleName = stripJerseyPrefix(rawName);
       if (roleName) (roles[group] || (roles[group] = [])).push(roleName);
@@ -1287,19 +1296,27 @@ function splitSCInstanceByShooter(labels, knownPlayers, knownTags, unconfirmedTa
   }
 
   const isWholePossession = (l) => SC_WHOLE_POSSESSION_GROUPS.has(String(l.group || "").trim());
-  const sharedLabels = labels.slice(0, shooterIdx[0]).filter(l => !isWholePossession(l));
   const metaLabels = labels.filter(isWholePossession);
-  const { tags: sharedTags, flaggedPlayers: sharedFlagged, roles: sharedRoles } = extractSCLabelTags(sharedLabels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
   const { tags: metaTags, flaggedPlayers: metaFlagged, roles: metaRoles } = extractSCLabelTags(metaLabels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
 
-  return shooterIdx.map((start, k) => {
+  // BUG RÉEL CORRIGÉ (mis au jour en ajoutant la reconnaissance des groupes "*Defender") : sur
+  // une séquence à plusieurs tirs dans la même possession (rebond offensif + putback, kick-out…),
+  // les labels qui PRÉPARENT un tir (qui défend au moment de la réception/du dribble, qui a la
+  // balle…) sont codés par SportsCode juste AVANT le label "Shooter" de CE tir — avec l'ancien
+  // découpage par position (bloc = tout ce qui suit le Shooter courant), ils tombaient dans le
+  // bloc du tir PRÉCÉDENT au lieu du bon, et tout ce qui précédait le tout premier Shooter était
+  // en plus dupliqué sur TOUS les tirs de la séquence (un même "joueur partagé" comptait 2 ou 3
+  // fois). Un bloc va maintenant de la fin du tir précédent (exclu) jusqu'au tir courant inclus :
+  // chaque tir récupère sa propre préparation — donc son propre défenseur — une seule fois.
+  return shooterIdx.map((shooterPos, k) => {
+    const start = k === 0 ? 0 : shooterIdx[k - 1] + 1;
     const end = k + 1 < shooterIdx.length ? shooterIdx[k + 1] : labels.length;
-    const blockLabels = labels.slice(start + 1, end).filter(l => !isWholePossession(l));
-    const shooterName = stripJerseyPrefix(labels[start].name);
+    const blockLabels = labels.slice(start, end).filter(l => !isWholePossession(l));
+    const shooterName = stripJerseyPrefix(labels[shooterPos].name);
     const { tags: blockTags, flaggedPlayers: blockFlagged, ftPoints: blockFtPoints, roles: blockRoles } = extractSCLabelTags(blockLabels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
-    const tags = { ...sharedTags, ...blockTags, ...(k === 0 ? metaTags : {}) };
-    const roles = mergeSCRoles(sharedRoles, blockRoles, k === 0 ? metaRoles : {});
-    const players = [shooterName, ...sharedFlagged, ...blockFlagged, ...(k === 0 ? metaFlagged : [])].filter((p, i, arr) => arr.indexOf(p) === i);
+    const tags = { ...blockTags, ...(k === 0 ? metaTags : {}) };
+    const roles = mergeSCRoles(blockRoles, k === 0 ? metaRoles : {});
+    const players = [shooterName, ...blockFlagged, ...(k === 0 ? metaFlagged : [])].filter((p, i, arr) => arr.indexOf(p) === i);
     return { tags, flaggedPlayers: players, ftPoints: blockFtPoints, roles };
   });
 }
@@ -7081,6 +7098,9 @@ export default function App() {
             <div style={{ height: 26 }} />
             <ShotChartThresholdsSettings />
             <div style={{ height: 26 }} />
+            <ShotZoneSettings context="my_team" title="Shot chart zones — My Team" defaultZones={DEFAULT_MY_TEAM_ZONES} />
+            <ShotZoneSettings context="scouting" title="Shot chart zones — Scouting Observation" defaultZones={DEFAULT_SCOUTING_ZONES} />
+            <div style={{ height: 26 }} />
             <TrainingThemeColorsSettings />
             <div style={{ height: 26 }} />
             <ReboundContestSettings />
@@ -10144,7 +10164,7 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
       {off.length > 0 && (
         <>
           <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Shot chart</h2>
-          <HalfCourtShotChart zoneStats={computeShotZoneStats(off, currentTagCategories())} size={380} />
+          <MyTeamShotChart zoneStats={computeShotZoneStats(off, currentTagCategories())} size={380} />
         </>
       )}
 
@@ -10414,7 +10434,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
             {plays.length > 0 && (
               <div style={{ marginTop: 16, marginBottom: 16 }}>
                 <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 10 }}>Shot chart</div>
-                <HalfCourtShotChart zoneStats={computeShotZoneStats(off, currentTagCategories())} thresholds={shotChartThresholds} />
+                <MyTeamShotChart zoneStats={computeShotZoneStats(off, currentTagCategories())} thresholds={shotChartThresholds} />
               </div>
             )}
 
@@ -12812,6 +12832,844 @@ function HalfCourtShotChart({ zoneStats, size = 400, thresholds = DEFAULT_SHOT_C
         <text x={rimX + ox} y={700 + oy} fontSize={26} fontWeight={700} fill={textColor}>Front 3</text>
       </g>
     </svg>
+  );
+}
+
+
+// ============================================================================
+// Zones de tir personnalisables (My Team + Scouting Observation) — chaque zone
+// est une forme (rectangle, cercle, demi-cercle ou forme libre à bords courbés)
+// placée sur le MÊME repère 500x470 que l'onglet Draw (même lignes de terrain,
+// dessinées avec drawCourtSvg), modifiable depuis Settings via l'éditeur intégré
+// ci-dessous. Un jeu de zones par contexte, stocké séparément :
+//   - "my_team"  : si rien n'est enregistré, le graphique EXISTANT (HalfCourtShotChart,
+//                  inchangé) continue de s'afficher tel quel — ce jeu ne sert que si le
+//                  coach ouvre l'éditeur et enregistre un découpage personnalisé.
+//   - "scouting" : remplace le graphique 4 zones (qui ne savait pas lire les 14 valeurs
+//                  réelles de "Shot zone" en Scouting Observation) par le découpage que
+//                  le coach a dessiné dans l'outil.
+function szEdgeGeom(points, i) {
+  const n = points.length, p0 = points[i], p1 = points[(i + 1) % n];
+  const mx = (p0.x + p1.x) / 2, my = (p0.y + p1.y) / 2;
+  const dx = p1.x - p0.x, dy = p1.y - p0.y, len = Math.hypot(dx, dy) || 1;
+  return { p0, p1, mx, my, nx: -dy / len, ny: dx / len };
+}
+function szPolyPath(s) {
+  const pts = s.points, bends = s.bends || [], n = pts.length;
+  let d = `M ${pts[0].x} ${pts[0].y} `;
+  for (let i = 0; i < n; i++) {
+    const p1 = pts[(i + 1) % n], bend = bends[i] || 0;
+    if (!bend) { d += `L ${p1.x} ${p1.y} `; }
+    else { const g = szEdgeGeom(pts, i); d += `Q ${g.mx + g.nx * bend} ${g.my + g.ny * bend} ${p1.x} ${p1.y} `; }
+  }
+  return d + "Z";
+}
+function szSemicirclePath(s) {
+  const { cx, cy, r } = s, dir = s.dir || "up";
+  if (dir === "down") return `M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy} Z`;
+  if (dir === "left") return `M ${cx} ${cy - r} A ${r} ${r} 0 0 0 ${cx} ${cy + r} Z`;
+  if (dir === "right") return `M ${cx} ${cy - r} A ${r} ${r} 0 0 1 ${cx} ${cy + r} Z`;
+  return `M ${cx - r} ${cy} A ${r} ${r} 0 0 0 ${cx + r} ${cy} Z`;
+}
+function szCenterBox(s) {
+  if (s.type === "rect") return { cx: s.x + s.w / 2, cy: s.y + s.h / 2, w: s.w, h: s.h };
+  if (s.type === "poly") {
+    const xs = s.points.map(p => p.x), ys = s.points.map(p => p.y);
+    return { cx: xs.reduce((a, b) => a + b, 0) / xs.length, cy: ys.reduce((a, b) => a + b, 0) / ys.length, w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+  }
+  if (s.type === "semicircle") {
+    const bias = { up: [0, -0.35], down: [0, 0.35], left: [-0.35, 0], right: [0.35, 0] }[s.dir || "up"];
+    return { cx: s.cx + bias[0] * s.r, cy: s.cy + bias[1] * s.r, w: s.r * 2, h: s.r * 2 };
+  }
+  return { cx: s.cx, cy: s.cy, w: s.r * 2, h: s.r * 2 };
+}
+// Jeu par défaut pour "My Team" — reprend approximativement les 4 zones du graphique actuel
+// (Paint / Corner 3 / Midrange / Front 3), repositionnées sur le repère 500x470 du Draw tab ;
+// ne sert que de point de départ si le coach ouvre l'éditeur (le graphique actuel, lui, ne
+// change pas tant qu'aucun jeu n'est enregistré).
+const DEFAULT_MY_TEAM_ZONES = [
+  { id: "mt1", type: "rect", zone: "Paint", x: 168, y: 1, w: 164, h: 192 },
+  { id: "mt2", type: "rect", zone: "Corner 3", x: 0, y: 1, w: 30, h: 51 },
+  { id: "mt3", type: "rect", zone: "Corner 3", x: 470, y: 1, w: 30, h: 51 },
+  { id: "mt4", type: "rect", zone: "Midrange", x: 30, y: 52, w: 138, h: 141 },
+  { id: "mt5", type: "rect", zone: "Midrange", x: 332, y: 52, w: 138, h: 141 },
+  { id: "mt6", type: "rect", zone: "Midrange", x: 168, y: 193, w: 164, h: 60 },
+  { id: "mt7", type: "rect", zone: "Front 3", x: 0, y: 272, w: 500, h: 198 },
+];
+// Jeu par défaut pour "Scouting Observation" — exactement le découpage construit par le coach
+// dans l'outil de dessin (14 zones de "Shot zone").
+const DEFAULT_SCOUTING_ZONES = [
+  { id: "sc1", type: "semicircle", zone: "At Basket", cx: 250, cy: 52, r: 42, dir: "up" },
+  { id: "sc2", type: "rect", zone: "Paint Center", x: 168, y: 52, w: 164, h: 141 },
+  { id: "sc3", type: "rect", zone: "Block Left", x: 90, y: 1, w: 78, h: 69 },
+  { id: "sc4", type: "rect", zone: "Block Right", x: 332, y: 1, w: 78, h: 69 },
+  { id: "sc5", type: "rect", zone: "Baseline Midrange Left", x: 30, y: 1, w: 60, h: 69 },
+  { id: "sc6", type: "rect", zone: "Baseline Midrange Right", x: 410, y: 1, w: 60, h: 69 },
+  { id: "sc7", type: "rect", zone: "Baseline Three Left", x: 0, y: 1, w: 30, h: 51 },
+  { id: "sc8", type: "rect", zone: "Baseline Three Right", x: 470, y: 1, w: 30, h: 51 },
+  { id: "sc9", type: "rect", zone: "Midrange Left", x: 30, y: 70, w: 138, h: 123 },
+  { id: "sc10", type: "rect", zone: "Midrange Right", x: 332, y: 70, w: 138, h: 123 },
+  { id: "sc11", type: "rect", zone: "Midrange Center", x: 168, y: 193, w: 164, h: 60 },
+  { id: "sc12", type: "rect", zone: "Three Left", x: 0, y: 52, w: 30, h: 141 },
+  { id: "sc13", type: "rect", zone: "Three Left", x: 0, y: 193, w: 168, h: 277 },
+  { id: "sc14", type: "rect", zone: "Three Right", x: 470, y: 52, w: 30, h: 141 },
+  { id: "sc15", type: "rect", zone: "Three Right", x: 332, y: 193, w: 168, h: 277 },
+  { id: "sc16", type: "rect", zone: "Three Center", x: 168, y: 253, w: 164, h: 217 },
+];
+function useZoneShapes(context) {
+  const [shapes, setShapes] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    storeGet("shot_zone_shapes:" + context).then(v => { if (alive) setShapes(Array.isArray(v) && v.length ? v : null); });
+    return () => { alive = false; };
+  }, [context]);
+  return [shapes, setShapes];
+}
+// Graphique générique : dessine le terrain de l'onglet Draw puis colore/chiffre chaque forme
+// de `shapes` selon les stats de sa zone (zoneStats[s.zone]) — remplace le rendu 4-zones figé
+// de HalfCourtShotChart pour tout contexte dont les zones ont été personnalisées.
+function ShapesShotChart({ zoneStats, shapes, thresholds = DEFAULT_SHOT_CHART_THRESHOLDS, size = 380 }) {
+  const textColor = "#F3F1EA";
+  const threePtTh = thresholds.threePt, paintTh = thresholds.paint;
+  function zoneFill(pct, th, opacity) {
+    if (pct === null || pct === undefined) return `rgba(139,147,161,${opacity})`;
+    if (pct >= th.green) return `rgba(61,220,111,${opacity})`;
+    if (pct >= th.orange) return `rgba(242,169,59,${opacity})`;
+    return `rgba(225,90,78,${opacity})`;
+  }
+  const thFor = name => /three|corner/i.test(name || "") ? threePtTh : paintTh;
+  const fmtPct = v => v === null || v === undefined ? "–" : `${Math.round(v)}%`;
+  const courtMarkup = drawCourtSvg({ line: "#D8DCE2", court: "#161B22" }, false, false);
+  return (
+    <svg viewBox="0 0 500 470" preserveAspectRatio="xMidYMid meet" style={{ background: "#161B22", borderRadius: 12, width: "100%", maxWidth: size, height: "auto", display: "block" }}>
+      <g>
+        {shapes.map(s => {
+          const st = zoneStats?.[s.zone];
+          const fill = zoneFill(st?.pct, thFor(s.zone), 0.55);
+          if (s.type === "rect") return <rect key={s.id} x={s.x} y={s.y} width={s.w} height={s.h} fill={fill} stroke="none" />;
+          if (s.type === "circle") return <circle key={s.id} cx={s.cx} cy={s.cy} r={s.r} fill={fill} stroke="none" />;
+          return <path key={s.id} d={s.type === "poly" ? szPolyPath(s) : szSemicirclePath(s)} fill={fill} stroke="none" />;
+        })}
+      </g>
+      <g dangerouslySetInnerHTML={{ __html: courtMarkup }} />
+      <g fontFamily="Inter, sans-serif" textAnchor="middle">
+        {shapes.map(s => {
+          const st = zoneStats?.[s.zone];
+          const { cx, cy, w, h } = szCenterBox(s);
+          const fs = Math.max(9, Math.min(22, Math.min(w, h) / 4));
+          return (
+            <g key={s.id}>
+              <text x={cx} y={cy - fs * 0.35} fontSize={fs * 1.3} fontWeight={800} fill={textColor}>{fmtPct(st?.pct)}</text>
+              <text x={cx} y={cy + fs * 0.75} fontSize={fs * 0.55} fontWeight={600} fill={textColor} opacity={0.85}>{st && st.attempted > 0 ? `${st.made}/${st.attempted}` : "no data"}</text>
+            </g>
+          );
+        })}
+      </g>
+    </svg>
+  );
+}
+// "My Team" : tant que le coach n'a rien enregistré dans l'éditeur, on garde EXACTEMENT le
+// graphique existant (HalfCourtShotChart, non modifié) — zéro changement visuel par défaut.
+function MyTeamShotChart(props) {
+  const [shapes] = useZoneShapes("my_team");
+  if (!shapes) return <HalfCourtShotChart {...props} />;
+  return <ShapesShotChart zoneStats={props.zoneStats} shapes={shapes} thresholds={props.thresholds} size={props.size} />;
+}
+// "Scouting Observation" : remplace tout de suite le graphique 4-zones par le découpage à 14
+// zones (par défaut celui construit dans l'éditeur, ou la version personnalisée enregistrée).
+function ScoutingShotChart(props) {
+  const [shapes] = useZoneShapes("scouting");
+  return <ShapesShotChart zoneStats={props.zoneStats} shapes={shapes || DEFAULT_SCOUTING_ZONES} thresholds={props.thresholds} size={props.size} />;
+}
+
+// HTML complet de l'outil de dessin de zones (le même que l'artifact fourni au coach),
+// embarqué ici tel quel et rejoué dans un iframe isolé (srcDoc) depuis Settings — window.__HOOPTRACK_CONTEXT__
+// et window.__HOOPTRACK_INITIAL_SHAPES__ sont injectés avant de l'écrire dans l'iframe.
+const SHOT_ZONE_EDITOR_HTML = `<!doctype html>
+<title>Shot Zone Editor</title>
+<style>
+  :root {
+    --bg: #F4F5F7; --panel: #FFFFFF; --panel-2: #EEF0F3; --line: #D7DBE1;
+    --ink: #161B22; --ink-dim: #5C6470; --accent: #E15A4E; --accent-ink: #FFFFFF;
+    --court: #1B2028; --court-line: #D8DCE2;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0D1117; --panel: #161B22; --panel-2: #1E2430; --line: #2A3140;
+      --ink: #F3F1EA; --ink-dim: #8B93A1; --accent: #E97B6E; --accent-ink: #161B22;
+      --court: #11151C; --court-line: #D8DCE2;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0D1117; --panel: #161B22; --panel-2: #1E2430; --line: #2A3140;
+    --ink: #F3F1EA; --ink-dim: #8B93A1; --accent: #E97B6E; --accent-ink: #161B22;
+    --court: #11151C; --court-line: #D8DCE2;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 14px/1.4 "Inter", -apple-system, system-ui, sans-serif;
+    padding-left: max(16px, env(safe-area-inset-left, 0px));
+    padding-right: max(16px, env(safe-area-inset-right, 0px));
+    padding-block: 20px;
+  }
+  h1 { font-size: 17px; margin: 0 0 2px; }
+  p.sub { color: var(--ink-dim); font-size: 12.5px; margin: 0 0 16px; max-width: 65ch; }
+  .wrap { max-width: 1120px; margin: 0 auto; }
+  .layout { display: flex; gap: 18px; align-items: flex-start; flex-wrap: wrap; }
+  .court-col { flex: 1 1 460px; min-width: 0; }
+  .side-col { flex: 0 0 320px; min-width: 280px; display: flex; flex-direction: column; gap: 14px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 14px; min-width: 0; }
+  .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+  button.tool {
+    background: var(--panel-2); border: 1px solid var(--line); color: var(--ink);
+    border-radius: 8px; padding: 8px 12px; font: inherit; font-weight: 600; font-size: 12.5px;
+    cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
+  }
+  button.tool:hover { border-color: var(--accent); }
+  button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+  button.ghost { background: none; border: 1px solid var(--line); color: var(--ink-dim); }
+  button.ghost:hover { color: var(--ink); }
+  button.small { padding: 6px 9px; font-size: 11.5px; }
+  svg#court { width: 100%; height: auto; display: block; background: var(--court); border-radius: 12px; touch-action: none; }
+  .zone-shape { cursor: move; }
+  .handle { cursor: grab; }
+  label.field { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-dim); margin: 10px 0 4px; }
+  label.field:first-child { margin-top: 0; }
+  select, input[type=number], input[type=text] {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--line); color: var(--ink);
+    border-radius: 7px; padding: 7px 9px; font: inherit; font-size: 13px;
+  }
+  .row2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .row4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 6px; }
+  .shape-list { display: flex; flex-direction: column; gap: 4px; max-height: 260px; overflow-y: auto; }
+  .shape-row {
+    display: flex; align-items: center; gap: 8px; padding: 7px 8px; border-radius: 7px;
+    border: 1px solid transparent; cursor: pointer; font-size: 12.5px;
+  }
+  .shape-row:hover { background: var(--panel-2); }
+  .shape-row.active { border-color: var(--accent); background: var(--panel-2); }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+  .shape-row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .shape-row .del { background: none; border: none; color: var(--ink-dim); cursor: pointer; padding: 2px; }
+  .shape-row .del:hover { color: var(--accent); }
+  .empty-sel { color: var(--ink-dim); font-size: 12.5px; }
+  textarea#exportBox {
+    width: 100%; height: 140px; background: var(--panel-2); border: 1px solid var(--line); color: var(--ink);
+    border-radius: 7px; padding: 8px; font: 11px/1.4 ui-monospace, monospace; resize: vertical;
+  }
+  .footer-row { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
+  .hint { font-size: 11.5px; color: var(--ink-dim); margin-top: 8px; }
+  .section-title { font-size: 13px; font-weight: 700; margin-bottom: 10px; }
+  .divider { border-top: 1px solid var(--line); margin: 12px 0; }
+</style>
+
+<div class="wrap">
+  <h1>Shot Zone Editor</h1>
+  <p class="sub">Même demi-terrain que l'onglet Draw de HoopTrack. Place des formes, puis transforme-les en forme libre pour épouser une courbe (ex. la ligne à 3PTS), et assigne chacune à une des 14 zones de "Shot zone".</p>
+
+  <div class="layout">
+    <div class="court-col">
+      <div class="panel">
+        <div class="toolbar">
+          <button class="tool primary" id="addRect">▭ Rectangle</button>
+          <button class="tool primary" id="addSquare">◻ Carré</button>
+          <button class="tool primary" id="addCircle">○ Cercle</button>
+          <button class="tool primary" id="addSemi">◗ Demi-cercle</button>
+          <button class="tool primary" id="addPoly">◈ Forme libre</button>
+          <button class="tool ghost" id="resetBtn" style="margin-left:auto">↺ Réinitialiser</button>
+        </div>
+        <svg id="court" viewBox="0 0 500 470" preserveAspectRatio="xMidYMid meet"></svg>
+        <p class="hint">Glisse une forme pour la déplacer, tire les poignées (carrés) pour la redimensionner. Pour une <b>forme libre</b> : tire un sommet (carré) pour le déplacer, tire la poignée ronde au milieu d'un bord pour le courber (ex. le long de la ligne à 3PTS), clique le "+" pour ajouter un point sur un bord.</p>
+      </div>
+    </div>
+
+    <div class="side-col">
+      <div class="panel" id="propsPanel">
+        <div class="section-title">Forme sélectionnée</div>
+        <div id="propsEmpty" class="empty-sel">Aucune forme sélectionnée.</div>
+        <div id="propsBody" hidden>
+          <label class="field">Zone</label>
+          <select id="zoneSelect"></select>
+
+          <div id="rectFields" hidden>
+            <label class="field">Position / taille</label>
+            <div class="row4">
+              <input type="number" id="f_x" placeholder="x">
+              <input type="number" id="f_y" placeholder="y">
+              <input type="number" id="f_w" placeholder="largeur">
+              <input type="number" id="f_h" placeholder="hauteur">
+            </div>
+          </div>
+
+          <div id="circleFields" hidden>
+            <label class="field">Centre / rayon</label>
+            <div class="row4">
+              <input type="number" id="f_cx" placeholder="cx">
+              <input type="number" id="f_cy" placeholder="cy">
+              <input type="number" id="f_r" placeholder="rayon">
+              <div></div>
+            </div>
+          </div>
+
+          <div id="dirField" hidden>
+            <label class="field">Orientation (côté bombé)</label>
+            <select id="dirSelect">
+              <option value="up">Vers la ligne de fond</option>
+              <option value="down">Vers le milieu de terrain</option>
+              <option value="left">Vers la gauche</option>
+              <option value="right">Vers la droite</option>
+            </select>
+          </div>
+
+          <div id="convertField" hidden>
+            <div class="divider"></div>
+            <button class="tool small" id="convertBtn">◈ Convertir en forme libre</button>
+            <p class="hint" style="margin-top:6px">Pour pouvoir courber un bord précis (ex. suivre l'arc à 3PTS) et ajouter des points où tu veux.</p>
+          </div>
+
+          <div id="polyField" hidden>
+            <label class="field">Forme libre</label>
+            <p class="hint" id="polyInfo" style="margin:0 0 8px"></p>
+            <button class="tool small" id="delVertexBtn" hidden>✕ Supprimer le point sélectionné</button>
+          </div>
+
+          <div class="footer-row">
+            <button class="tool" id="dupBtn">⧉ Dupliquer</button>
+            <button class="tool ghost" id="delBtn" style="color:var(--accent)">✕ Supprimer</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="section-title">Toutes les formes</div>
+        <div id="shapeList" class="shape-list"></div>
+      </div>
+
+      <div class="panel">
+        <div class="section-title">Export</div>
+        <textarea id="exportBox" readonly></textarea>
+        <div class="footer-row">
+          <button class="tool primary" id="copyBtn">Copier</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // CONTEXTE : fourni par l'app hôte (HoopTrack) quand cet outil est embarqué dans un iframe —
+  // "my_team" ou "scouting" — sinon vide (utilisation autonome = zones de scouting par défaut).
+  var CONTEXT = (window.__HOOPTRACK_CONTEXT__ || "");
+  var SCOUTING_ZONES = [
+    "At Basket", "Paint Center", "Block Left", "Block Right",
+    "Baseline Midrange Left", "Baseline Midrange Right",
+    "Baseline Three Left", "Baseline Three Right",
+    "Midrange Left", "Midrange Center", "Midrange Right",
+    "Three Left", "Three Center", "Three Right"
+  ];
+  var MY_TEAM_ZONES = ["Paint", "Corner 3", "Midrange", "Front 3"];
+  var ZONES = CONTEXT === "my_team" ? MY_TEAM_ZONES : SCOUTING_ZONES;
+  var ZONE_COLOR = {
+    "At Basket": "#E15A4E", "Paint Center": "#E97B6E",
+    "Block Left": "#5B8DEF", "Block Right": "#5B8DEF",
+    "Baseline Midrange Left": "#F2A93B", "Baseline Midrange Right": "#F2A93B",
+    "Baseline Three Left": "#3DDC6F", "Baseline Three Right": "#3DDC6F",
+    "Midrange Left": "#C2823D", "Midrange Center": "#C2823D", "Midrange Right": "#C2823D",
+    "Three Left": "#9B6BD6", "Three Center": "#6B8FD6", "Three Right": "#9B6BD6",
+    "Paint": "#E97B6E", "Corner 3": "#3DDC6F", "Midrange": "#C2823D", "Front 3": "#9B6BD6"
+  };
+  function colorFor(zone) { return ZONE_COLOR[zone] || "#8B93A1"; }
+  var TYPE_LABEL = { rect: "rectangle", circle: "cercle", semicircle: "demi-cercle", poly: "forme libre" };
+
+  function seedShapes() {
+    var id = 0; function nid() { return "s" + (++id); }
+    return [
+      { id: nid(), type: "semicircle", zone: "At Basket", cx: 250, cy: 52, r: 42, dir: "up" },
+      { id: nid(), type: "rect", zone: "Paint Center", x: 168, y: 52, w: 164, h: 141 },
+      { id: nid(), type: "rect", zone: "Block Left", x: 90, y: 1, w: 78, h: 69 },
+      { id: nid(), type: "rect", zone: "Block Right", x: 332, y: 1, w: 78, h: 69 },
+      { id: nid(), type: "rect", zone: "Baseline Midrange Left", x: 30, y: 1, w: 60, h: 69 },
+      { id: nid(), type: "rect", zone: "Baseline Midrange Right", x: 410, y: 1, w: 60, h: 69 },
+      { id: nid(), type: "rect", zone: "Baseline Three Left", x: 0, y: 1, w: 30, h: 51 },
+      { id: nid(), type: "rect", zone: "Baseline Three Right", x: 470, y: 1, w: 30, h: 51 },
+      { id: nid(), type: "rect", zone: "Midrange Left", x: 30, y: 70, w: 138, h: 123 },
+      { id: nid(), type: "rect", zone: "Midrange Right", x: 332, y: 70, w: 138, h: 123 },
+      { id: nid(), type: "rect", zone: "Midrange Center", x: 168, y: 193, w: 164, h: 60 },
+      { id: nid(), type: "rect", zone: "Three Left", x: 0, y: 52, w: 30, h: 141 },
+      { id: nid(), type: "rect", zone: "Three Left", x: 0, y: 193, w: 168, h: 277 },
+      { id: nid(), type: "rect", zone: "Three Right", x: 470, y: 52, w: 30, h: 141 },
+      { id: nid(), type: "rect", zone: "Three Right", x: 332, y: 193, w: 168, h: 277 },
+      { id: nid(), type: "rect", zone: "Three Center", x: 168, y: 253, w: 164, h: 217 }
+    ];
+  }
+
+  var STORE_KEY = "hooptrack-shot-zone-editor-v2:" + CONTEXT;
+  var state = { shapes: null, selected: null, selectedPart: null };
+
+  // Zones fournies par l'app hôte pour ce contexte (sinon le seed par défaut de l'outil).
+  var DEFAULT_SEED = (window.__HOOPTRACK_INITIAL_SHAPES__ && window.__HOOPTRACK_INITIAL_SHAPES__.length)
+    ? window.__HOOPTRACK_INITIAL_SHAPES__ : seedShapes();
+
+  function load() {
+    try {
+      var raw = localStorage.getItem(STORE_KEY);
+      if (raw) { var parsed = JSON.parse(raw); if (parsed && Array.isArray(parsed.shapes)) return parsed.shapes; }
+    } catch (e) {}
+    return null;
+  }
+  function postToHost() {
+    try { window.parent.postMessage({ source: "hooptrack-shot-zone-editor", context: CONTEXT, shapes: state.shapes }, "*"); } catch (e) {}
+  }
+  function save() {
+    try { localStorage.setItem(STORE_KEY, JSON.stringify({ shapes: state.shapes })); } catch (e) {}
+    postToHost();
+  }
+  state.shapes = load() || JSON.parse(JSON.stringify(DEFAULT_SEED));
+  // Dans l'app, on signale tout de suite l'état de départ au parent (pour qu'il ait quelque
+  // chose à enregistrer même si le coach ne touche à rien) — sans toucher au localStorage.
+  if (CONTEXT) postToHost();
+
+  var svg = document.getElementById("court");
+  var SVGNS = "http://www.w3.org/2000/svg";
+  function el(tag, attrs) {
+    var e = document.createElementNS(SVGNS, tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  // ---- court lines (same geometry as HoopTrack's Draw tab, 500x470 half-court) ----
+  function buildCourtLines() {
+    var g = el("g", { "pointer-events": "none" });
+    var l = "var(--court-line)";
+    g.appendChild(el("rect", { x: 1, y: 1, width: 498, height: 468, fill: "none", stroke: l, "stroke-width": 2 }));
+    g.appendChild(el("rect", { x: 168, y: 1, width: 164, height: 192, fill: "none", stroke: l, "stroke-width": 1.5 }));
+    g.appendChild(el("path", { d: "M190 193 A60 60 0 0 0 310 193", fill: "none", stroke: l, "stroke-width": 1.5 }));
+    g.appendChild(el("path", { d: "M190 193 A60 60 0 0 1 310 193", fill: "none", stroke: l, "stroke-width": 1.2, "stroke-dasharray": "6 5" }));
+    g.appendChild(el("path", { d: "M30 1 V52 A220 220 0 0 0 470 52 V1", fill: "none", stroke: l, "stroke-width": 1.5 }));
+    g.appendChild(el("line", { x1: 220, y1: 40, x2: 280, y2: 40, stroke: l, "stroke-width": 2.4 }));
+    g.appendChild(el("circle", { cx: 250, cy: 52, r: 8, fill: "none", stroke: l, "stroke-width": 1.6 }));
+    return g;
+  }
+
+  // ---- geometry helpers ----
+  function semicirclePath(cx, cy, r, dir) {
+    if (dir === "down") return "M " + (cx - r) + " " + cy + " A " + r + " " + r + " 0 0 1 " + (cx + r) + " " + cy + " Z";
+    if (dir === "left") return "M " + cx + " " + (cy - r) + " A " + r + " " + r + " 0 0 0 " + cx + " " + (cy + r) + " Z";
+    if (dir === "right") return "M " + cx + " " + (cy - r) + " A " + r + " " + r + " 0 0 1 " + cx + " " + (cy + r) + " Z";
+    return "M " + (cx - r) + " " + cy + " A " + r + " " + r + " 0 0 0 " + (cx + r) + " " + cy + " Z"; // up (default)
+  }
+  function semicircleTip(s) {
+    if (s.dir === "down") return { x: s.cx, y: s.cy + s.r };
+    if (s.dir === "left") return { x: s.cx - s.r, y: s.cy };
+    if (s.dir === "right") return { x: s.cx + s.r, y: s.cy };
+    return { x: s.cx, y: s.cy - s.r };
+  }
+  function edgeGeom(points, i) {
+    var n = points.length, p0 = points[i], p1 = points[(i + 1) % n];
+    var mx = (p0.x + p1.x) / 2, my = (p0.y + p1.y) / 2;
+    var dx = p1.x - p0.x, dy = p1.y - p0.y, len = Math.hypot(dx, dy) || 1;
+    var nx = -dy / len, ny = dx / len;
+    return { p0: p0, p1: p1, mx: mx, my: my, nx: nx, ny: ny };
+  }
+  function polyPath(s) {
+    var pts = s.points, bends = s.bends, n = pts.length;
+    var d = "M " + pts[0].x + " " + pts[0].y + " ";
+    for (var i = 0; i < n; i++) {
+      var p1 = pts[(i + 1) % n], bend = bends[i] || 0;
+      if (!bend) { d += "L " + p1.x + " " + p1.y + " "; }
+      else {
+        var g = edgeGeom(pts, i);
+        var cx = g.mx + g.nx * bend, cy = g.my + g.ny * bend;
+        d += "Q " + cx + " " + cy + " " + p1.x + " " + p1.y + " ";
+      }
+    }
+    return d + "Z";
+  }
+  function rectToPolyPoints(s) {
+    return [{ x: s.x, y: s.y }, { x: s.x + s.w, y: s.y }, { x: s.x + s.w, y: s.y + s.h }, { x: s.x, y: s.y + s.h }];
+  }
+  function circleToPolyPoints(s) {
+    var pts = [], n = 12;
+    for (var i = 0; i < n; i++) { var a = (i / n) * Math.PI * 2; pts.push({ x: Math.round(s.cx + s.r * Math.cos(a)), y: Math.round(s.cy + s.r * Math.sin(a)) }); }
+    return pts;
+  }
+  function semicircleToPolyPoints(s) {
+    var n = 8, pts = [], dir = s.dir || "up";
+    for (var i = 0; i <= n; i++) {
+      var t = i / n, deg;
+      if (dir === "up") deg = 180 + t * 180;
+      else if (dir === "down") deg = 180 - t * 180;
+      else if (dir === "left") deg = 270 - t * 180;
+      else deg = 270 + t * 180;
+      var rad = deg * Math.PI / 180;
+      pts.push({ x: Math.round(s.cx + s.r * Math.cos(rad)), y: Math.round(s.cy + s.r * Math.sin(rad)) });
+    }
+    return pts;
+  }
+  function convertToPoly(s) {
+    var pts;
+    if (s.type === "rect") pts = rectToPolyPoints(s);
+    else if (s.type === "circle") pts = circleToPolyPoints(s);
+    else pts = semicircleToPolyPoints(s);
+    s.type = "poly";
+    s.points = pts;
+    s.bends = pts.map(function () { return 0; });
+    delete s.x; delete s.y; delete s.w; delete s.h; delete s.cx; delete s.cy; delete s.r; delete s.dir;
+  }
+  function insertVertex(s, edgeIndex) {
+    var n = s.points.length;
+    var g = edgeGeom(s.points, edgeIndex);
+    var bend = s.bends[edgeIndex] || 0;
+    var cx = g.mx + g.nx * bend, cy = g.my + g.ny * bend;
+    var bx = 0.25 * g.p0.x + 0.5 * cx + 0.25 * g.p1.x;
+    var by = 0.25 * g.p0.y + 0.5 * cy + 0.25 * g.p1.y;
+    s.points.splice(edgeIndex + 1, 0, { x: Math.round(bx), y: Math.round(by) });
+    s.bends.splice(edgeIndex, 1, bend / 2, bend / 2);
+  }
+  function shapeById(id) { for (var i = 0; i < state.shapes.length; i++) if (state.shapes[i].id === id) return state.shapes[i]; return null; }
+
+  var shapesLayer, handlesLayer;
+  function render() {
+    svg.innerHTML = "";
+    svg.appendChild(buildCourtLines());
+    shapesLayer = el("g");
+    svg.appendChild(shapesLayer);
+
+    state.shapes.forEach(function (s) {
+      var color = colorFor(s.zone);
+      var node;
+      if (s.type === "rect") {
+        node = el("rect", { x: s.x, y: s.y, width: s.w, height: s.h, fill: color, "fill-opacity": 0.38, stroke: color, "stroke-width": 1.6 });
+      } else if (s.type === "circle") {
+        node = el("circle", { cx: s.cx, cy: s.cy, r: s.r, fill: color, "fill-opacity": 0.38, stroke: color, "stroke-width": 1.6 });
+      } else if (s.type === "poly") {
+        node = el("path", { d: polyPath(s), fill: color, "fill-opacity": 0.38, stroke: color, "stroke-width": 1.6 });
+      } else {
+        node = el("path", { d: semicirclePath(s.cx, s.cy, s.r, s.dir || "up"), fill: color, "fill-opacity": 0.38, stroke: color, "stroke-width": 1.6 });
+      }
+      node.setAttribute("class", "zone-shape");
+      node.dataset.id = s.id;
+      if (s.id === state.selected) node.setAttribute("stroke-width", 2.6);
+      shapesLayer.appendChild(node);
+      node.addEventListener("pointerdown", function (ev) { startDrag(ev, s.id, "move"); });
+
+      var cx, cy;
+      if (s.type === "rect") { cx = s.x + s.w / 2; cy = s.y + s.h / 2; }
+      else if (s.type === "poly") { cx = s.points.reduce(function (a, p) { return a + p.x; }, 0) / s.points.length; cy = s.points.reduce(function (a, p) { return a + p.y; }, 0) / s.points.length; }
+      else { cx = s.cx; cy = s.cy; }
+      if (s.zone) {
+        var label = el("text", { x: cx, y: cy, "text-anchor": "middle", "font-size": 9.5, "font-weight": 700, fill: "#F3F1EA", "pointer-events": "none", style: "font-family:Inter,sans-serif" });
+        label.textContent = s.zone;
+        shapesLayer.appendChild(label);
+      }
+    });
+
+    handlesLayer = el("g");
+    svg.appendChild(handlesLayer);
+    var sel = shapeById(state.selected);
+    if (sel) buildHandles(sel);
+
+    renderPropsPanel();
+    renderShapeList();
+    renderExport();
+  }
+
+  function dragHandle(x, y, cursor, onDown) {
+    var h = el("circle", { cx: x, cy: y, r: 6, fill: "var(--panel)", stroke: "var(--accent)", "stroke-width": 2, class: "handle" });
+    h.style.cursor = cursor;
+    h.addEventListener("pointerdown", onDown);
+    handlesLayer.appendChild(h);
+    return h;
+  }
+  function vertexHandle(x, y, onDown) {
+    var h = el("rect", { x: x - 5, y: y - 5, width: 10, height: 10, fill: "var(--panel)", stroke: "var(--accent)", "stroke-width": 2, class: "handle" });
+    h.style.cursor = "move";
+    h.addEventListener("pointerdown", onDown);
+    handlesLayer.appendChild(h);
+    return h;
+  }
+  function addPointButton(x, y, onClick) {
+    var g = el("g", { style: "cursor:pointer" });
+    g.appendChild(el("circle", { cx: x, cy: y, r: 7, fill: "var(--accent)", "fill-opacity": 0.85 }));
+    var t = el("text", { x: x, y: y + 3.2, "text-anchor": "middle", "font-size": 10, "font-weight": 700, fill: "var(--accent-ink)", style: "font-family:Inter,sans-serif;pointer-events:none" });
+    t.textContent = "+";
+    g.appendChild(t);
+    g.addEventListener("pointerdown", function (ev) { ev.preventDefault(); ev.stopPropagation(); onClick(); });
+    handlesLayer.appendChild(g);
+  }
+  function buildHandles(s) {
+    if (s.type === "rect") {
+      dragHandle(s.x, s.y, "nwse-resize", function (ev) { startDrag(ev, s.id, "resize-tl"); });
+      dragHandle(s.x + s.w, s.y, "nesw-resize", function (ev) { startDrag(ev, s.id, "resize-tr"); });
+      dragHandle(s.x, s.y + s.h, "nesw-resize", function (ev) { startDrag(ev, s.id, "resize-bl"); });
+      dragHandle(s.x + s.w, s.y + s.h, "nwse-resize", function (ev) { startDrag(ev, s.id, "resize-br"); });
+    } else if (s.type === "circle") {
+      dragHandle(s.cx + s.r, s.cy, "ew-resize", function (ev) { startDrag(ev, s.id, "resize-r"); });
+    } else if (s.type === "semicircle") {
+      var tip = semicircleTip(s);
+      dragHandle(tip.x, tip.y, "move", function (ev) { startDrag(ev, s.id, "resize-r"); });
+    } else if (s.type === "poly") {
+      var n = s.points.length;
+      for (var i = 0; i < n; i++) {
+        var p = s.points[i];
+        (function (idx) { vertexHandle(p.x, p.y, function (ev) { state.selectedPart = { kind: "vertex", index: idx }; startDrag(ev, s.id, "vertex-" + idx); }); })(i);
+      }
+      for (var j = 0; j < n; j++) {
+        (function (idx) {
+          var g = edgeGeom(s.points, idx);
+          var bend = s.bends[idx] || 0;
+          var hx = g.mx + g.nx * bend, hy = g.my + g.ny * bend;
+          dragHandle(hx, hy, "grab", function (ev) { state.selectedPart = { kind: "edge", index: idx }; startDrag(ev, s.id, "edge-" + idx); });
+          addPointButton(g.mx - g.nx * 14, g.my - g.ny * 14, function () { insertVertex(s, idx); save(); render(); });
+        })(j);
+      }
+    }
+  }
+
+  // ---- drag / resize ----
+  var drag = null; // { id, mode, startPt, orig }
+  function svgPoint(ev) {
+    var pt = svg.createSVGPoint();
+    pt.x = ev.clientX; pt.y = ev.clientY;
+    var m = svg.getScreenCTM().inverse();
+    return pt.matrixTransform(m);
+  }
+  function startDrag(ev, id, mode) {
+    ev.preventDefault(); ev.stopPropagation();
+    state.selected = id;
+    var s = shapeById(id);
+    drag = { id: id, mode: mode, start: svgPoint(ev), orig: JSON.parse(JSON.stringify(s)) };
+    render();
+    window.addEventListener("pointermove", onDragMove);
+    window.addEventListener("pointerup", onDragEnd);
+  }
+  function onDragMove(ev) {
+    if (!drag) return;
+    var p = svgPoint(ev), s = shapeById(drag.id); if (!s) return;
+    var dx = p.x - drag.start.x, dy = p.y - drag.start.y, o = drag.orig;
+    if (drag.mode === "move") {
+      if (s.type === "rect") { s.x = Math.round(o.x + dx); s.y = Math.round(o.y + dy); }
+      else if (s.type === "poly") { s.points = o.points.map(function (pt) { return { x: Math.round(pt.x + dx), y: Math.round(pt.y + dy) }; }); }
+      else { s.cx = Math.round(o.cx + dx); s.cy = Math.round(o.cy + dy); }
+    } else if (drag.mode.indexOf("vertex-") === 0) {
+      var vi = parseInt(drag.mode.slice(7), 10);
+      s.points[vi] = { x: Math.round(p.x), y: Math.round(p.y) };
+    } else if (drag.mode.indexOf("edge-") === 0) {
+      var ei = parseInt(drag.mode.slice(5), 10);
+      var g = edgeGeom(s.points, ei);
+      var bend = (p.x - g.mx) * g.nx + (p.y - g.my) * g.ny;
+      s.bends[ei] = Math.round(bend);
+    } else if (s.type === "rect") {
+      var x0 = o.x, y0 = o.y, x1 = o.x + o.w, y1 = o.y + o.h;
+      if (drag.mode === "resize-tl") { x0 = o.x + dx; y0 = o.y + dy; }
+      if (drag.mode === "resize-tr") { x1 = o.x + o.w + dx; y0 = o.y + dy; }
+      if (drag.mode === "resize-bl") { x0 = o.x + dx; y1 = o.y + o.h + dy; }
+      if (drag.mode === "resize-br") { x1 = o.x + o.w + dx; y1 = o.y + o.h + dy; }
+      s.x = Math.round(Math.min(x0, x1)); s.y = Math.round(Math.min(y0, y1));
+      s.w = Math.max(8, Math.round(Math.abs(x1 - x0))); s.h = Math.max(8, Math.round(Math.abs(y1 - y0)));
+    } else if (drag.mode === "resize-r") {
+      var r = Math.round(Math.hypot(p.x - o.cx, p.y - o.cy));
+      s.r = Math.max(6, r);
+    }
+    render();
+  }
+  function onDragEnd() {
+    drag = null; save();
+    window.removeEventListener("pointermove", onDragMove);
+    window.removeEventListener("pointerup", onDragEnd);
+  }
+
+  // ---- toolbar ----
+  function newId() { return "s" + Date.now() + Math.floor(Math.random() * 1000); }
+  function addShape(type) {
+    var id = newId();
+    var s;
+    if (type === "rect") s = { id: id, type: "rect", zone: "", x: 210, y: 210, w: 80, h: 60 };
+    else if (type === "square") s = { id: id, type: "rect", zone: "", x: 215, y: 215, w: 70, h: 70 };
+    else if (type === "circle") s = { id: id, type: "circle", zone: "", cx: 250, cy: 250, r: 40 };
+    else if (type === "semicircle") s = { id: id, type: "semicircle", zone: "", cx: 250, cy: 250, r: 40, dir: "up" };
+    else s = { id: id, type: "poly", zone: "", points: [{ x: 210, y: 210 }, { x: 290, y: 210 }, { x: 290, y: 270 }, { x: 210, y: 270 }], bends: [0, 0, 0, 0] };
+    state.shapes.push(s);
+    state.selected = id; state.selectedPart = null;
+    save(); render();
+  }
+  document.getElementById("addRect").addEventListener("click", function () { addShape("rect"); });
+  document.getElementById("addSquare").addEventListener("click", function () { addShape("square"); });
+  document.getElementById("addCircle").addEventListener("click", function () { addShape("circle"); });
+  document.getElementById("addSemi").addEventListener("click", function () { addShape("semicircle"); });
+  document.getElementById("addPoly").addEventListener("click", function () { addShape("poly"); });
+  document.getElementById("resetBtn").addEventListener("click", function () {
+    state.shapes = JSON.parse(JSON.stringify(DEFAULT_SEED)); state.selected = null; state.selectedPart = null; save(); render();
+  });
+
+  // ---- properties panel ----
+  var zoneSelect = document.getElementById("zoneSelect");
+  ZONES.forEach(function (z) { var o = document.createElement("option"); o.value = z; o.textContent = z; zoneSelect.appendChild(o); });
+  var blank = document.createElement("option"); blank.value = ""; blank.textContent = "— sans zone —"; zoneSelect.insertBefore(blank, zoneSelect.firstChild);
+
+  function renderPropsPanel() {
+    var s = shapeById(state.selected);
+    document.getElementById("propsEmpty").hidden = !!s;
+    document.getElementById("propsBody").hidden = !s;
+    if (!s) return;
+    zoneSelect.value = s.zone || "";
+    document.getElementById("rectFields").hidden = s.type !== "rect";
+    document.getElementById("circleFields").hidden = s.type !== "circle";
+    document.getElementById("dirField").hidden = s.type !== "semicircle";
+    document.getElementById("convertField").hidden = s.type === "poly";
+    document.getElementById("polyField").hidden = s.type !== "poly";
+    if (s.type === "rect") {
+      document.getElementById("f_x").value = s.x; document.getElementById("f_y").value = s.y;
+      document.getElementById("f_w").value = s.w; document.getElementById("f_h").value = s.h;
+    } else if (s.type === "circle") {
+      document.getElementById("f_cx").value = s.cx; document.getElementById("f_cy").value = s.cy; document.getElementById("f_r").value = s.r;
+    }
+    if (s.type === "semicircle") document.getElementById("dirSelect").value = s.dir || "up";
+    if (s.type === "poly") {
+      document.getElementById("polyInfo").textContent = s.points.length + " points.";
+      var canDel = state.selectedPart && state.selectedPart.kind === "vertex" && s.points.length > 3;
+      document.getElementById("delVertexBtn").hidden = !canDel;
+    }
+  }
+  zoneSelect.addEventListener("change", function () {
+    var s = shapeById(state.selected); if (!s) return;
+    s.zone = zoneSelect.value; save(); render();
+  });
+  document.getElementById("dirSelect").addEventListener("change", function (e) {
+    var s = shapeById(state.selected); if (!s) return;
+    s.dir = e.target.value; save(); render();
+  });
+  ["f_x", "f_y", "f_w", "f_h", "f_cx", "f_cy", "f_r"].forEach(function (id) {
+    document.getElementById(id).addEventListener("change", function (e) {
+      var s = shapeById(state.selected); if (!s) return;
+      var key = id.slice(2); var v = Number(e.target.value);
+      if (!Number.isFinite(v)) return;
+      s[key] = v; save(); render();
+    });
+  });
+  document.getElementById("convertBtn").addEventListener("click", function () {
+    var s = shapeById(state.selected); if (!s) return;
+    convertToPoly(s); state.selectedPart = null; save(); render();
+  });
+  document.getElementById("delVertexBtn").addEventListener("click", function () {
+    var s = shapeById(state.selected);
+    if (!s || s.type !== "poly" || !state.selectedPart || state.selectedPart.kind !== "vertex") return;
+    var idx = state.selectedPart.index;
+    if (s.points.length <= 3) return;
+    s.points.splice(idx, 1);
+    s.bends.splice(idx, 1);
+    state.selectedPart = null; save(); render();
+  });
+  document.getElementById("delBtn").addEventListener("click", function () {
+    if (!state.selected) return;
+    state.shapes = state.shapes.filter(function (s) { return s.id !== state.selected; });
+    state.selected = null; state.selectedPart = null; save(); render();
+  });
+  document.getElementById("dupBtn").addEventListener("click", function () {
+    var s = shapeById(state.selected); if (!s) return;
+    var copy = JSON.parse(JSON.stringify(s));
+    copy.id = newId();
+    if (copy.type === "rect") { copy.x += 14; copy.y += 14; }
+    else if (copy.type === "poly") { copy.points = copy.points.map(function (p) { return { x: p.x + 14, y: p.y + 14 }; }); }
+    else { copy.cx += 14; copy.cy += 14; }
+    state.shapes.push(copy); state.selected = copy.id; state.selectedPart = null; save(); render();
+  });
+
+  // ---- shape list ----
+  function renderShapeList() {
+    var list = document.getElementById("shapeList");
+    list.innerHTML = "";
+    if (!state.shapes.length) { list.innerHTML = '<div class="empty-sel">Aucune forme.</div>'; return; }
+    state.shapes.forEach(function (s) {
+      var row = document.createElement("div");
+      row.className = "shape-row" + (s.id === state.selected ? " active" : "");
+      var sw = document.createElement("div"); sw.className = "swatch"; sw.style.background = colorFor(s.zone);
+      var name = document.createElement("div"); name.className = "name";
+      name.textContent = (s.zone || "(sans zone)") + " · " + TYPE_LABEL[s.type];
+      var del = document.createElement("button"); del.className = "del"; del.textContent = "✕";
+      del.addEventListener("click", function (ev) {
+        ev.stopPropagation();
+        state.shapes = state.shapes.filter(function (x) { return x.id !== s.id; });
+        if (state.selected === s.id) { state.selected = null; state.selectedPart = null; }
+        save(); render();
+      });
+      row.appendChild(sw); row.appendChild(name); row.appendChild(del);
+      row.addEventListener("click", function () { state.selected = s.id; state.selectedPart = null; save(); render(); });
+      list.appendChild(row);
+    });
+  }
+
+  // ---- export ----
+  function renderExport() {
+    var out = state.shapes.map(function (s) {
+      var c = { zone: s.zone, type: s.type };
+      if (s.type === "rect") { c.x = s.x; c.y = s.y; c.w = s.w; c.h = s.h; }
+      else if (s.type === "poly") { c.points = s.points; c.bends = s.bends; }
+      else { c.cx = s.cx; c.cy = s.cy; c.r = s.r; if (s.type === "semicircle") c.dir = s.dir || "up"; }
+      return c;
+    });
+    document.getElementById("exportBox").value = JSON.stringify(out, null, 2);
+  }
+  document.getElementById("copyBtn").addEventListener("click", function () {
+    var box = document.getElementById("exportBox");
+    var text = box.value;
+    function fallback() { box.focus(); box.select(); }
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).catch(fallback);
+    } else fallback();
+  });
+
+  try {
+    var h1 = document.querySelector("h1"), sub = document.querySelector("p.sub");
+    if (CONTEXT === "my_team" && h1) h1.textContent = "Shot Zone Editor — My Team";
+    else if (CONTEXT === "scouting" && h1) h1.textContent = "Shot Zone Editor — Scouting Observation";
+    if (CONTEXT && sub) sub.textContent = "Même demi-terrain que l'onglet Draw. Les changements sont enregistrés automatiquement dans HoopTrack.";
+  } catch (e) {}
+
+  render();
+})();
+</script>
+`;
+
+// Panneau Settings : un iframe par contexte, avec les zones actuelles injectées au départ ;
+// l'éditeur renvoie ses changements via postMessage, qu'on enregistre aussitôt (Supabase).
+function ShotZoneSettings({ context, title, defaultZones }) {
+  const [shapes, setShapes] = useZoneShapes(context);
+  const [saved, setSaved] = useState(false);
+  useEffect(() => {
+    function onMsg(e) {
+      const d = e.data;
+      if (!d || d.source !== "hooptrack-shot-zone-editor" || d.context !== context) return;
+      storeSet("shot_zone_shapes:" + context, d.shapes).then(() => { setSaved(true); setTimeout(() => setSaved(false), 1500); });
+      setShapes(d.shapes);
+    }
+    window.addEventListener("message", onMsg);
+    return () => window.removeEventListener("message", onMsg);
+  }, [context]);
+  const initial = shapes || defaultZones;
+  const srcDoc = useMemo(() => {
+    const inject = `<script>window.__HOOPTRACK_CONTEXT__=${JSON.stringify(context)};window.__HOOPTRACK_INITIAL_SHAPES__=${JSON.stringify(initial)};</script>`;
+    return SHOT_ZONE_EDITOR_HTML.replace("<script>", inject + "<script>");
+  }, [context, shapes === null]);
+  async function resetToDefault() {
+    await storeSet("shot_zone_shapes:" + context, defaultZones);
+    setShapes(defaultZones);
+  }
+  return (
+    <div style={{ marginTop: 18 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
+        <h4 style={{ margin: 0 }}>{title}</h4>
+        {saved && <span style={{ fontSize: 12, color: "#3DDC6F", fontWeight: 600 }}>Enregistré ✓</span>}
+        <button onClick={resetToDefault} style={{ marginLeft: "auto", fontSize: 12, padding: "5px 10px", borderRadius: 7, border: "1px solid #D7DBE1", background: "none", cursor: "pointer" }}>Réinitialiser</button>
+      </div>
+      <iframe key={context} srcDoc={srcDoc} style={{ width: "100%", height: 760, border: "1px solid #D7DBE1", borderRadius: 12 }} />
+    </div>
   );
 }
 
@@ -17259,7 +18117,7 @@ function ObservationPrintReport({ name, team }) {
       {hasShotData && (
         <>
           <h2 style={{ fontSize: 16, marginBottom: 8 }}>Shot chart</h2>
-          <HalfCourtShotChart zoneStats={zoneStats} size={380} />
+          <ScoutingShotChart zoneStats={zoneStats} size={380} />
         </>
       )}
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Offense / Defense</h2>
@@ -17628,7 +18486,7 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
                 return hasShotData ? (
                   <div style={{ marginTop: 16, marginBottom: 16 }}>
                     <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 10 }}>Shot chart</div>
-                    <HalfCourtShotChart zoneStats={zoneStats} size={380} />
+                    <ScoutingShotChart zoneStats={zoneStats} size={380} />
                   </div>
                 ) : null;
               })()}
@@ -20172,7 +21030,7 @@ function TeamPrintReport({ team, rows, otherLabels, advanced, teamOff, teamDef, 
       {teamOff.length > 0 && (
         <>
           <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Team shot chart</h2>
-          <HalfCourtShotChart zoneStats={computeShotZoneStats(teamOff, currentTagCategories())} size={380} />
+          <MyTeamShotChart zoneStats={computeShotZoneStats(teamOff, currentTagCategories())} size={380} />
         </>
       )}
 
@@ -21364,7 +22222,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
           {(teamOff.length > 0 || teamDef.length > 0) && (
             <div style={{ marginTop: 16, marginBottom: 16 }}>
               <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", color: "#5C6470", marginBottom: 10 }}>Team shot chart</div>
-              <HalfCourtShotChart zoneStats={computeShotZoneStats(teamOff, currentTagCategories())} thresholds={shotChartThresholds} />
+              <MyTeamShotChart zoneStats={computeShotZoneStats(teamOff, currentTagCategories())} thresholds={shotChartThresholds} />
             </div>
           )}
         </>
