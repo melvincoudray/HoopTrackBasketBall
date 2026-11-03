@@ -12931,34 +12931,55 @@ function useZoneShapes(context) {
 function ShapesShotChart({ zoneStats, shapes, thresholds = DEFAULT_SHOT_CHART_THRESHOLDS, size = 380 }) {
   const textColor = "#F3F1EA";
   const threePtTh = thresholds.threePt, paintTh = thresholds.paint;
-  function zoneFill(pct, th, opacity) {
-    if (pct === null || pct === undefined) return `rgba(139,147,161,${opacity})`;
-    if (pct >= th.green) return `rgba(61,220,111,${opacity})`;
-    if (pct >= th.orange) return `rgba(242,169,59,${opacity})`;
-    return `rgba(225,90,78,${opacity})`;
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "tu as enlevé les couleurs") : le code HTML que
+  // renvoie drawCourtSvg se termine TOUJOURS par un grand rectangle de fond plein (pour le Draw
+  // tab, qui n'a pas de zones colorées en dessous) — posé ici APRÈS les zones, il les recouvrait
+  // entièrement. On lui demande un fond transparent ("court: none") et on peint nous-mêmes le
+  // fond AVANT les zones, pour ne garder par-dessus que les lignes du terrain.
+  function zoneRGB(pct, th) {
+    if (pct === null || pct === undefined) return "139,147,161";
+    if (pct >= th.green) return "61,220,111";
+    if (pct >= th.orange) return "242,169,59";
+    return "225,90,78";
   }
   const thFor = name => /three|corner/i.test(name || "") ? threePtTh : paintTh;
   const fmtPct = v => v === null || v === undefined ? "–" : `${Math.round(v)}%`;
-  const courtMarkup = drawCourtSvg({ line: "#D8DCE2", court: "#161B22" }, false, false);
+  const courtMarkup = drawCourtSvg({ line: "#D8DCE2", court: "none" }, false, false);
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : le score d'une zone répété une fois par forme) :
+  // une même zone peut être composée de plusieurs formes (ex. "Three Left" = 2 rectangles) — un
+  // seul score par zone, affiché sur sa plus grande forme, pas un par forme.
+  const zoneLabels = useMemo(() => {
+    const byZone = new Map();
+    for (const s of shapes) {
+      if (!s.zone) continue;
+      if (!byZone.has(s.zone)) byZone.set(s.zone, []);
+      byZone.get(s.zone).push(s);
+    }
+    return [...byZone.entries()].map(([zone, list]) => {
+      const boxes = list.map(szCenterBox);
+      return { zone, ...boxes.reduce((a, b) => (b.w * b.h > a.w * a.h ? b : a)) };
+    });
+  }, [shapes]);
   return (
     <svg viewBox="0 0 500 470" preserveAspectRatio="xMidYMid meet" style={{ background: "#161B22", borderRadius: 12, width: "100%", maxWidth: size, height: "auto", display: "block" }}>
+      <rect x={0} y={0} width={500} height={470} fill="#161B22" />
       <g>
         {shapes.map(s => {
           const st = zoneStats?.[s.zone];
-          const fill = zoneFill(st?.pct, thFor(s.zone), 0.55);
-          if (s.type === "rect") return <rect key={s.id} x={s.x} y={s.y} width={s.w} height={s.h} fill={fill} stroke="none" />;
-          if (s.type === "circle") return <circle key={s.id} cx={s.cx} cy={s.cy} r={s.r} fill={fill} stroke="none" />;
-          return <path key={s.id} d={s.type === "poly" ? szPolyPath(s) : szSemicirclePath(s)} fill={fill} stroke="none" />;
+          const rgb = zoneRGB(st?.pct, thFor(s.zone));
+          const fill = `rgba(${rgb},0.55)`, stroke = `rgba(${rgb},0.95)`;
+          if (s.type === "rect") return <rect key={s.id} x={s.x} y={s.y} width={s.w} height={s.h} fill={fill} stroke={stroke} strokeWidth={1.5} />;
+          if (s.type === "circle") return <circle key={s.id} cx={s.cx} cy={s.cy} r={s.r} fill={fill} stroke={stroke} strokeWidth={1.5} />;
+          return <path key={s.id} d={s.type === "poly" ? szPolyPath(s) : szSemicirclePath(s)} fill={fill} stroke={stroke} strokeWidth={1.5} />;
         })}
       </g>
       <g dangerouslySetInnerHTML={{ __html: courtMarkup }} />
       <g fontFamily="Inter, sans-serif" textAnchor="middle">
-        {shapes.map(s => {
-          const st = zoneStats?.[s.zone];
-          const { cx, cy, w, h } = szCenterBox(s);
+        {zoneLabels.map(({ zone, cx, cy, w, h }) => {
+          const st = zoneStats?.[zone];
           const fs = Math.max(9, Math.min(22, Math.min(w, h) / 4));
           return (
-            <g key={s.id}>
+            <g key={zone}>
               <text x={cx} y={cy - fs * 0.35} fontSize={fs * 1.3} fontWeight={800} fill={textColor}>{fmtPct(st?.pct)}</text>
               <text x={cx} y={cy + fs * 0.75} fontSize={fs * 0.55} fontWeight={600} fill={textColor} opacity={0.85}>{st && st.attempted > 0 ? `${st.made}/${st.attempted}` : "no data"}</text>
             </g>
