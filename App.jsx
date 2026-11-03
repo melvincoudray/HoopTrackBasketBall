@@ -4185,22 +4185,25 @@ function SCREEN_DEFENSE_LIST(cats) { return categoryTags("Screen defense", cats)
 function SPACING_LIST(cats) { return categoryTags("Spacing", cats); }
 
 // Couleur fixe par type de couverture d'écran, demandée par l'utilisateur pour repérer le type
-// d'un coup d'œil dans l'onglet Scouting Report Stats (site ET export PDF) : jaune = Step, vert
-// = Show, rouge = Switch. Propre à cet onglet (aucun rapport avec une éventuelle autre
-// convention de couleur ailleurs sur le site, ex. My Team). Toute autre couverture (Under,
-// Protect, Reject, Flat…) reste neutre, faute de couleur précisée par l'utilisateur.
+// d'un coup d'œil dans l'onglet Scouting Report Stats (site ET export PDF). BUG RÉEL CORRIGÉ
+// (signalé par l'utilisateur, capture à l'appui) : ses tags de couverture sont littéralement
+// nommés "Yellow"/"Green"/"Red" (pas "Step"/"Show"/"Switch", qui sont d'autres tags distincts,
+// très peu utilisés chez lui) — la pastille doit donc reprendre la couleur que son NOM dit déjà,
+// pas une correspondance basket générique. Propre à cet onglet (aucun rapport avec une
+// éventuelle autre convention de couleur ailleurs sur le site, ex. My Team). Toute autre
+// couverture (Switch, Show, Protect, Reject, Flat, Under…) reste neutre.
 function screenCoverageColor(name) {
   const n = normTag(name);
-  if (n === normTag("Step")) return AMBER;
-  if (n === normTag("Show")) return RS_GRN;
-  if (n === normTag("Switch")) return RS_RED;
+  if (n === normTag("Yellow")) return AMBER;
+  if (n === normTag("Green")) return RS_GRN;
+  if (n === normTag("Red")) return RS_RED;
   return "#5C6470";
 }
 function screenCoverageColorPdf(name) {
   const n = normTag(name);
-  if (n === normTag("Step")) return REP.OR;
-  if (n === normTag("Show")) return REP.GRN;
-  if (n === normTag("Switch")) return REP.RED;
+  if (n === normTag("Yellow")) return REP.OR;
+  if (n === normTag("Green")) return REP.GRN;
+  if (n === normTag("Red")) return REP.RED;
   return REP.GREY;
 }
 
@@ -16282,13 +16285,24 @@ async function repGatherReportData({ teamName, teams, ourStats, ourName = "Our t
     screenDefOverall = [...rawTheirDef].sort((a, b) => b.count - a.count)
       .map(g => ({ name: g.label, n: g.count, freq: g.freq, pppp: g.pppp, open: g.open, tov: g.tov }));
     screenDefBySpacing = computeSpacingScreenDefenseBreakdown(theirDefPlays, cats);
+    // BUG RÉEL CORRIGÉ (signalé par l'utilisateur, capture à l'appui : "Step" apparaissait avec
+    // beaucoup de volume dans le comparatif alors qu'il n'existe nulle part dans "Screen defense
+    // played", le donut de NOS propres matchs) : Scouting Observation et nos matchs (Import/Team)
+    // ont CHACUN leur propre liste de tags "Screen defense", configurée indépendamment (voir
+    // currentObservationTagCategories vs currentTagCategories) — categoryBreakdown cherchait "Step"
+    // (encore présent dans la config Observation) dans NOS matchs, où il ne reste que comme tag
+    // brut sur d'anciens imports, sans rapport avec la couverture que nos matchs suivent
+    // aujourd'hui (Yellow/Green/Red…). Le comparatif ne garde désormais que les couvertures encore
+    // configurées des DEUX côtés à la fois (intersection) — "Step" en sort, comme demandé.
+    const ownCovLabels = SCREEN_DEFENSE_LIST(currentTagCategories());
+    const compareLabels = covLabels.filter(l => ownCovLabels.some(o => normTag(o) === normTag(l)));
     const toMap = arr => Object.fromEntries(arr.filter(g => g.count).map(g => [g.label, { n: g.count, ppp: g.pppp }]));
     screenCompare = {
-      labels: covLabels,
-      theirDef: toMap(rawTheirDef),
-      theirOff: toMap(categoryBreakdown(theirOffPlays, covLabels)),
-      ownOff: toMap(categoryBreakdown(ownOffPlays, covLabels)),
-      ownDef: toMap(categoryBreakdown(ownDefPlays, covLabels)),
+      labels: compareLabels,
+      theirDef: toMap(categoryBreakdown(theirDefPlays, compareLabels)),
+      theirOff: toMap(categoryBreakdown(theirOffPlays, compareLabels)),
+      ownOff: toMap(categoryBreakdown(ownOffPlays, compareLabels)),
+      ownDef: toMap(categoryBreakdown(ownDefPlays, compareLabels)),
     };
   } catch { /* catégories indisponibles : la section l'indique */ }
 
@@ -16621,7 +16635,7 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
   // comparaison de playtypes plus haut, avec une pastille par couverture (jaune = Step, vert =
   // Show, rouge = Switch).
   if (screenCompare) {
-    const subSc = "Average PPP of both sides · > 1.05 = exploit · < 0.90 = danger · coverage colors: yellow = Step, green = Show, red = Switch";
+    const subSc = "Average PPP of both sides · > 1.05 = exploit · < 0.90 = danger · coverage colors: the Yellow, Green and Red tags keep their own color";
     const hasRows = screenCompare.labels.some(l => (screenCompare.ownOff[l] && screenCompare.theirDef[l]) || (screenCompare.theirOff[l] && screenCompare.ownDef[l]));
     newPage("Screen coverage match-up", subSc);
     if (!hasRows) {
@@ -17770,7 +17784,7 @@ function ScoutingReportOnScreen({ teamName, teams, ourStats, ourName = "Our team
           Strength) que le comparatif de playtypes plus haut, avec en plus une pastille de couleur
           par type de couverture (jaune = Step, vert = Show, rouge = Switch). */}
       {Df.screenCompare && Df.screenCompare.labels.some(l => (Df.screenCompare.ownOff[l] && Df.screenCompare.theirDef[l]) || (Df.screenCompare.theirOff[l] && Df.screenCompare.ownDef[l])) && (
-        <RsCard title="Screen coverage match-up" sub="Average PPP of both sides · > 1.05 = exploit · < 0.90 = danger · coverage colors: yellow = Step, green = Show, red = Switch">
+        <RsCard title="Screen coverage match-up" sub="Average PPP of both sides · > 1.05 = exploit · < 0.90 = danger · coverage colors: the Yellow, Green and Red tags keep their own color">
           <RsPlaytypeCompare A={Df.screenCompare.ownOff} B={Df.screenCompare.theirDef} labels={Df.screenCompare.labels} title="OUR SCREEN OFFENSE VS THEIR SCREEN DEFENSE" colorOf={screenCoverageColor} />
           <RsPlaytypeCompare A={Df.screenCompare.theirOff} B={Df.screenCompare.ownDef} labels={Df.screenCompare.labels} title="THEIR SCREEN OFFENSE VS OUR SCREEN DEFENSE" invert colorOf={screenCoverageColor} />
         </RsCard>
