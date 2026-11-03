@@ -1290,14 +1290,26 @@ function extractSCLabelTags(labels, knownPlayers, knownTags, unconfirmedTagsSet,
 function splitSCInstanceByShooter(labels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault) {
   const shooterIdx = [];
   labels.forEach((l, j) => { if (String(l.group || "").trim() === "Shooter") shooterIdx.push(j); });
+  const isWholePossession = (l) => SC_WHOLE_POSSESSION_GROUPS.has(String(l.group || "").trim());
 
   if (shooterIdx.length <= 1) {
-    return [extractSCLabelTags(labels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault)];
+    const r = extractSCLabelTags(labels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
+    // wpTags : noms de tags posés par un groupe "toute la possession" (voir plus bas) — ici une
+    // seule ligne de toute façon, donc sans effet, gardé pour que la forme soit la même partout.
+    const wpTags = new Set(labels.filter(isWholePossession).map(l => String(l.name ?? "").trim()).filter(Boolean));
+    return [{ ...r, wpTags }];
   }
 
-  const isWholePossession = (l) => SC_WHOLE_POSSESSION_GROUPS.has(String(l.group || "").trim());
   const metaLabels = labels.filter(isWholePossession);
   const { tags: metaTags, flaggedPlayers: metaFlagged, roles: metaRoles } = extractSCLabelTags(metaLabels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : le même clip apparaît plusieurs fois dans les
+  // clips d'un play, et ça gonfle sa fréquence) : "Plays"/"PnR Organisation"/"PnR Defense"
+  // décrivent TOUTE la possession, donc posés une seule fois dans SportsCode — mais un
+  // rebond-putback génère ici PLUSIEURS tirs (lignes "play") à partir de CETTE MÊME possession,
+  // qui pointent toutes vers le MÊME clip. metaWpTags identifie ces noms de tags pour que le
+  // comptage (groupBreakdown, rankStat…) et le picker de clips ne comptent/affichent l'action
+  // qu'UNE fois pour ce tag précis, même si plusieurs lignes la portent (1er tir).
+  const metaWpTags = new Set(Object.keys(metaTags));
 
   // BUG RÉEL CORRIGÉ (mis au jour en ajoutant la reconnaissance des groupes "*Defender") : sur
   // une séquence à plusieurs tirs dans la même possession (rebond offensif + putback, kick-out…),
@@ -1317,7 +1329,7 @@ function splitSCInstanceByShooter(labels, knownPlayers, knownTags, unconfirmedTa
     const tags = { ...blockTags, ...(k === 0 ? metaTags : {}) };
     const roles = mergeSCRoles(blockRoles, k === 0 ? metaRoles : {});
     const players = [shooterName, ...blockFlagged, ...(k === 0 ? metaFlagged : [])].filter((p, i, arr) => arr.indexOf(p) === i);
-    return { tags, flaggedPlayers: players, ftPoints: blockFtPoints, roles };
+    return { tags, flaggedPlayers: players, ftPoints: blockFtPoints, roles, wpTags: k === 0 ? metaWpTags : new Set() };
   });
 }
 
@@ -1396,8 +1408,8 @@ function parseSCTimelineCodingFile(parsedJson, cats, unknownColumnDefault = "pla
   const rawPlays = entries.flatMap(({ button, inst }) => {
     const base = { category: "Possession", button: String(button), timestampStart: inst.startTime, timestampEnd: inst.endTime };
     const shots = splitSCInstanceByShooter(inst.labels || [], knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
-    return shots.flatMap(({ tags, flaggedPlayers, ftPoints, roles }) => {
-      const list = flaggedPlayers.length === 0 ? [{ ...base, tags, player: null, roles }] : flaggedPlayers.map(player => ({ ...base, tags, player, roles }));
+    return shots.flatMap(({ tags, flaggedPlayers, ftPoints, roles, wpTags }) => {
+      const list = flaggedPlayers.length === 0 ? [{ ...base, tags, player: null, roles, __wpTags: wpTags }] : flaggedPlayers.map(player => ({ ...base, tags, player, roles, __wpTags: wpTags }));
       if (ftPoints !== null && ftPoints !== undefined) list.forEach(p => { p.__ftPoints = ftPoints; });
       return list;
     });
@@ -2547,7 +2559,7 @@ function slideObsPlays(slide, el, data) {
 }
 function obsTagStat(plays, label, cats) {
   const lists = Object.values(cats || {}).filter(l => Array.isArray(l) && l.some(x => normTag(x) === normTag(label)));
-  const matching = plays.filter(p => tagIsSet(p.tags, label));
+  const matching = dedupeWholePossessionPlays(plays.filter(p => tagIsSet(p.tags, label)), label);
   const pts = matching.reduce((s, p) => s + playPoints(p.tags), 0);
   let denom = plays.length;
   if (lists[0]) denom = lists[0].reduce((s, l) => s + plays.filter(p => tagIsSet(p.tags, l)).length, 0);
@@ -4286,6 +4298,27 @@ function tagIsSet(tags, canonicalLabel) {
   return false;
 }
 
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur : en cherchant les clips d'un play, par ex.
+// "SLOB", le même clip apparaît sur plusieurs lignes et gonfle sa fréquence) : un rebond-putback
+// découpe UNE possession SportsCode en plusieurs "tirs", qui pointent tous vers le MÊME clip
+// (même timestamp). Le tag "Plays"/"PnR Organisation"/"PnR Defense" décrit toute la possession
+// (posé une seule fois dans SportsCode, voir wpTags dans splitSCInstanceByShooter) : si CE tag
+// précis est présent sur plusieurs de ces lignes pour le même joueur et le même clip, elles ne
+// comptent/s'affichent qu'UNE fois. Les autres tags (zone, résultat du tir…) de ces mêmes lignes
+// restent comptés séparément ailleurs — rien n'est fusionné, on filtre juste les doublons pour
+// CE tag précis.
+function dedupeWholePossessionPlays(matching, label) {
+  const seen = new Set();
+  const out = [];
+  for (const p of matching) {
+    const isWP = p.__wpTags && p.__wpTags.has(label);
+    const key = isWP ? `${p.timestampStart}|${p.timestampEnd}|${p.player || ""}` : null;
+    if (key) { if (seen.has(key)) continue; seen.add(key); }
+    out.push(p);
+  }
+  return out;
+}
+
 function openPct(matching) {
   if (!matching.length) return null;
   // La formule d'origine (vérifiée dans le classeur) divise le nombre d'actions "Ouvert"
@@ -4298,7 +4331,7 @@ function openPct(matching) {
 
 function groupBreakdown(plays, labels) {
   return labels.map(label => {
-    const matching = plays.filter(p => tagIsSet(p.tags, label));
+    const matching = dedupeWholePossessionPlays(plays.filter(p => tagIsSet(p.tags, label)), label);
     const pts = matching.reduce((s, p) => s + playPoints(p.tags), 0);
     return {
       label,
@@ -5112,7 +5145,7 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
         <ClipExportModal
           playName={(clipModal.extraTags && clipModal.extraTags.length ? `${clipModal.name} + (${clipModal.extraTags.join(" / ")})` : clipModal.name) + (clipModal.within ? ` — ${clipModal.within}` : "")}
           sideLabel={clipModal.side === "off" ? "Offense" : "Defense"}
-          plays={(clipModal.side === "off" ? off : def).filter(p => tagIsSet(p.tags, clipModal.name) && (!clipModal.within || tagIsSet(p.tags, clipModal.within)) && (!clipModal.extraTags || clipModal.extraTags.length === 0 || clipModal.extraTags.some(t => tagIsSet(p.tags, t))))}
+          plays={dedupeWholePossessionPlays((clipModal.side === "off" ? off : def).filter(p => tagIsSet(p.tags, clipModal.name) && (!clipModal.within || tagIsSet(p.tags, clipModal.within)) && (!clipModal.extraTags || clipModal.extraTags.length === 0 || clipModal.extraTags.some(t => tagIsSet(p.tags, t)))), clipModal.name)}
           onClose={() => setClipModal(null)}
           grouping={clipGrouping}
         />
@@ -10971,7 +11004,7 @@ function buildCodingStatOptions(off, def, cats) {
       // progresser depuis 0". On calcule donc ici SANS cette exclusion, pour que tous les
       // tags configurés restent sélectionnables, même à 0%.
       const allEntries = tags.map(label => {
-        const matching = plays.filter(p => tagIsSet(p.tags, label));
+        const matching = dedupeWholePossessionPlays(plays.filter(p => tagIsSet(p.tags, label)), label);
         const pts = matching.reduce((s, p) => s + playPoints(p.tags), 0);
         return { name: label, count: matching.length, pppp: matching.length ? pts / matching.length : 0, open: openPct(matching) };
       });
@@ -16075,6 +16108,34 @@ const repNameMatch = (full, short) => {
   const last = normTag(b[b.length - 1]), init = normTag(b[0]).slice(0, 1);
   return normTag(a[a.length - 1]) === last && (normTag(a[0]).slice(0, 1) === init || b.length === 1) || normTag(a.join("")).endsWith(last) && normTag(a[0]).slice(0, 1) === init;
 };
+// Joueurs cochés "blessé/indisponible" par le coach sur le Scouting Report : leurs stats indiv et
+// leur nom disparaissent de tout le rapport (FFBB, LiveStats, fiches Scouting), quelle que soit la
+// graphie du nom (repNameMatch gère "Théo Lefebvre" vs "LEFEBVRE T." etc., dans les deux sens).
+async function loadInjuredPlayers(teamName) { return (await storeGet("scouting_injured_players:" + teamName)) || []; }
+async function saveInjuredPlayers(teamName, list) { await storeSet("scouting_injured_players:" + teamName, list); return list; }
+function repIsInjured(name, injuredNames) {
+  if (!name || !injuredNames || !injuredNames.length) return false;
+  return injuredNames.some(inj => repNameMatch(name, inj) || repNameMatch(inj, name));
+}
+// Retire des données déjà chargées du rapport tout joueur coché blessé — ne relance aucun calcul,
+// se contente de filtrer FF et les tableaux nommés de LS avant l'affichage.
+function repStripInjured(D, injuredNames) {
+  if (!D || !injuredNames || !injuredNames.length) return D;
+  const hidden = n => repIsInjured(n, injuredNames);
+  const FF = (D.FF || []).filter(x => !hidden(x.fp.name));
+  let LS = D.LS;
+  if (LS) {
+    LS = {
+      ...LS,
+      impact: (LS.impact || []).filter(p => !hidden(p.name)),
+      lineups: (LS.lineups || []).filter(l => !(l.players || []).some(hidden)),
+      fatigue: Object.fromEntries(Object.entries(LS.fatigue || {}).filter(([k]) => !hidden(k))),
+      rot: (LS.rot || []).filter(p => !hidden(p.name)),
+      last: LS.last ? { ...LS.last, segs: (LS.last.segs || []).filter(s => !hidden(s.name)) } : LS.last,
+    };
+  }
+  return { ...D, FF, LS };
+}
 // Rassemble toutes les données du Scouting Report (standings, playtypes, LiveStats, FFBB, tirs contestés,
 // plays) en un seul passage — utilisé À LA FOIS par l'export PDF et par l'affichage à l'écran de l'onglet Stats,
 // pour ne calculer qu'une seule fois (et toujours de la même façon) ce qui alimente les deux.
@@ -17512,11 +17573,42 @@ function RsKeys({ D, teamName, ourName }) {
   );
 }
 
+function RsInjuredPanel({ teamName, players, rosterNames, injured, onToggle }) {
+  const names = useMemo(() => {
+    const seen = new Set(), out = [];
+    [...(rosterNames || []), ...(players || []).map(p => p.name)].forEach(n => {
+      const k = normTag(stripJerseyPrefix(n || ""));
+      if (n && k && !seen.has(k)) { seen.add(k); out.push(n); }
+    });
+    return out.sort((a, b) => a.localeCompare(b));
+  }, [rosterNames, players]);
+  if (!teamName) return null;
+  return (
+    <RsCard title="Injured / unavailable players" sub="Check a player to hide all of their individual stats and their name from this report">
+      {!names.length ? <RsEmpty text="No player found yet (roster syncing, or add players in Scouting Report › Individual)." /> : (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10 }}>
+          {names.map(n => {
+            const on = repIsInjured(n, injured);
+            return (
+              <label key={n} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: on ? AMBER : "#C7CCD6", cursor: "pointer", padding: "4px 9px", borderRadius: 6, background: on ? "rgba(242,169,59,0.12)" : "rgba(255,255,255,0.03)" }}>
+                <input type="checkbox" checked={on} onChange={() => onToggle(n)} />
+                {n}
+              </label>
+            );
+          })}
+        </div>
+      )}
+    </RsCard>
+  );
+}
+
 function ScoutingReportOnScreen({ teamName, teams, ourStats, ourName = "Our team", isCoach, players, teamLogo, teamBg, scoutingLayout, displaySettings }) {
   const [D, setD] = useState(null);
   const [err, setErr] = useState("");
   const [progress, setProgress] = useState("");
   const [nonce, setNonce] = useState(0);
+  const [injured, setInjured] = useState([]);
+  const [rosterNames, setRosterNames] = useState([]);
   const ctx = useRef({ teams, ourStats, ourName });
   ctx.current = { teams, ourStats, ourName };
   useEffect(() => {
@@ -17527,70 +17619,89 @@ function ScoutingReportOnScreen({ teamName, teams, ourStats, ourName = "Our team
       .catch(e => { if (alive) { setErr(String((e && e.message) || e)); setProgress(""); } });
     return () => { alive = false; };
   }, [teamName, nonce]);
+  // Liste des joueurs à cocher "blessé" : chargée à part (léger, indépendant du gros calcul
+  // ci-dessus) pour que le panneau apparaisse tout en haut dès l'ouverture de l'onglet.
+  useEffect(() => {
+    let alive = true;
+    if (!teamName) { setInjured([]); setRosterNames([]); return; }
+    loadInjuredPlayers(teamName).then(l => alive && setInjured(l));
+    loadFfbbRosterStats(teamName).then(list => alive && setRosterNames(list.map(x => x.fp.name))).catch(() => alive && setRosterNames([]));
+    return () => { alive = false; };
+  }, [teamName]);
+  async function toggleInjured(name) {
+    const current = await loadInjuredPlayers(teamName);
+    const next = repIsInjured(name, current) ? current.filter(x => !(repNameMatch(x, name) || repNameMatch(name, x))) : [...current, name];
+    await saveInjuredPlayers(teamName, next);
+    setInjured(next);
+  }
+  const injuredPanel = <RsInjuredPanel teamName={teamName} players={players} rosterNames={rosterNames} injured={injured} onToggle={toggleInjured} />;
 
-  if (err) return <RsCard><RsEmpty text={"Could not load: " + err} /><button onClick={() => setNonce(n => n + 1)} style={{ fontSize: 11, color: AMBER, background: "none", border: `1px solid ${LINE}`, borderRadius: 6, padding: "4px 10px", cursor: "pointer" }}>Retry</button></RsCard>;
-  if (!D) return <RsCard><RsEmpty text={progress || "Loading…"} /></RsCard>;
+  if (err) return <div>{injuredPanel}<RsCard><RsEmpty text={"Could not load: " + err} /><button onClick={() => setNonce(n => n + 1)} style={{ fontSize: 11, color: AMBER, background: "none", border: `1px solid ${LINE}`, borderRadius: 6, padding: "4px 10px", cursor: "pointer" }}>Retry</button></RsCard></div>;
+  if (!D) return <div>{injuredPanel}<RsCard><RsEmpty text={progress || "Loading…"} /></RsCard></div>;
 
-  const lg = D.LS && D.LS.last;
+  const Df = repStripInjured(D, injured);
+  const visiblePlayers = (players || []).filter(p => !repIsInjured(p.name, injured));
+  const lg = Df.LS && Df.LS.last;
   return (
     <div>
-      <RsCard title="Match context" sub="Standing and form computed from the FFBB box scores synchronised in HoopTrack"><RsStandings st={D.st} teamName={teamName} ourName={ourName} pouleName={D.pouleName} recentGames={D.recentGames} /></RsCard>
+      {injuredPanel}
+      <RsCard title="Match context" sub="Standing and form computed from the FFBB box scores synchronised in HoopTrack"><RsStandings st={Df.st} teamName={teamName} ourName={ourName} pouleName={Df.pouleName} recentGames={Df.recentGames} /></RsCard>
       <RsCard title="Strengths and weaknesses" sub="Rank 1-5 or top 3 playtypes = strength · bottom 5 or 3 worst playtypes = weakness (among teams loaded in Scouting)">
         <ScoutingStatsPanel teamName={teamName} teams={teams} />
       </RsCard>
       <RsCard title="Offensive and defensive playtypes" sub="From Scouting Observation · rank among observed teams">
-        <RsPlaytypeTable list={D.ptList("off")} title="OFFENSIVE PLAYTYPES — what they run most" color={AMBER} />
-        <RsPlaytypeTable list={D.ptList("def")} title="DEFENSIVE PLAYTYPES — what they defend most" color={AMBER} />
+        <RsPlaytypeTable list={Df.ptList("off")} title="OFFENSIVE PLAYTYPES — what they run most" color={AMBER} />
+        <RsPlaytypeTable list={Df.ptList("def")} title="DEFENSIVE PLAYTYPES — what they defend most" color={AMBER} />
       </RsCard>
-      <RsCard title="Stats comparison" sub={`${ourName} vs ${teamName} · green = better`}><RsComparison ourStats={ourStats} t={D.t} ourName={ourName} teamName={teamName} rankOf={D.rankOf} pouleRankOf={D.pouleRankOf} total={D.total} pouleName={D.pouleName} /></RsCard>
-      {D.PT.own && D.ptMine && (
+      <RsCard title="Stats comparison" sub={`${ourName} vs ${teamName} · green = better`}><RsComparison ourStats={ourStats} t={Df.t} ourName={ourName} teamName={teamName} rankOf={Df.rankOf} pouleRankOf={Df.pouleRankOf} total={Df.total} pouleName={Df.pouleName} /></RsCard>
+      {Df.PT.own && Df.ptMine && (
         <RsCard title="Playtype comparison" sub="Average PPP > 1.05 = exploit · < 0.90 = danger">
-          <RsPlaytypeCompare A={D.PT.own.off} B={D.ptMine.def} labels={D.PT.labels} title="OUR OFFENSE VS THEIR DEFENSE" />
-          <RsPlaytypeCompare A={D.ptMine.off} B={D.PT.own.def} labels={D.PT.labels} title="THEIR OFFENSE VS OUR DEFENSE" invert />
+          <RsPlaytypeCompare A={Df.PT.own.off} B={Df.ptMine.def} labels={Df.PT.labels} title="OUR OFFENSE VS THEIR DEFENSE" />
+          <RsPlaytypeCompare A={Df.ptMine.off} B={Df.PT.own.def} labels={Df.PT.labels} title="THEIR OFFENSE VS OUR DEFENSE" invert />
         </RsCard>
       )}
-      <RsCard title="Hot and cold stretches" sub={D.LS ? `Average margin per 2-minute block · ${D.LS.games} LiveStats games` : "LiveStats data"}>
-        {D.LS ? <RsHotCold LS={D.LS} /> : <RsEmpty text={"LiveStats unavailable: " + D.lsErr} />}
+      <RsCard title="Hot and cold stretches" sub={Df.LS ? `Average margin per 2-minute block · ${Df.LS.games} LiveStats games` : "LiveStats data"}>
+        {Df.LS ? <RsHotCold LS={Df.LS} /> : <RsEmpty text={"LiveStats unavailable: " + Df.lsErr} />}
       </RsCard>
       <RsCard title="Screen defense distribution" sub="Screen coverage used on defense · frequency, efficiency (PPP), contest rate, TOV% · From Scouting Observation">
-        <RsScreenDefense overall={D.screenDefOverall} bySpacing={D.screenDefBySpacing} />
+        <RsScreenDefense overall={Df.screenDefOverall} bySpacing={Df.screenDefBySpacing} />
       </RsCard>
       <RsCard title="Player impact: on court vs bench" sub="Per 100 possessions · left = on court, right = bench">
-        {D.LS ? <RsImpact LS={D.LS} /> : <RsEmpty text={"LiveStats unavailable: " + D.lsErr} />}
+        {Df.LS ? <RsImpact LS={Df.LS} /> : <RsEmpty text={"LiveStats unavailable: " + Df.lsErr} />}
       </RsCard>
       <RsCard title="Lineups" sub="5-man lineups from LiveStats · at least 5 minutes played together">
-        {D.LS ? <RsLineups LS={D.LS} /> : <RsEmpty text={"LiveStats unavailable: " + D.lsErr} />}
+        {Df.LS ? <RsLineups LS={Df.LS} /> : <RsEmpty text={"LiveStats unavailable: " + Df.lsErr} />}
       </RsCard>
       <RsCard title="Rotations" sub="Probability of being on court · darker = more likely">
-        {D.LS ? <RsRotations LS={D.LS} /> : <RsEmpty text={"LiveStats unavailable: " + D.lsErr} />}
+        {Df.LS ? <RsRotations LS={Df.LS} /> : <RsEmpty text={"LiveStats unavailable: " + Df.lsErr} />}
       </RsCard>
       <RsCard title="Last game">
-        {lg ? <RsLastGame lg={lg} /> : <RsEmpty text={"LiveStats unavailable: " + D.lsErr} />}
+        {lg ? <RsLastGame lg={lg} /> : <RsEmpty text={"LiveStats unavailable: " + Df.lsErr} />}
       </RsCard>
       <RsCard title="Fatigue, player by player" sub="By continuous minutes on court (30-second blocks, reset at half-time)">
-        {D.LS ? <RsFatigue LS={D.LS} FF={D.FF} repNameMatch={repNameMatch} /> : <RsEmpty text={"LiveStats unavailable: " + D.lsErr} />}
+        {Df.LS ? <RsFatigue LS={Df.LS} FF={Df.FF} repNameMatch={repNameMatch} /> : <RsEmpty text={"LiveStats unavailable: " + Df.lsErr} />}
       </RsCard>
       <RsCard title="Contested and uncontested shooting" sub="From Scouting Observation: shots tagged Open versus other shots">
-        <RsContested CS={D.CS} PT={D.PT} myShots={D.myShots} tagIsSet={tagIsSet} />
-        <RsContestedByPlaytype PT={D.PT} myShots={D.myShots} grp={D.grp} tagIsSet={tagIsSet} />
+        <RsContested CS={Df.CS} PT={Df.PT} myShots={Df.myShots} tagIsSet={tagIsSet} />
+        <RsContestedByPlaytype PT={Df.PT} myShots={Df.myShots} grp={Df.grp} tagIsSet={tagIsSet} />
       </RsCard>
       <RsCard title="Individual stats and points created" sub="FFBB season averages">
-        <RsIndividualStats FF={D.FF} />
+        <RsIndividualStats FF={Df.FF} />
         <div style={{ height: 14 }} />
-        <RsPointsCreated FF={D.FF} LS={D.LS} repNameMatch={repNameMatch} />
+        <RsPointsCreated FF={Df.FF} LS={Df.LS} repNameMatch={repNameMatch} />
       </RsCard>
       <RsCard title="Player cards — scoring" sub="FFBB season averages · #rank among NM1 players (green = top 10%) · playtypes: green = team's 3 most efficient, red = 3 least">
-        <RsPlayerCards FF={D.FF} LEAGUE={D.LEAGUE} LEAGUE_POULE={D.LEAGUE_POULE} pouleName={D.pouleName} PT={D.PT} ptList={D.ptList} teamName={teamName} repLeagueRank={repLeagueRank} normTag={normTag} LS={D.LS} />
+        <RsPlayerCards FF={Df.FF} LEAGUE={Df.LEAGUE} LEAGUE_POULE={Df.LEAGUE_POULE} pouleName={Df.pouleName} PT={Df.PT} ptList={Df.ptList} teamName={teamName} repLeagueRank={repLeagueRank} normTag={normTag} LS={Df.LS} />
       </RsCard>
-      {(players || []).length > 0 && (
+      {visiblePlayers.length > 0 && (
         <RsCard title="Individual scouting sheets" sub="From Scouting Report › Individual">
-          {players.map(p => (
+          {visiblePlayers.map(p => (
             <ScoutingPlayerCard key={p.id} player={p} isCoach={false} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness} bgStretch={teamBg?.stretch} teamLogo={teamLogo} chartScale={displaySettings?.chartScale} layout={scoutingLayout} onEdit={() => {}} onDelete={() => {}} />
           ))}
         </RsCard>
       )}
-      <RsCard title="Most frequent and most efficient plays" sub="From Scouting Observation"><RsPlays playStats={D.playStats} teamName={teamName} isCoach={isCoach} /></RsCard>
-      <RsCard title="Keys to the game" sub="Auto-generated summary of this report"><RsKeys D={D} teamName={teamName} ourName={ourName} /></RsCard>
+      <RsCard title="Most frequent and most efficient plays" sub="From Scouting Observation"><RsPlays playStats={Df.playStats} teamName={teamName} isCoach={isCoach} /></RsCard>
+      <RsCard title="Keys to the game" sub="Auto-generated summary of this report"><RsKeys D={Df} teamName={teamName} ourName={ourName} /></RsCard>
     </div>
   );
 }
@@ -18700,7 +18811,7 @@ const RANK_GROUPS = [
 const RANK_SAMPLE_WARN = 5;
 
 function rankStat(plays, label) {
-  const m = plays.filter(p => tagIsSet(p.tags, label));
+  const m = dedupeWholePossessionPlays(plays.filter(p => tagIsSet(p.tags, label)), label);
   if (!m.length) return null;
   const pts = m.reduce((s, p) => s + playPoints(p.tags), 0);
   return { n: m.length, freq: (100 * m.length) / plays.length, ppp: pts / m.length };
@@ -18905,7 +19016,7 @@ function ScoutingRankingsTab({ matchFilter }) {
       const byPlayer = new Map();
       t.plays.forEach(p => { if (p.player && t.confirmed.has(p.player)) { if (!byPlayer.has(p.player)) byPlayer.set(p.player, []); byPlayer.get(p.player).push(p); } });
       byPlayer.forEach((pl, player) => {
-        const m = pl.filter(p => tagIsSet(p.tags, l));
+        const m = dedupeWholePossessionPlays(pl.filter(p => tagIsSet(p.tags, l)), l);
         if (!m.length) return;
         out.push({ player, team: n, n: m.length, ppp: m.reduce((s, p) => s + playPoints(p.tags), 0) / m.length });
       });
