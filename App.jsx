@@ -1293,26 +1293,11 @@ function splitSCInstanceByShooter(labels, knownPlayers, knownTags, unconfirmedTa
   const isWholePossession = (l) => SC_WHOLE_POSSESSION_GROUPS.has(String(l.group || "").trim());
 
   if (shooterIdx.length <= 1) {
-    const r = extractSCLabelTags(labels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
-    // wpTags : noms de tags posés par un groupe "toute la possession" (voir plus bas) — ici une
-    // seule ligne de toute façon, donc sans effet, gardé pour que la forme soit la même partout.
-    // Tableau (pas un Set) : ces plays sont ensuite enregistrés en JSON (storeSet), qui ne sait
-    // pas sérialiser un Set (il redeviendrait un objet vide sans .has au rechargement).
-    const wpTags = labels.filter(isWholePossession).map(l => String(l.name ?? "").trim()).filter(Boolean);
-    return [{ ...r, wpTags }];
+    return [extractSCLabelTags(labels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault)];
   }
 
   const metaLabels = labels.filter(isWholePossession);
   const { tags: metaTags, flaggedPlayers: metaFlagged, roles: metaRoles } = extractSCLabelTags(metaLabels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
-  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : le même clip apparaît plusieurs fois dans les
-  // clips d'un play, et ça gonfle sa fréquence) : "Plays"/"PnR Organisation"/"PnR Defense"
-  // décrivent TOUTE la possession, donc posés une seule fois dans SportsCode — mais un
-  // rebond-putback génère ici PLUSIEURS tirs (lignes "play") à partir de CETTE MÊME possession,
-  // qui pointent toutes vers le MÊME clip. metaWpTags identifie ces noms de tags pour que le
-  // comptage (groupBreakdown, rankStat…) et le picker de clips ne comptent/affichent l'action
-  // qu'UNE fois pour ce tag précis, même si plusieurs lignes la portent (1er tir). Tableau (pas
-  // un Set) pour rester sérialisable en JSON par storeSet — voir commentaire ci-dessus.
-  const metaWpTags = Object.keys(metaTags);
 
   // BUG RÉEL CORRIGÉ (mis au jour en ajoutant la reconnaissance des groupes "*Defender") : sur
   // une séquence à plusieurs tirs dans la même possession (rebond offensif + putback, kick-out…),
@@ -1332,7 +1317,7 @@ function splitSCInstanceByShooter(labels, knownPlayers, knownTags, unconfirmedTa
     const tags = { ...blockTags, ...(k === 0 ? metaTags : {}) };
     const roles = mergeSCRoles(blockRoles, k === 0 ? metaRoles : {});
     const players = [shooterName, ...blockFlagged, ...(k === 0 ? metaFlagged : [])].filter((p, i, arr) => arr.indexOf(p) === i);
-    return { tags, flaggedPlayers: players, ftPoints: blockFtPoints, roles, wpTags: k === 0 ? metaWpTags : [] };
+    return { tags, flaggedPlayers: players, ftPoints: blockFtPoints, roles };
   });
 }
 
@@ -1411,8 +1396,18 @@ function parseSCTimelineCodingFile(parsedJson, cats, unknownColumnDefault = "pla
   const rawPlays = entries.flatMap(({ button, inst }) => {
     const base = { category: "Possession", button: String(button), timestampStart: inst.startTime, timestampEnd: inst.endTime };
     const shots = splitSCInstanceByShooter(inst.labels || [], knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
-    return shots.flatMap(({ tags, flaggedPlayers, ftPoints, roles, wpTags }) => {
-      const list = flaggedPlayers.length === 0 ? [{ ...base, tags, player: null, roles, __wpTags: wpTags }] : flaggedPlayers.map(player => ({ ...base, tags, player, roles, __wpTags: wpTags }));
+    // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "Shooting selection", "Screen defense" et
+    // "Spacing" comptaient 2-3x trop d'actions, pas seulement "Plays") : un SEUL tir peut avoir
+    // PLUSIEURS joueurs flaggés par SportsCode (le Shooter + un autre nom déjà connu de
+    // l'effectif, ex. le passeur) — une ligne est créée PAR joueur, toutes avec EXACTEMENT les
+    // mêmes tags (même zone, même résultat, même écran…), puisque c'est le MÊME tir. __shotId
+    // identifie ce tir précis (le N-ième tir de cette action) pour que toute stat/clip d'équipe
+    // (dedupeWholePossessionPlays) ne le compte qu'une fois, quel que soit le nombre de joueurs
+    // flaggés dessus — sans jamais fusionner deux tirs VRAIMENT différents d'un rebond-putback
+    // (chacun garde son propre index dans __shotId).
+    return shots.flatMap(({ tags, flaggedPlayers, ftPoints, roles }, k) => {
+      const shotId = `${inst.startTime}|${inst.endTime}|${k}`;
+      const list = flaggedPlayers.length === 0 ? [{ ...base, tags, player: null, roles, __shotId: shotId }] : flaggedPlayers.map(player => ({ ...base, tags, player, roles, __shotId: shotId }));
       if (ftPoints !== null && ftPoints !== undefined) list.forEach(p => { p.__ftPoints = ftPoints; });
       return list;
     });
@@ -4301,33 +4296,24 @@ function tagIsSet(tags, canonicalLabel) {
   return false;
 }
 
-// BUG RÉEL CORRIGÉ (signalé par l'utilisateur : en cherchant les clips d'un play, par ex.
-// "SLOB", le même clip apparaît sur plusieurs lignes et gonfle sa fréquence) : un rebond-putback
-// découpe UNE possession SportsCode en plusieurs "tirs", qui pointent tous vers le MÊME clip
-// (même timestamp). Le tag "Plays"/"PnR Organisation"/"PnR Defense" décrit toute la possession
-// (posé une seule fois dans SportsCode, voir wpTags dans splitSCInstanceByShooter) : si CE tag
-// précis est présent sur plusieurs de ces lignes pour le MÊME clip, elles ne comptent/s'affichent
-// qu'UNE fois. Les autres tags (zone, résultat du tir…) de ces mêmes lignes restent comptés
-// séparément ailleurs — rien n'est fusionné, on filtre juste les doublons pour CE tag précis.
-//
-// BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "certains clips apparaissent plusieurs fois alors
-// qu'il n'y a qu'un seul tir") : un SEUL tir peut avoir plusieurs joueurs flaggés par SportsCode
-// sur la même ligne (le Shooter + un autre nom reconnu comme joueur connu, ex. un passeur taggé
-// via le fallback "nom déjà dans l'effectif") — ce qui générait une ligne "play" PAR joueur, donc
-// plusieurs fois le même clip pour un tag d'équipe comme "Plays". La clé de dédoublonnage ne doit
-// PAS inclure le joueur : "Plays"/PnR décrivent l'action de TOUTE l'équipe, pas celle d'un joueur
-// en particulier — un même clip ne doit compter qu'une fois pour ce tag, quel que soit le nombre
-// de joueurs flaggés dessus. (Sans risque pour les stats par joueur : elles filtrent déjà sur UN
-// seul joueur avant d'appeler cette fonction, donc ce dédoublonnage n'y retire jamais rien.)
-function dedupeWholePossessionPlays(matching, label) {
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "Plays" comptait le même clip plusieurs fois, puis
+// "Shooting selection"/"Screen defense"/"Spacing" aussi — pas seulement "Plays") : un SEUL tir
+// peut avoir PLUSIEURS joueurs flaggés par SportsCode sur la même ligne (le Shooter + un autre nom
+// déjà connu de l'effectif, ex. le passeur) — une ligne "play" est créée PAR joueur flaggé, TOUTES
+// avec EXACTEMENT les mêmes tags (même zone, même résultat, même écran, même tout), puisque c'est
+// le MÊME tir. __shotId (posé dans rawPlays) identifie ce tir précis — le N-ième tir de cette
+// action SportsCode — et est IDENTIQUE sur toutes les lignes qui en découlent, quel que soit le
+// nombre de joueurs flaggés dessus. On ne garde donc qu'UNE ligne par __shotId avant de compter,
+// pour N'IMPORTE QUEL tag (pas seulement "Plays") : au niveau équipe, un tir ne doit jamais compter
+// plus d'une fois. Un rebond-putback (plusieurs VRAIS tirs différents sur une même possession)
+// n'est jamais fusionné : chaque tir garde son propre __shotId (indice différent). Sans risque
+// pour les stats par joueur : elles filtrent déjà sur UN seul joueur avant d'appeler cette
+// fonction, et un même joueur n'apparaît jamais deux fois sur le même tir.
+function dedupeWholePossessionPlays(matching) {
   const seen = new Set();
   const out = [];
   for (const p of matching) {
-    // __wpTags est un tableau simple (JSON-safe, voir splitSCInstanceByShooter) — Array.isArray
-    // couvre aussi, sans planter, une donnée déjà en mémoire dans l'ancien format (Set).
-    const wp = p.__wpTags;
-    const isWP = Array.isArray(wp) ? wp.includes(label) : !!(wp && typeof wp.has === "function" && wp.has(label));
-    const key = isWP ? `${p.timestampStart}|${p.timestampEnd}` : null;
+    const key = p.__shotId;
     if (key) { if (seen.has(key)) continue; seen.add(key); }
     out.push(p);
   }
