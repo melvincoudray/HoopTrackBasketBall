@@ -4184,6 +4184,26 @@ function SCREEN_DEFENSE_LIST(cats) { return categoryTags("Screen defense", cats)
 // distincte de la couverture défensive elle-même.
 function SPACING_LIST(cats) { return categoryTags("Spacing", cats); }
 
+// Couleur fixe par type de couverture d'écran, demandée par l'utilisateur pour repérer le type
+// d'un coup d'œil dans l'onglet Scouting Report Stats (site ET export PDF) : jaune = Step, vert
+// = Show, rouge = Switch. Propre à cet onglet (aucun rapport avec une éventuelle autre
+// convention de couleur ailleurs sur le site, ex. My Team). Toute autre couverture (Under,
+// Protect, Reject, Flat…) reste neutre, faute de couleur précisée par l'utilisateur.
+function screenCoverageColor(name) {
+  const n = normTag(name);
+  if (n === normTag("Step")) return AMBER;
+  if (n === normTag("Show")) return RS_GRN;
+  if (n === normTag("Switch")) return RS_RED;
+  return "#5C6470";
+}
+function screenCoverageColorPdf(name) {
+  const n = normTag(name);
+  if (n === normTag("Step")) return REP.OR;
+  if (n === normTag("Show")) return REP.GRN;
+  if (n === normTag("Switch")) return REP.RED;
+  return REP.GREY;
+}
+
 // Reproduit la logique du Dashboard original : top N tags par fréquence, avec un
 // optional "Other" bucket grouping the rest (used for the "Plays" donut).
 function topBucket(plays, labels, n, withOther) {
@@ -16191,6 +16211,9 @@ async function repGatherReportData({ teamName, teams, ourStats, ourName = "Our t
     const own = [];
     for (const m of idx) { const d = await storeGet("match:" + m.id); ((d && d.plays) || []).forEach(p => own.push(p)); }
     if (own.length) PT.own = { off: calc(own.filter(isOffense)), def: calc(own.filter(isDefense)) };
+    // Gardé pour le comparatif de défense d'écran plus bas (notre attaque/défense d'écran, par
+    // couverture) — évite de relire tous nos matchs une seconde fois pour ce même calcul.
+    PT.ownPlays = own;
   } catch { /* playtypes indisponibles : les pages concernées l'indiquent */ }
   const ptKey = Object.keys(PT.teams).find(k => normTag(k) === normTag(teamName));
   const ptMine = ptKey ? PT.teams[ptKey] : null;
@@ -16241,21 +16264,41 @@ async function repGatherReportData({ teamName, teams, ourStats, ourName = "Our t
   // type de couverture que CETTE équipe utilise quand ELLE défend (donc sur ses actions
   // défensives), comme le fait déjà le Dashboard pour "Screen defense played".
   let screenDefOverall = [], screenDefBySpacing = [];
+  // screenCompare : demandé par l'utilisateur juste après les chiffres de défense d'écrans —
+  // comparer LEUR défense d'écran à NOTRE attaque d'écran, et inversement NOTRE défense d'écran
+  // à LEUR attaque d'écran, sur le même principe que PT.own/ptMine pour les playtypes juste
+  // au-dessus (même structure {label: {n, ppp}}, consommée par le même composant RsPlaytypeCompare).
+  // "Notre attaque/défense d'écran" vient de NOS matchs codés (PT.ownPlays), pas de Scouting
+  // Observation, qui ne contient que l'équipe adverse.
+  let screenCompare = null;
   try {
     const cats = currentObservationTagCategories();
-    const defPlays = (PT.myPlays || []).filter(isDefense);
-    screenDefOverall = categoryBreakdown(defPlays, SCREEN_DEFENSE_LIST(cats)).sort((a, b) => b.count - a.count)
+    const covLabels = SCREEN_DEFENSE_LIST(cats);
+    const theirDefPlays = (PT.myPlays || []).filter(isDefense);
+    const theirOffPlays = (PT.myPlays || []).filter(isOffense);
+    const ownOffPlays = (PT.ownPlays || []).filter(isOffense);
+    const ownDefPlays = (PT.ownPlays || []).filter(isDefense);
+    const rawTheirDef = categoryBreakdown(theirDefPlays, covLabels);
+    screenDefOverall = [...rawTheirDef].sort((a, b) => b.count - a.count)
       .map(g => ({ name: g.label, n: g.count, freq: g.freq, pppp: g.pppp, open: g.open, tov: g.tov }));
-    screenDefBySpacing = computeSpacingScreenDefenseBreakdown(defPlays, cats);
+    screenDefBySpacing = computeSpacingScreenDefenseBreakdown(theirDefPlays, cats);
+    const toMap = arr => Object.fromEntries(arr.filter(g => g.count).map(g => [g.label, { n: g.count, ppp: g.pppp }]));
+    screenCompare = {
+      labels: covLabels,
+      theirDef: toMap(rawTheirDef),
+      theirOff: toMap(categoryBreakdown(theirOffPlays, covLabels)),
+      ownOff: toMap(categoryBreakdown(ownOffPlays, covLabels)),
+      ownDef: toMap(categoryBreakdown(ownDefPlays, covLabels)),
+    };
   } catch { /* catégories indisponibles : la section l'indique */ }
 
-  return { t, all, total, rankOf, games, st, pouleName, pouleErr, pouleRankOf, LEAGUE_POULE, recentGames, PT, ptMine, ptList, ptSW, LS, lsErr, myShots, isOpen, isMade, is3, grp, CS, FF, LEAGUE, playLabels, playStats, screenDefOverall, screenDefBySpacing };
+  return { t, all, total, rankOf, games, st, pouleName, pouleErr, pouleRankOf, LEAGUE_POULE, recentGames, PT, ptMine, ptList, ptSW, LS, lsErr, myShots, isOpen, isMade, is3, grp, CS, FF, LEAGUE, playLabels, playStats, screenDefOverall, screenDefBySpacing, screenCompare };
 }
 
 async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "Our team", ourLogo, onProgress, scoutShots = [] }) {
   const { jsPDF } = await import("jspdf");
   const D = await repGatherReportData({ teamName, teams, ourStats, ourName, onProgress });
-  const { t, all, total, rankOf, games, pouleName, pouleRankOf, LEAGUE_POULE, PT, ptMine, ptList, ptSW, FF, LEAGUE, screenDefOverall, screenDefBySpacing } = D;
+  const { t, all, total, rankOf, games, pouleName, pouleRankOf, LEAGUE_POULE, PT, ptMine, ptList, ptSW, FF, LEAGUE, screenDefOverall, screenDefBySpacing, screenCompare } = D;
   let { LS, lsErr } = D;
   // Logos "nettoyés" (fond carré uni retiré) — certains logos enregistrés avant l'arrivée de ce
   // nettoyage (ou importés autrement que via "Sync FFBB logos") gardent un fond carré en stock ;
@@ -16551,8 +16594,11 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
         rows.forEach(r => {
           rect(M, y, W - 2 * M, 17, REP.BG, 3);
           const contest = r.open === null || r.open === undefined ? null : 100 - r.open;
+          // Pastille de couleur par type de couverture (demandé par l'utilisateur : jaune = Step,
+          // vert = Show, rouge = Switch), même logique que sur le site (screenCoverageColor).
+          fc(screenCoverageColorPdf(r.name)); doc.circle(M + 10, y + 9, 2.5, "F");
           const vals = [r.name, r.freq.toFixed(0) + "%", r.pppp.toFixed(2), contest === null ? "–" : contest.toFixed(0) + "%", r.tov === null || r.tov === undefined ? "–" : r.tov.toFixed(0) + "%"];
-          vals.forEach((v, j) => text(v, hdr2[j][1], y + 12, { size: 8, bold: j === 0, align: hdr2[j][2], maxW: j === 0 ? 230 : undefined }));
+          vals.forEach((v, j) => text(v, j === 0 ? hdr2[j][1] + 10 : hdr2[j][1], y + 12, { size: 8, bold: j === 0, align: hdr2[j][2], maxW: j === 0 ? 220 : undefined }));
           y += 20;
         });
         return y + 10;
@@ -16565,6 +16611,44 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
         const need = 16 + b.rows.length * 20 + 10;
         if (y > 92 && y + need > H - 40) { newPage("Screen defense distribution (cont.)", sub); y = 92; }
         y = drawScreenDefTable(y, b.title, b.rows);
+      });
+    }
+  }
+
+  // 12ter — comparatif de couverture d'écran (demandé par l'utilisateur, juste après la
+  // répartition de défense d'écrans) : LEUR défense d'écran vs NOTRE attaque d'écran, et
+  // inversement NOTRE défense vs LEUR attaque — même principe Exploit/Danger/Strength que la
+  // comparaison de playtypes plus haut, avec une pastille par couverture (jaune = Step, vert =
+  // Show, rouge = Switch).
+  if (screenCompare) {
+    const subSc = "Average PPP of both sides · > 1.05 = exploit · < 0.90 = danger · coverage colors: yellow = Step, green = Show, red = Switch";
+    const hasRows = screenCompare.labels.some(l => (screenCompare.ownOff[l] && screenCompare.theirDef[l]) || (screenCompare.theirOff[l] && screenCompare.ownDef[l]));
+    newPage("Screen coverage match-up", subSc);
+    if (!hasRows) {
+      text("Not enough data yet (need both our own coded games and this team's Scouting Observation file).", M, 100, { size: 10, color: REP.MUTE, maxW: W - 2 * M });
+    } else {
+      let y = 92;
+      [["OUR SCREEN OFFENSE VS THEIR SCREEN DEFENSE", screenCompare.ownOff, screenCompare.theirDef, false], ["THEIR SCREEN OFFENSE VS OUR SCREEN DEFENSE", screenCompare.theirOff, screenCompare.ownDef, true]].forEach(([ttl, A, B, invert]) => {
+        const rowsSc = screenCompare.labels.filter(l => A[l] && B[l]).map(l => ({ l, a: A[l], b: B[l], avg: (A[l].ppp + B[l].ppp) / 2 })).sort((p, q) => q.avg - p.avg);
+        if (!rowsSc.length) return;
+        text(ttl, M, y, { size: 8, bold: true, color: REP.OR }); y += 8;
+        [["Coverage", M + 16, "left"], ["Vol.", M + 180, "right"], ["PPP", M + 225, "right"], ["Vol.", M + 280, "right"], ["PPP", M + 325, "right"], ["Avg", M + 380, "right"]].forEach(([h, x, al]) => text(h, x, y + 8, { size: 7, color: REP.MUTE, align: al }));
+        text("Message", W - M - 8, y + 8, { size: 7, color: REP.MUTE, align: "right" }); y += 12;
+        rowsSc.forEach(r => {
+          if (y + 19 > H - 40) { newPage("Screen coverage match-up (cont.)", subSc); y = 92; }
+          const highRisk = r.avg > 1.05, lowRisk = r.avg < 0.9;
+          const good = invert ? lowRisk : highRisk, bad = invert ? highRisk : lowRisk;
+          const goodLabel = invert ? "STRENGTH" : "EXPLOIT";
+          rect(M, y, W - 2 * M, 17, good ? REP.LGRN : bad ? REP.LRED : REP.BG, 3);
+          fc(screenCoverageColorPdf(r.l)); doc.circle(M + 10, y + 9, 2.5, "F");
+          text(r.l, M + 16, y + 12, { size: 8.5, maxW: 155 });
+          text(r.a.n, M + 180, y + 12, { size: 8, align: "right" }); text(r.a.ppp.toFixed(2), M + 225, y + 12, { size: 8.5, bold: true, align: "right" });
+          text(r.b.n, M + 280, y + 12, { size: 8, align: "right" }); text(r.b.ppp.toFixed(2), M + 325, y + 12, { size: 8.5, bold: true, align: "right" });
+          text(r.avg.toFixed(2), M + 380, y + 12, { size: 8.5, bold: true, color: good ? REP.GRN : bad ? REP.RED : REP.INK, align: "right" });
+          if (good || bad) { rect(W - M - 70, y + 3, 62, 11, good ? REP.GRN : REP.RED, 3); text(good ? goodLabel : "DANGER", W - M - 39, y + 11.5, { size: 7, bold: true, color: REP.WHITE, align: "center" }); }
+          y += 19;
+        });
+        y += 18;
       });
     }
   }
@@ -17058,7 +17142,10 @@ function RsScreenDefRows({ title, rows }) {
         const contest = r.open === null || r.open === undefined ? null : 100 - r.open;
         return (
           <div key={r.name} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", borderTop: `1px solid ${LINE}` }}>
-            <div style={{ width: 120, fontSize: 11.5, color: PAPER, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.name}</div>
+            <div style={{ width: 120, display: "flex", alignItems: "center", gap: 6, fontSize: 11.5, color: PAPER, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", background: screenCoverageColor(r.name), flexShrink: 0 }} />
+              <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{r.name}</span>
+            </div>
             <div style={{ flex: 1, height: 8, background: LINE, borderRadius: 4, overflow: "hidden" }}><div style={{ width: `${100 * r.freq / maxF}%`, height: "100%", background: AMBER }} /></div>
             <div style={{ width: 40, fontSize: 10.5, color: "#8B93A1", textAlign: "right" }}>{r.freq.toFixed(0)}%</div>
             <div style={{ width: 48, fontSize: 11.5, fontWeight: 700, color: PAPER, textAlign: "right" }}>{r.pppp.toFixed(2)}</div>
@@ -17136,7 +17223,10 @@ function RsComparison({ ourStats, t, ourName, teamName, rankOf, pouleRankOf, tot
   );
 }
 
-function RsPlaytypeCompare({ A, B, labels, title, invert = false }) {
+// colorOf (optionnel) : fonction label -> couleur, pour afficher une pastille devant le libellé
+// (demandé par l'utilisateur pour le comparatif de défense d'écran, voir screenCoverageColor) —
+// sans effet sur le comparatif de playtypes, qui n'en passe pas.
+function RsPlaytypeCompare({ A, B, labels, title, invert = false, colorOf }) {
   const rows = labels.filter(l => A[l] && B[l]).map(l => ({ l, a: A[l], b: B[l], avg: (A[l].ppp + B[l].ppp) / 2 })).sort((p, q) => q.avg - p.avg);
   if (!rows.length) return null;
   return (
@@ -17150,7 +17240,10 @@ function RsPlaytypeCompare({ A, B, labels, title, invert = false }) {
         const goodLabel = invert ? "STRENGTH" : "EXPLOIT";
         return (
           <div key={r.l} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 8px", borderRadius: 6, background: good ? RS_LGRN : bad ? RS_LRED : "rgba(255,255,255,0.03)", marginBottom: 3 }}>
-            <div style={{ flex: 1, fontSize: 11.5, color: PAPER, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.l}</div>
+            <div style={{ flex: 1, display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+              {colorOf && <span style={{ width: 8, height: 8, borderRadius: "50%", background: colorOf(r.l), flexShrink: 0 }} />}
+              <span style={{ fontSize: 11.5, color: PAPER, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis" }}>{r.l}</span>
+            </div>
             <div style={{ fontSize: 10.5, color: "#8B93A1", width: 70, textAlign: "right" }}>{r.a.n} poss · {r.a.ppp.toFixed(2)}</div>
             <div style={{ fontSize: 10.5, color: "#8B93A1", width: 70, textAlign: "right" }}>{r.b.n} poss · {r.b.ppp.toFixed(2)}</div>
             <div style={{ width: 48, fontSize: 11.5, fontWeight: 800, textAlign: "right", color: good ? RS_GRN : bad ? RS_RED : PAPER }}>{r.avg.toFixed(2)}</div>
@@ -17672,6 +17765,16 @@ function ScoutingReportOnScreen({ teamName, teams, ourStats, ourName = "Our team
       <RsCard title="Screen defense distribution" sub="Screen coverage used on defense · frequency, efficiency (PPP), contest rate, TOV% · From Scouting Observation">
         <RsScreenDefense overall={Df.screenDefOverall} bySpacing={Df.screenDefBySpacing} />
       </RsCard>
+      {/* Demandé par l'utilisateur, juste après les chiffres de défense d'écrans : comparer LEUR
+          défense d'écran à NOTRE attaque d'écran, et inversement — même principe (Exploit/Danger/
+          Strength) que le comparatif de playtypes plus haut, avec en plus une pastille de couleur
+          par type de couverture (jaune = Step, vert = Show, rouge = Switch). */}
+      {Df.screenCompare && Df.screenCompare.labels.some(l => (Df.screenCompare.ownOff[l] && Df.screenCompare.theirDef[l]) || (Df.screenCompare.theirOff[l] && Df.screenCompare.ownDef[l])) && (
+        <RsCard title="Screen coverage match-up" sub="Average PPP of both sides · > 1.05 = exploit · < 0.90 = danger · coverage colors: yellow = Step, green = Show, red = Switch">
+          <RsPlaytypeCompare A={Df.screenCompare.ownOff} B={Df.screenCompare.theirDef} labels={Df.screenCompare.labels} title="OUR SCREEN OFFENSE VS THEIR SCREEN DEFENSE" colorOf={screenCoverageColor} />
+          <RsPlaytypeCompare A={Df.screenCompare.theirOff} B={Df.screenCompare.ownDef} labels={Df.screenCompare.labels} title="THEIR SCREEN OFFENSE VS OUR SCREEN DEFENSE" invert colorOf={screenCoverageColor} />
+        </RsCard>
+      )}
       <RsCard title="Player impact: on court vs bench" sub="Per 100 possessions · left = on court, right = bench">
         {Df.LS ? <RsImpact LS={Df.LS} /> : <RsEmpty text={"LiveStats unavailable: " + Df.lsErr} />}
       </RsCard>
