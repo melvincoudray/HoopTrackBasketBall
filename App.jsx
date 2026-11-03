@@ -1205,6 +1205,24 @@ function stripJerseyPrefix(name) {
 // rebond-putback qui suit n'est pas issu de ce système.
 const SC_WHOLE_POSSESSION_GROUPS = new Set(["Plays", "PnR Ogranisation", "PnR Organisation", "PNR Defense", "PnR Defense"]);
 
+// Demandé par l'utilisateur : différencier le Shooter des AUTRES rôles tagués par SportsCode sur
+// la même action (passeur, rebondeur, intercepteur, contreur) — jusqu'ici, un nom de joueur posé
+// sous l'un de ces groupes n'était reconnu nulle part : ni attribué comme joueur (seuls "Shooter"
+// et "Player(s)" le sont), ni filtré — il finissait comme un tag brut inutile ("#4 Theo Lefebvre"
+// mélangé aux Playtypes). Chaque groupe ci-dessous est maintenant capturé à part (sous "roles" sur
+// l'action), pour pouvoir ensuite relier chaque case du Box Score (Assists, Rebonds, Interceptions,
+// Contres, Pertes de balle) aux bons clips vidéo de CE joueur précis — voir ROLE_CLIP_MAP plus bas.
+const SC_ROLE_GROUPS = new Set(["Assist", "Rebound", "Steal", "Turnover", "Block"]);
+function mergeSCRoles(...roleObjs) {
+  const out = {};
+  for (const r of roleObjs) {
+    for (const [k, v] of Object.entries(r || {})) {
+      out[k] = [...(out[k] || []), ...v].filter((name, i, arr) => arr.indexOf(name) === i);
+    }
+  }
+  return out;
+}
+
 // Demandé par l'utilisateur : traduire le tir au format SportsCode ("+2"/"-3"…) en valeur
 // {made, n} exploitable, pour le réécrire ensuite dans le vocabulaire canonique du site.
 function translateSCShotValue(rawName) {
@@ -1223,6 +1241,7 @@ function translateSCShotValue(rawName) {
 function extractSCLabelTags(labels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault) {
   const tags = {};
   const flaggedPlayers = [];
+  const roles = {};
   let ftPoints = null;
   const isFreeThrow = labels.some(l => String(l.group || "").trim() === "Shot Characteristics" && String(l.name || "").trim() === "Free Throw");
   for (const label of labels) {
@@ -1230,6 +1249,11 @@ function extractSCLabelTags(labels, knownPlayers, knownTags, unconfirmedTagsSet,
     if (!rawName) continue;
     const group = String(label.group || "").trim();
     const isPlayerGroup = /^players?$/i.test(group) || group === "Shooter";
+    if (SC_ROLE_GROUPS.has(group)) {
+      const roleName = stripJerseyPrefix(rawName);
+      if (roleName) (roles[group] || (roles[group] = [])).push(roleName);
+      continue;
+    }
     if (isPlayerGroup || knownPlayers.has(normTag(rawName))) {
       flaggedPlayers.push(isPlayerGroup ? stripJerseyPrefix(rawName) : rawName);
       continue;
@@ -1245,7 +1269,7 @@ function extractSCLabelTags(labels, knownPlayers, knownTags, unconfirmedTagsSet,
     tags[tagName] = 1;
     if (!knownTags.has(normTag(tagName)) && unknownColumnDefault === "tag") unconfirmedTagsSet.add(tagName);
   }
-  return { tags, flaggedPlayers, ftPoints };
+  return { tags, flaggedPlayers, ftPoints, roles };
 }
 
 // Demandé par l'utilisateur : une même action SportsCode peut contenir PLUSIEURS tirs (ex.
@@ -1265,17 +1289,18 @@ function splitSCInstanceByShooter(labels, knownPlayers, knownTags, unconfirmedTa
   const isWholePossession = (l) => SC_WHOLE_POSSESSION_GROUPS.has(String(l.group || "").trim());
   const sharedLabels = labels.slice(0, shooterIdx[0]).filter(l => !isWholePossession(l));
   const metaLabels = labels.filter(isWholePossession);
-  const { tags: sharedTags, flaggedPlayers: sharedFlagged } = extractSCLabelTags(sharedLabels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
-  const { tags: metaTags, flaggedPlayers: metaFlagged } = extractSCLabelTags(metaLabels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
+  const { tags: sharedTags, flaggedPlayers: sharedFlagged, roles: sharedRoles } = extractSCLabelTags(sharedLabels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
+  const { tags: metaTags, flaggedPlayers: metaFlagged, roles: metaRoles } = extractSCLabelTags(metaLabels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
 
   return shooterIdx.map((start, k) => {
     const end = k + 1 < shooterIdx.length ? shooterIdx[k + 1] : labels.length;
     const blockLabels = labels.slice(start + 1, end).filter(l => !isWholePossession(l));
     const shooterName = stripJerseyPrefix(labels[start].name);
-    const { tags: blockTags, flaggedPlayers: blockFlagged, ftPoints: blockFtPoints } = extractSCLabelTags(blockLabels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
+    const { tags: blockTags, flaggedPlayers: blockFlagged, ftPoints: blockFtPoints, roles: blockRoles } = extractSCLabelTags(blockLabels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
     const tags = { ...sharedTags, ...blockTags, ...(k === 0 ? metaTags : {}) };
+    const roles = mergeSCRoles(sharedRoles, blockRoles, k === 0 ? metaRoles : {});
     const players = [shooterName, ...sharedFlagged, ...blockFlagged, ...(k === 0 ? metaFlagged : [])].filter((p, i, arr) => arr.indexOf(p) === i);
-    return { tags, flaggedPlayers: players, ftPoints: blockFtPoints };
+    return { tags, flaggedPlayers: players, ftPoints: blockFtPoints, roles };
   });
 }
 
@@ -1354,8 +1379,8 @@ function parseSCTimelineCodingFile(parsedJson, cats, unknownColumnDefault = "pla
   const rawPlays = entries.flatMap(({ button, inst }) => {
     const base = { category: "Possession", button: String(button), timestampStart: inst.startTime, timestampEnd: inst.endTime };
     const shots = splitSCInstanceByShooter(inst.labels || [], knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
-    return shots.flatMap(({ tags, flaggedPlayers, ftPoints }) => {
-      const list = flaggedPlayers.length === 0 ? [{ ...base, tags, player: null }] : flaggedPlayers.map(player => ({ ...base, tags, player }));
+    return shots.flatMap(({ tags, flaggedPlayers, ftPoints, roles }) => {
+      const list = flaggedPlayers.length === 0 ? [{ ...base, tags, player: null, roles }] : flaggedPlayers.map(player => ({ ...base, tags, player, roles }));
       if (ftPoints !== null && ftPoints !== undefined) list.forEach(p => { p.__ftPoints = ftPoints; });
       return list;
     });
@@ -6219,14 +6244,21 @@ function rankColor(rank) {
   if (!rank || rank < 1) return null;
   return rank <= 4 ? "#22C55E" : rank <= 7 ? "#FACC15" : "#EF4444";
 }
-function StatPill({ label, value, sub, tone = "amber" }) {
+// onClick (optionnel, demandé par l'utilisateur) : rend l'encadré cliquable — utilisé pour relier
+// une case du Box Score FFBB (Assists, Rebonds…) aux clips vidéo correspondants.
+function StatPill({ label, value, sub, tone = "amber", onClick, clickHint }) {
   const rk = typeof sub === "string" ? sub.match(/^#(\d+) of \d+/) : null;
   const color = (rk && rankColor(Number(rk[1]))) || (tone === "amber" ? AMBER : tone === "teal" ? TEAL : tone === "red" ? RED : PAPER);
   return (
-    <div style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, padding: "14px 16px", minWidth: 120 }}>
+    <div
+      onClick={onClick}
+      title={onClick ? clickHint : undefined}
+      style={{ background: PANEL2, border: `1px solid ${onClick ? TEAL : LINE}`, borderRadius: 10, padding: "14px 16px", minWidth: 120, cursor: onClick ? "pointer" : "default" }}
+    >
       <div className="keep-color" style={{ fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace", fontSize: 26, fontWeight: 700, color }}>{value}</div>
       <div style={{ fontSize: 11, letterSpacing: "0.06em", textTransform: "uppercase", color: "#8B93A1", marginTop: 4 }}>{label}</div>
       {sub && <div style={{ fontSize: 11, color: "#5C6470", marginTop: 2 }}>{sub}</div>}
+      {onClick && <div style={{ fontSize: 10, color: TEAL, marginTop: 4 }}>▶ Clips</div>}
     </div>
   );
 }
@@ -17257,6 +17289,19 @@ function matchesScoutingPlayer(tagName, player) {
   return scoutingPlayerNameCandidates(player).includes(norm);
 }
 
+// Demandé par l'utilisateur : relier chaque case du Box Score FFBB (Assists, Rebonds,
+// Interceptions, Contres, Pertes de balle) aux clips vidéo correspondants de CE joueur, tagués
+// dans les fichiers SportsCode importés pour cette équipe observée (voir SC_ROLE_GROUPS). "plays"
+// doit contenir toutes les actions de l'équipe observée (attaque + défense), pas seulement celles
+// où ce joueur est le Shooter.
+function rolePlaysForPlayer(plays, player, role) {
+  return plays.filter(p => (p.roles?.[role] || []).some(name => matchesScoutingPlayer(name, player)));
+}
+// Libellé du Box Score FFBB -> groupe SportsCode correspondant (seules les stats qui ont un
+// équivalent direct dans les labels tagués sont cliquables ; Pts/2Pts/3Pts/FT sont déjà couverts
+// par le Shooter, via playerOff/playerDef, donc absents d'ici).
+const ROLE_CLIP_MAP = { "Assists": "Assist", "Reb Tot": "Rebound", "Steals": "Steal", "Blocks": "Block", "Turnovers": "Turnover" };
+
 // Charge les fiches joueurs de Scouting Report → Individual pour l'équipe adverse observée
 // correspondante (par nom), si elle existe.
 function useObservationScoutingPlayers(observedTeamName) {
@@ -17409,7 +17454,7 @@ const FFBB_BOX_DEFS = [
 // Blocs "Box Score" d'un joueur adverse, à partir des moyennes de saison lues sur le site FFBB NM1
 // (enregistrées dans sa fiche par "Sync roster (FFBB)"). Mêmes encadrés, même ordre que le Box
 // Score de nos joueurs ; ceux que la FFBB ne fournit pas (+/-, fautes, usage…) sont omis.
-function FfbbBoxScoreTiles({ stats, loading, error, teammates }) {
+function FfbbBoxScoreTiles({ stats, loading, error, teammates, roleClipCounts, onRoleClipClick }) {
   if (loading) return <EmptyState text="Loading FFBB stats…" />;
   if (!stats) return <EmptyState text={error || "No FFBB stats for this player yet."} />;
   const f1 = v => (v === null || v === undefined ? "–" : Number(v).toFixed(1));
@@ -17431,7 +17476,17 @@ function FfbbBoxScoreTiles({ stats, loading, error, teammates }) {
     <div style={{ marginBottom: 26 }}>
       <SectionTitle eyebrow="Source: FFBB NM1 — season average" title="Box Score" />
       <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-        {defs.map(([label, get, show, tone, low]) => <StatPill key={label} label={label} value={show(get(stats))} sub={rankSub(get, low)} tone={tone} />)}
+        {defs.map(([label, get, show, tone, low]) => {
+          const clipCount = roleClipCounts ? roleClipCounts[label] : undefined;
+          const clickable = onRoleClipClick && clipCount > 0;
+          return (
+            <StatPill
+              key={label} label={label} value={show(get(stats))} sub={rankSub(get, low)} tone={tone}
+              onClick={clickable ? () => onRoleClipClick(label) : undefined}
+              clickHint={clickable ? `${clipCount} tagged action${clipCount > 1 ? "s" : ""} in this observation — click for the clips` : undefined}
+            />
+          );
+        })}
       </div>
     </div>
   );
@@ -17445,6 +17500,10 @@ function FfbbBoxScoreTiles({ stats, loading, error, teammates }) {
 function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGrouping, teamName }) {
   const [openPlayer, setOpenPlayer] = useState(null);
   const [showConfirm, setShowConfirm] = useState(false);
+  // Demandé par l'utilisateur : clips vidéo reliés à chaque case du Box Score FFBB (Assists,
+  // Rebonds, Interceptions, Contres, Pertes de balle) — voir ROLE_CLIP_MAP / rolePlaysForPlayer.
+  const [roleClipModal, setRoleClipModal] = useState(null);
+  const combinedPlays = useMemo(() => [...off, ...def], [off, def]);
   const { map: tagMap, setTag: setTagDecision } = useObservationPlayerTagMap(teamName);
   // Stats FFBB chargées à l'ouverture si la fiche n'en a pas encore : { [idJoueur]: stats | "loading" | "error:..." }
   const [ffbbLive, setFfbbLive] = useState({});
@@ -17481,6 +17540,22 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
   function playsFor(player) {
     const match = (p) => p.player && confirmedTags.has(p.player) && matchesScoutingPlayer(p.player, player);
     return { playerOff: off.filter(match), playerDef: def.filter(match) };
+  }
+
+  const roleClipCounts = useMemo(() => {
+    if (!openPlayer) return {};
+    const counts = {};
+    for (const [label, role] of Object.entries(ROLE_CLIP_MAP)) counts[label] = rolePlaysForPlayer(combinedPlays, openPlayer, role).length;
+    return counts;
+  }, [openPlayer, combinedPlays]);
+
+  function openRoleClips(label) {
+    const role = ROLE_CLIP_MAP[label];
+    setRoleClipModal({
+      label,
+      plays: rolePlaysForPlayer(combinedPlays, openPlayer, role),
+      playerLabel: [openPlayer.firstName, openPlayer.lastName].filter(Boolean).join(" ") || "—",
+    });
   }
 
   return (
@@ -17542,7 +17617,7 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
                 <div style={{ fontSize: 17, fontWeight: 800, color: PAPER }}>{[openPlayer.firstName, openPlayer.lastName].filter(Boolean).join(" ")}{openPlayer.jersey ? ` #${openPlayer.jersey}` : ""}</div>
                 <button onClick={() => setOpenPlayer(null)} style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer" }}><X size={20} /></button>
               </div>
-              {(() => { const live = ffbbLive[openPlayer.id]; const stats = (live && typeof live === "object" ? live : null) || openPlayer.ffbbStats; return <FfbbBoxScoreTiles teammates={rosterStats ? [...rosterStats.filter(x => !ffbbSamePerson(openPlayer, x.fp)).map(x => x.st), stats] : [...players.filter(p => p.id !== openPlayer.id).map(p => p.ffbbStats), stats]} stats={stats} loading={!stats && (live === "loading" || live === undefined)} error={typeof live === "string" && live.startsWith("error:") ? live.slice(6) : ""} />; })()}
+              {(() => { const live = ffbbLive[openPlayer.id]; const stats = (live && typeof live === "object" ? live : null) || openPlayer.ffbbStats; return <FfbbBoxScoreTiles teammates={rosterStats ? [...rosterStats.filter(x => !ffbbSamePerson(openPlayer, x.fp)).map(x => x.st), stats] : [...players.filter(p => p.id !== openPlayer.id).map(p => p.ffbbStats), stats]} stats={stats} loading={!stats && (live === "loading" || live === undefined)} error={typeof live === "string" && live.startsWith("error:") ? live.slice(6) : ""} roleClipCounts={roleClipCounts} onRoleClipClick={openRoleClips} />; })()}
               {/* Demandé par l'utilisateur : shot map PAR JOUEUR dans Scouting Observation (jusqu'ici
                   le shot chart n'existait qu'au niveau de l'équipe entière). Mêmes zones ("Shot zone"
                   dans Settings → Scouting Observation) et même composant que partout ailleurs sur le
@@ -17564,6 +17639,16 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
           </div>
         );
       })()}
+
+      {roleClipModal && (
+        <ClipExportModal
+          playName={`${roleClipModal.playerLabel} — ${roleClipModal.label}`}
+          sideLabel={roleClipModal.label}
+          plays={roleClipModal.plays}
+          onClose={() => setRoleClipModal(null)}
+          grouping={clipGrouping}
+        />
+      )}
     </div>
   );
 }
