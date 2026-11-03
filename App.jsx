@@ -13889,6 +13889,14 @@ async function saveScoutingPlayLink(teamName, playLabel, playId) {
   await storeSet("scouting_play_links:" + teamName, next);
   return next;
 }
+// Retire un lien manuel (retour à la correspondance automatique par nom).
+async function unlinkScoutingPlayLink(teamName, playLabel) {
+  const links = await loadScoutingPlayLinks(teamName);
+  const next = { ...links };
+  delete next[playLabel];
+  await storeSet("scouting_play_links:" + teamName, next);
+  return next;
+}
 // Résout le dessin du Playbook pour un libellé de play codé en Scouting : priorité au lien
 // manuel choisi par le coach (toujours exact), sinon on retombe sur la correspondance par nom.
 function resolveScoutingPlayDiagram(label, allPlays, links) {
@@ -17436,7 +17444,9 @@ function RsPlays({ playStats, teamName, isCoach }) {
   if (!playStats.length) return <RsEmpty text="No play coded for this team in Scouting Observation yet." />;
   const freq = [...playStats].sort((a, b) => b.n - a.n).slice(0, 5);
   const eff = [...playStats].filter(x => x.n >= 3).sort((a, b) => b.ppp - a.ppp).slice(0, 5);
-  async function link(label, playId) { const next = await saveScoutingPlayLink(teamName, label, playId); setLinks(next); }
+  // Un lien manuel (playId truthy) écrase la correspondance auto ; valeur vide = on retire le lien
+  // manuel et on retombe sur la correspondance par nom (c'est ce qui permet de corriger un mauvais lien).
+  async function link(label, playId) { const next = playId ? await saveScoutingPlayLink(teamName, label, playId) : await unlinkScoutingPlayLink(teamName, label); setLinks(next); }
   const row = (it, c) => {
     const pl = resolveScoutingPlayDiagram(it.label, allPlays, links);
     return (
@@ -17446,9 +17456,9 @@ function RsPlays({ playStats, teamName, isCoach }) {
         </div>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 11, color: PAPER }}>{it.label}</div>
-          {!pl && isCoach && teamName && (
-            <select defaultValue="" onChange={e => e.target.value && link(it.label, e.target.value)} style={{ fontSize: 9.5, color: AMBER, background: "none", border: `1px solid ${LINE}`, borderRadius: 4, marginTop: 2 }}>
-              <option value="">Link to Playbook diagram…</option>
+          {isCoach && teamName && (
+            <select value={links[it.label] || ""} onChange={e => link(it.label, e.target.value)} style={{ fontSize: 9.5, color: AMBER, background: "none", border: `1px solid ${LINE}`, borderRadius: 4, marginTop: 2, maxWidth: 230 }}>
+              <option value="">{pl ? `Auto-matched: ${pl.label} (change…)` : "Link to Playbook diagram…"}</option>
               {allPlays.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
             </select>
           )}
