@@ -4483,21 +4483,21 @@ function screenCoverageCompareBreakdown(plays, rawLabels, aliasMap) {
 // optional "Other" bucket grouping the rest (used for the "Plays" donut).
 function topBucket(plays, labels, n, withOther) {
   const raw = groupBreakdown(plays, labels);
-  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : la somme des % dépassait largement 100%,
-  // ex. 124% sur "Efficiency by playtype") : "freq" venait de groupBreakdown, calculé par
-  // rapport au total de TOUTES les actions offensives/défensives — or une action de Rebound
-  // peut légitimement porter un second tag Playtype en même temps, comptant alors deux fois
-  // sur ce même dénominateur. Recalculé ici par rapport au total des OCCURRENCES DE TAG DE
-  // CETTE CATÉGORIE (comme le fait déjà categoryBreakdown pour "Plays"), pour que la somme
-  // fasse toujours exactement 100%, quel que soit le cumul de tags sur une même action.
-  const categoryTotal = raw.reduce((s, g) => s + g.count, 0);
-  const normalized = raw.map(g => ({ ...g, freq: categoryTotal ? (100 * g.count) / categoryTotal : 0 }));
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : un même playtype, ex. PnR, n'affichait pas le
+  // même % de fréquence sur le widget "Efficiency by playtype" que sur le Scouting Report /
+  // l'export PDF, "OFFENSIVE PLAYTYPES"). Les deux calculaient "freq" avec des dénominateurs
+  // différents : ici, la somme des comptes DÉJÀ DÉDUPLIQUÉS de chaque label (ce qui compte deux
+  // fois une action qui porte deux tags Playtype à la fois) ; côté Scouting Report (rankStat),
+  // le nombre total d'actions DISTINCTES de la catégorie. On aligne les deux sur cette seconde
+  // définition (comme rankStat), pour que le même playtype affiche partout le même %.
+  const totalPoss = dedupeWholePossessionPlays(plays).length;
+  const normalized = raw.map(g => ({ ...g, freq: totalPoss ? (100 * g.count) / totalPoss : 0 }));
   const items = normalized.sort((a, b) => b.count - a.count).slice(0, n);
   const top = items.map(i => ({ name: i.label, value: i.count, freq: i.freq, pppp: i.pppp, open: i.open, tov: i.tov }));
   if (withOther) {
     const used = top.reduce((s, i) => s + i.value, 0);
-    const other = categoryTotal - used;
-    if (other > 0) top.push({ name: "Autres", value: other, freq: categoryTotal ? (100 * other) / categoryTotal : 0, pppp: null, open: null, tov: null });
+    const other = totalPoss - used;
+    if (other > 0) top.push({ name: "Autres", value: other, freq: totalPoss ? (100 * other) / totalPoss : 0, pppp: null, open: null, tov: null });
   }
   return top;
 }
@@ -17669,6 +17669,50 @@ function RsScreenDefense({ overall, bySpacing }) {
   );
 }
 
+// "General stats" à l'écran : demandé par l'utilisateur pour que le site affiche exactement ce que
+// montre l'export PDF (section "General stats", REP_GROUPS) — toutes les stats par groupe, avec le
+// même rang (D = parmi les équipes chargées dans Scouting, P = rang de poule réel NM1), pas seulement
+// les forces/faiblesses (ScoutingStatsPanel) ou le comparatif avec notre équipe (RsComparison).
+function RsGeneralStats({ t, teamName, rankOf, pouleRankOf, total, pouleName }) {
+  // Sécurité (évite de faire planter TOUT l'écran si une équipe n'a pas encore de stats, ou si une
+  // clé de REP_GROUPS n'est pas (ou plus) dans SCOUT_STAT_SCHEMA) : on filtre aussi sur sc défini.
+  if (!t || !t.stats) return <RsEmpty text="No stats synchronised for this team yet." />;
+  const rankCol = r => (!r ? "#5C6470" : r.rank <= 5 ? RS_GRN : r.rank > r.total - 5 ? RS_RED : "#8B93A1");
+  const groups = REP_GROUPS.map(([title, keys]) => [title, keys.filter(k => {
+    const v = t.stats[k];
+    return v !== undefined && v !== null && !isNaN(v) && SCOUT_STAT_SCHEMA.some(s => s.key === k);
+  })]).filter(([, keys]) => keys.length);
+  if (!groups.length) return <RsEmpty text="No stats synchronised for this team yet." />;
+  return (
+    <div>
+      <div style={{ fontSize: 9.5, color: "#5C6470", marginBottom: 8 }}>
+        D = {teamName}'s rank among {total} teams loaded in Scouting · P = their rank in {pouleName || "their poule"} · green = top 5, red = bottom 5
+      </div>
+      <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, paddingRight: 4, marginBottom: 4 }}>
+        {rankOf && <div style={{ width: 40, fontSize: 9.5, fontWeight: 700, color: "#5C6470", textAlign: "center" }}>D</div>}
+        {pouleRankOf && <div style={{ width: 40, fontSize: 9.5, fontWeight: 700, color: "#5C6470", textAlign: "center" }}>P</div>}
+      </div>
+      {groups.map(([title, keys]) => (
+        <div key={title} style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 10.5, fontWeight: 700, color: AMBER, marginBottom: 4 }}>{title}</div>
+          {keys.map(k => {
+            const sc = SCOUT_STAT_SCHEMA.find(s => s.key === k);
+            const rD = rankOf ? rankOf(k, teamName) : null, rP = pouleRankOf ? pouleRankOf(k, teamName) : null;
+            return (
+              <div key={k} style={{ display: "flex", alignItems: "center", padding: "4px 8px", borderRadius: 5, background: "rgba(255,255,255,0.03)", marginBottom: 2 }}>
+                <div style={{ flex: 1, fontSize: 11.5, color: PAPER }}>{sc.label}</div>
+                <div style={{ width: 64, textAlign: "right", fontSize: 11.5, fontWeight: 700, color: PAPER }}>{repFmt(k, t.stats[k])}</div>
+                {rankOf && <div style={{ width: 40, textAlign: "center", fontSize: 10, fontWeight: 700, color: rankCol(rD) }}>{rD ? `#${rD.rank}` : "–"}</div>}
+                {pouleRankOf && <div style={{ width: 40, textAlign: "center", fontSize: 10, fontWeight: 700, color: rankCol(rP) }}>{rP ? `#${rP.rank}` : "–"}</div>}
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function RsComparison({ ourStats, t, ourName, teamName, rankOf, pouleRankOf, total, pouleName }) {
   if (!ourStats || !Object.keys(ourStats).length) return <RsEmpty text="Our team stats are not available yet (import box scores first)." />;
   const groups = [
@@ -18247,6 +18291,9 @@ function ScoutingReportOnScreen({ teamName, teams, ourStats, ourName = "Our team
     <div>
       {injuredPanel}
       <RsCard title="Match context" sub="Standing and form computed from the FFBB box scores synchronised in HoopTrack"><RsStandings st={Df.st} teamName={teamName} ourName={ourName} pouleName={Df.pouleName} recentGames={Df.recentGames} /></RsCard>
+      <RsCard title="General stats" sub={`D = ${teamName}'s rank among ${Df.total} teams loaded in Scouting · P = their rank in ${Df.pouleName || "their poule"} · green = top 5, red = bottom 5`}>
+        <RsGeneralStats t={Df.t} teamName={teamName} rankOf={Df.rankOf} pouleRankOf={Df.pouleRankOf} total={Df.total} pouleName={Df.pouleName} />
+      </RsCard>
       <RsCard title="Strengths and weaknesses" sub="Rank 1-5 or top 3 playtypes = strength · bottom 5 or 3 worst playtypes = weakness (among teams loaded in Scouting)">
         <ScoutingStatsPanel teamName={teamName} teams={teams} />
       </RsCard>
@@ -19431,10 +19478,16 @@ const RANK_GROUPS = [
 const RANK_SAMPLE_WARN = 5;
 
 function rankStat(plays, label) {
-  const m = dedupeWholePossessionPlays(plays.filter(p => tagIsSet(p.tags, label)), label);
+  const m = dedupeWholePossessionPlays(plays.filter(p => tagIsSet(p.tags, label)));
   if (!m.length) return null;
   const pts = m.reduce((s, p) => s + playPoints(p.tags), 0);
-  return { n: m.length, freq: (100 * m.length) / plays.length, ppp: pts / m.length };
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : la somme des % de fréquence des playtypes ne
+  // faisait pas 100%) : le numérateur (m) est dédupliqué par __shotId (un même tir peut avoir
+  // plusieurs lignes, une par joueur flaggé par SportsCode), mais le dénominateur utilisait encore
+  // le nombre BRUT de lignes de "plays" — gonflé par ces doublons — au lieu du nombre de
+  // possessions réelles. On déduplique donc aussi le dénominateur de la même façon.
+  const totalPoss = dedupeWholePossessionPlays(plays).length;
+  return { n: m.length, freq: totalPoss ? (100 * m.length) / totalPoss : 0, ppp: pts / m.length };
 }
 
 function useAllObservations(matchFilter, side = "off") {
@@ -20100,7 +20153,18 @@ async function fetchNm1ClassicTeams() {
   // Stats LiveStats (contre-attaque, 2e chance, après balles perdues, banc, intérieurs) : bonus, non bloquant.
   try {
     const ls = computeLivestatStats(await syncLeagueLivestats());
-    teams.forEach(t => { const l = ls[normTag(t.name)]; if (l) t.stats = { ...t.stats, ...l }; });
+    // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : le groupe LiveStats restait vide pour toutes les
+    // équipes malgré une synchro qui aboutit) : les noms d'équipe LiveStats (FIBA/Genius Sports, ex.
+    // "C'CHARTRES BASKET MASCULIN") ne sont presque jamais identiques aux noms du tableau NM1 "Classic"
+    // (ex. "Chartres") — une égalité stricte sur normTag() ne matchait donc JAMAIS. On tolère maintenant
+    // que l'un des deux noms normalisés contienne l'autre, comme fait déjà ailleurs pour rapprocher des
+    // noms venant de sources différentes.
+    const lsList = Object.entries(ls);
+    teams.forEach(t => {
+      const tn = normTag(t.name);
+      const hit = ls[tn] || lsList.find(([k]) => k.includes(tn) || tn.includes(k));
+      if (hit) t.stats = { ...t.stats, ...(Array.isArray(hit) ? hit[1] : hit) };
+    });
   } catch { /* pas bloquant */ }
   return teams;
 }
