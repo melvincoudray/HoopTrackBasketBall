@@ -4207,21 +4207,20 @@ function MontageTab({ isCoach }) {
   // anciens (créés avant cet ajout), les vidéos externes et les slides n'ont pas de catégorie —
   // regroupés sous "Other" plutôt qu'ignorés, pour que la somme des catégories reste cohérente
   // avec la durée totale affichée.
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : la répartition ne suivait pas la structure du
+  // montage) : ce n'est pas l'étiquette propre à chaque clip qui doit décider sa catégorie, mais sa
+  // POSITION dans le montage — tout ce qui suit un slide "Side announcement" (vidéos ET slides)
+  // appartient à cette catégorie jusqu'au PROCHAIN slide "Side announcement", quel que soit le côté
+  // d'origine du clip. Ce qui précède le premier "Side announcement" tombe dans "Other".
   const catSec = { offense: 0, defense: 0, player: 0, other: 0 };
+  let curCat = "other";
   items.forEach(i => {
-    if (i.type === "slide") {
-      const d = Math.max(0, i.duration || 0);
-      // Demandé par l'utilisateur : un slide "Side announcement" (Offense / Defense / Players)
-      // compte maintenant dans la même répartition que les clips, selon le côté choisi dessus —
-      // plutôt que de tomber systématiquement dans "Other".
-      const side = i.kind === "side" ? (i.ctx || {}).side : null;
-      catSec[side === "off" ? "offense" : side === "def" ? "defense" : side === "player" ? "player" : "other"] += d;
-      return;
+    if (i.type === "slide" && i.kind === "side") {
+      const side = (i.ctx || {}).side;
+      curCat = side === "off" ? "offense" : side === "def" ? "defense" : side === "player" ? "player" : "other";
     }
-    if (i.type !== "clip") return;
-    const d = Math.max(0, i.trimEnd - i.trimStart);
-    const key = catSec[i.category] !== undefined ? i.category : "other";
-    catSec[key] += d;
+    const d = i.type === "clip" ? Math.max(0, i.trimEnd - i.trimStart) : i.type === "slide" ? Math.max(0, i.duration || 0) : 0;
+    catSec[curCat] += d;
   });
   const sources = sourceKeys.map(k => items.find(i => i.sourceKey === k));
   const sel = { ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "auto", minWidth: 200 };
