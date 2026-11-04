@@ -4490,23 +4490,37 @@ function screenCoverageCompareBreakdown(plays, rawLabels, aliasMap) {
 // optional "Other" bucket grouping the rest (used for the "Plays" donut).
 function topBucket(plays, labels, n, withOther) {
   const raw = groupBreakdown(plays, labels);
-  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : un même playtype, ex. PnR, n'affichait pas le
-  // même % de fréquence sur le widget "Efficiency by playtype" que sur le Scouting Report /
-  // l'export PDF, "OFFENSIVE PLAYTYPES"). Les deux calculaient "freq" avec des dénominateurs
-  // différents : ici, la somme des comptes DÉJÀ DÉDUPLIQUÉS de chaque label (ce qui compte deux
-  // fois une action qui porte deux tags Playtype à la fois) ; côté Scouting Report (rankStat),
-  // le nombre total d'actions DISTINCTES de la catégorie. On aligne les deux sur cette seconde
-  // définition (comme rankStat), pour que le même playtype affiche partout le même %.
-  const totalPoss = dedupeWholePossessionPlays(plays).length;
-  const normalized = raw.map(g => ({ ...g, freq: totalPoss ? (100 * g.count) / totalPoss : 0 }));
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur, en deux temps) : un même playtype (ex. PnR)
+  // n'affichait pas le même % sur le widget "Efficiency by playtype" que sur le Scouting Report
+  // ("OFFENSIVE PLAYTYPES") — PREMIÈRE correction : aligner le dénominateur sur le nombre total
+  // d'actions distinctes (comme rankStat). Mais ce dénominateur inclut aussi les actions SANS
+  // aucun tag Playtype, donc la somme des % ne faisait plus 100% (84% signalé). On revient au
+  // dénominateur "somme des comptes de CETTE catégorie" (qui somme TOUJOURS à 100%, par
+  // construction), et on applique maintenant EXACTEMENT la même définition côté Scouting Report
+  // (voir categoryFreqMap, utilisé par repGatherReportData) — les deux écrans affichent donc à la
+  // fois le même % par playtype ET une somme de 100%.
+  const categoryTotal = raw.reduce((s, g) => s + g.count, 0);
+  const normalized = raw.map(g => ({ ...g, freq: categoryTotal ? (100 * g.count) / categoryTotal : 0 }));
   const items = normalized.sort((a, b) => b.count - a.count).slice(0, n);
   const top = items.map(i => ({ name: i.label, value: i.count, freq: i.freq, pppp: i.pppp, open: i.open, tov: i.tov }));
   if (withOther) {
     const used = top.reduce((s, i) => s + i.value, 0);
-    const other = totalPoss - used;
-    if (other > 0) top.push({ name: "Autres", value: other, freq: totalPoss ? (100 * other) / totalPoss : 0, pppp: null, open: null, tov: null });
+    const other = categoryTotal - used;
+    if (other > 0) top.push({ name: "Autres", value: other, freq: categoryTotal ? (100 * other) / categoryTotal : 0, pppp: null, open: null, tov: null });
   }
   return top;
+}
+// Même définition de fréquence que topBucket ci-dessus (somme des comptes DÉDUPLIQUÉS de
+// cette catégorie de labels = dénominateur, donc la somme des % fait toujours 100%) mais
+// retourne un objet { [label]: {n, freq, ppp} } comme le faisait rankStat — utilisé par
+// repGatherReportData (PT.teams / PT.own) pour que le Scouting Report affiche EXACTEMENT les
+// mêmes % que le widget "Efficiency by playtype" pour le même ensemble d'actions.
+function categoryFreqMap(plays, labels) {
+  const items = groupBreakdown(plays, labels);
+  const total = items.reduce((s, g) => s + g.count, 0);
+  const out = {};
+  items.forEach(g => { out[g.label] = { n: g.count, freq: total ? (100 * g.count) / total : 0, ppp: g.pppp }; });
+  return out;
 }
 
 // Comme groupBreakdown, mais la fréquence de chaque item est calculatede par rapport au TOTAL
@@ -16662,7 +16676,11 @@ async function repGatherReportData({ teamName, teams, ourStats, ourName = "Our t
   try {
     const cats = currentObservationTagCategories();
     PT.labels = PLAYTYPES_LIST(cats);
-    const calc = plays => { const o = {}; PT.labels.forEach(l => { const r = rankStat(plays, l); if (r) o[l] = r; }); return o; };
+    // categoryFreqMap (pas rankStat) pour que les % de fréquence affichés ici (Scouting Report,
+    // "OFFENSIVE/DEFENSIVE PLAYTYPES") soient calculés EXACTEMENT comme sur le widget "Efficiency
+    // by playtype" (même dénominateur = somme des comptes de la catégorie) — même % par playtype,
+    // et une somme qui fait toujours 100%.
+    const calc = plays => categoryFreqMap(plays, PT.labels);
     const obs = (await storeGet("scouting_observations")) || {};
     Object.entries(obs).forEach(([n, tm]) => { const pl = observationIncludedPlays(tm); if (normTag(n) === normTag(teamName)) PT.myPlays = pl; PT.teams[n] = { off: calc(pl.filter(isOffense)), def: calc(pl.filter(isDefense)) }; });
     // BUG RÉEL CORRIGÉ (demandé par l'utilisateur) : "nos" stats (playtypes, défense d'écran…)
