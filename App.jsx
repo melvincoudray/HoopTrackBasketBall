@@ -700,6 +700,19 @@ const SCOUT_STAT_SCHEMA = [
   { key: "pct3tst", label: "3pt shot frequency (share of shots attempted)", pct: true, group: "Shooting" },
   { key: "blk100", label: "Blocks / 100 poss", group: "Ratings" },
   { key: "stl100", label: "Steals / 100 poss", group: "Ratings" },
+  // Issues des LiveStats FIBA (fibalivestats.dcd.shared.geniussports.com), cumulées sur tous les
+  // matchs NM1 déjà joués puis moyennées par match ; lien id FFBB -> id LiveStats trouvé dans le
+  // calendrier officiel (voir netlify/functions/ffbb-nm1-matches.js, mode=livestat).
+  { key: "fbPts", label: "Fast break points", group: "Livestat" },
+  { key: "fbPtsPct", label: "% of points on fast break", pct: true, group: "Livestat" },
+  { key: "scPts", label: "Second chance points", group: "Livestat" },
+  { key: "scPtsPct", label: "% of points on 2nd chance", pct: true, group: "Livestat" },
+  { key: "toPts", label: "Points off turnovers", group: "Livestat" },
+  { key: "toPtsPct", label: "% of points off turnovers", pct: true, group: "Livestat" },
+  { key: "benchPts", label: "Bench points", group: "Livestat" },
+  { key: "benchPtsPct", label: "% of points from bench", pct: true, group: "Livestat" },
+  { key: "paintPts", label: "Points in the paint", group: "Livestat" },
+  { key: "paintPtsPct", label: "% of points in the paint", pct: true, group: "Livestat" },
   // Métriques propres aux exports FIBA — gardées sous leur nom d'origine (pas retraduites)
   // pour éviter de leur donner un sens que je ne suis pas sûr de connaître avec certitude.
   { key: "fgAtt", label: "FG Att (FIBA)", group: "FIBA (advanced)" },
@@ -15382,7 +15395,15 @@ function DrawExportPanel({ book, teamLogo, scoutingTeams, onSetClub, onClose }) 
   const [msg, setMsg] = useState("");
   const club = book.club || DRAW_OWN;
   const logoUrl = club === DRAW_OWN ? (teamLogo || null) : (scoutingTeams?.[club]?.logo || null);
-  const pages = useMemo(() => drawBuildPages(book, title || book.name, cols, logoUrl), [book, title, cols, logoUrl]);
+  const [cleanLogoUrl, setCleanLogoUrl] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    if (!logoUrl) { setCleanLogoUrl(null); return; }
+    // Nettoie le fond carré éventuel du logo pour conserver la transparence réelle, comme sur le scouting report.
+    logoClean(logoUrl).then(u => { if (alive) setCleanLogoUrl(u); }).catch(() => { if (alive) setCleanLogoUrl(logoUrl); });
+    return () => { alive = false; };
+  }, [logoUrl]);
+  const pages = useMemo(() => drawBuildPages(book, title || book.name, cols, cleanLogoUrl || logoUrl), [book, title, cols, cleanLogoUrl, logoUrl]);
   const filename = `playbook_${(title || book.name).replace(/[^\w\-]+/g, "_")}_${todayLocal()}.pdf`;
 
   async function doExport() {
@@ -15889,7 +15910,15 @@ function DrawPdfViewer({ title: title0, plays, teamName, logoUrl, onClose }) {
     return () => { window.removeEventListener("resize", on); document.removeEventListener("keydown", onKey); };
   }, []);
   const book = useMemo(() => ({ id: "staff-" + teamName, name: title0, plays, club: teamName }), [plays, title0, teamName]);
-  const pages = useMemo(() => drawBuildPages(book, title0, "auto", logoUrl), [book, title0, logoUrl]);
+  const [cleanLogoUrl, setCleanLogoUrl] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    if (!logoUrl) { setCleanLogoUrl(null); return; }
+    // Nettoie le fond carré éventuel du logo pour conserver la transparence réelle, comme sur le scouting report.
+    logoClean(logoUrl).then(u => { if (alive) setCleanLogoUrl(u); }).catch(() => { if (alive) setCleanLogoUrl(logoUrl); });
+    return () => { alive = false; };
+  }, [logoUrl]);
+  const pages = useMemo(() => drawBuildPages(book, title0, "auto", cleanLogoUrl || logoUrl), [book, title0, cleanLogoUrl, logoUrl]);
   const filename = `playbook_${String(title0).replace(/[^\w\-]+/g, "_")}_${todayLocal()}.pdf`;
   const fit = Math.min(1, (vw - 40) / 900), sc = fit * zoom;
   async function doExport() {
@@ -16086,7 +16115,8 @@ function ScoutingStaffPanel({ teamName, isCoach }) {
 // Onglet "Stats" du Scouting Report : forces (rang 1 à 5 de la ligue) et faiblesses (rang 20 à 26) statistiques d'une équipe.
 // Rang calculé parmi toutes les équipes de Scouting ; une stat "moins = mieux" (balles perdues, points encaissés…) est classée à l'envers.
 const SCOUT_SW_KEYS = ["pts", "ptse", "pctv", "pct2", "pct3", "pctlf", "efg", "ts", "ftafga", "ro", "rd", "rt", "pctro", "pctrd", "pd", "bp", "pctbp", "padbp", "ct", "int", "fte",
-  "ortg", "drtg", "nrtg", "dPct2", "dPct3", "dEfg", "dPctbp", "dFtafga", "oPctro", "oRo", "oRt", "oBp", "poss"];
+  "ortg", "drtg", "nrtg", "dPct2", "dPct3", "dEfg", "dPctbp", "dFtafga", "oPctro", "oRo", "oRt", "oBp", "poss",
+  "t2", "t3", "pct3poss", "fbPts", "fbPtsPct", "scPts", "scPtsPct", "toPts", "toPtsPct", "benchPts", "benchPtsPct", "paintPts", "paintPtsPct"];
 function ScoutingStatsPanel({ teamName, teams }) {
   const t = teams[teamName];
   // Rang de poule (en plus du rang "parmi les équipes chargées dans Scouting" déjà calculé) :
@@ -16148,7 +16178,8 @@ function ScoutingStatsPanel({ teamName, teams }) {
 const REP = { OR: [232, 115, 26], GREY: [91, 107, 133], GRN: [31, 157, 107], RED: [217, 69, 59], INK: [27, 36, 51], MUTE: [138, 148, 166], BG: [243, 244, 248], LGRN: [221, 242, 232], LRED: [251, 225, 222], LOR: [251, 227, 207], WHITE: [255, 255, 255] };
 const REP_GROUPS = [
   ["PLAYMAKING", ["pts", "pd", "padbp", "pctpad", "poss", "ortg"]],
-  ["SHOOTING", ["pct2", "pct3", "pctlf", "efg", "ts", "pct3tst", "ftafga"]],
+  ["SHOOTING", ["pct2", "t2", "pct3", "t3", "pctlf", "efg", "ts", "pct3tst", "pct3poss", "ftafga"]],
+  ["LIVESTATS", ["fbPts", "fbPtsPct", "scPts", "scPtsPct", "toPts", "toPtsPct", "benchPts", "benchPtsPct", "paintPts", "paintPtsPct"]],
   ["REBOUNDING", ["rt", "ro", "pctro", "pctrd"]],
   ["DEFENSE", ["ptse", "drtg", "int", "ct", "fte"]],
   ["ADVANCED", ["nrtg", "blk100", "stl100"]],
@@ -17642,7 +17673,8 @@ function RsComparison({ ourStats, t, ourName, teamName, rankOf, pouleRankOf, tot
   if (!ourStats || !Object.keys(ourStats).length) return <RsEmpty text="Our team stats are not available yet (import box scores first)." />;
   const groups = [
     ["Playmaking", ["pts", "pd", "padbp", "pctpad", "poss", "ortg"]],
-    ["Shooting", ["pct2", "pct3", "pctlf", "efg", "ts", "pct3tst", "ftafga"]],
+    ["Shooting", ["pct2", "t2", "pct3", "t3", "pctlf", "efg", "ts", "pct3tst", "pct3poss", "ftafga"]],
+    ["Livestats", ["fbPts", "fbPtsPct", "scPts", "scPtsPct", "toPts", "toPtsPct", "benchPts", "benchPtsPct", "paintPts", "paintPtsPct"]],
     ["Rebounding", ["rt", "ro", "pctro", "pctrd"]],
     ["Defense", ["ptse", "drtg", "int", "ct", "fte"]],
     ["Advanced", ["nrtg", "blk100", "stl100"]],
@@ -20065,6 +20097,11 @@ async function fetchNm1ClassicTeams() {
     const opp = computeOpponentStats(await syncLeagueGames());
     teams.forEach(t => { const o = opp[normTag(t.name)]; if (o) t.stats = { ...t.stats, ...o }; });
   } catch { /* pas bloquant */ }
+  // Stats LiveStats (contre-attaque, 2e chance, après balles perdues, banc, intérieurs) : bonus, non bloquant.
+  try {
+    const ls = computeLivestatStats(await syncLeagueLivestats());
+    teams.forEach(t => { const l = ls[normTag(t.name)]; if (l) t.stats = { ...t.stats, ...l }; });
+  } catch { /* pas bloquant */ }
   return teams;
 }
 
@@ -20126,6 +20163,66 @@ function computeOpponentStats(games) {
     if (fga > 0) { st.dEfg = (100 * (o.r2 + 1.5 * o.r3)) / fga; st.dFtafga = o.lft / fga; }
     if (poss > 0) st.dPctbp = (100 * o.bp) / poss;
     Object.keys(st).forEach(k => { st[k] = Math.round(st[k] * 100) / 100; });
+    out[key] = st;
+  });
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// LiveStats FIBA (points contre-attaque, 2e chance, après balles perdues, banc, intérieurs) :
+// chaque match du calendrier NM1 (mode=league) porte désormais aussi l'id LiveStats trouvé sur
+// la page ; on va chercher, pour chaque match NON encore en cache, le détail du match
+// (mode=livestat) qui proxy fibalivestats.dcd.shared.geniussports.com côté serveur (CORS).
+// Un match sans diffusion LiveStats (page "difficultés techniques") répond 404 : il est juste
+// réessayé au prochain sync, sans bloquer le reste.
+// ---------------------------------------------------------------------------
+const LIVESTAT_KEYS = ["fbPts", "scPts", "toPts", "benchPts", "paintPts"];
+async function syncLeagueLivestats() {
+  const store = (await storeGet("league_livestats")) || { games: {} };
+  const games = store.games || {};
+  const res = await fetch("/.netlify/functions/ffbb-nm1-matches?mode=league");
+  const list = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(list.error || "FFBB league matches unavailable (" + res.status + ").");
+  const queue = (list.matches || []).filter(m => m.livestat && !games[m.id]);
+  let added = 0;
+  await Promise.all([0, 1, 2, 3, 4].map(async () => {
+    while (queue.length) {
+      const m = queue.shift();
+      try {
+        const r = await fetch("/.netlify/functions/ffbb-nm1-matches?mode=livestat&id=" + encodeURIComponent(m.livestat));
+        if (!r.ok) continue; // pas de données LiveStats pour ce match : réessayé au prochain sync
+        const d = await r.json();
+        if (!d || !d.teams || d.teams.length < 2) continue;
+        // "pts" (total du match) est gardé en plus des 5 clés affichées : il sert uniquement au calcul du "% du
+        // total des points" (fbPtsPct, etc. — demandé par l'utilisateur), jamais affiché tel quel ici.
+        games[m.id] = { teams: d.teams.slice(0, 2).map(t => ({ name: t.name, pts: Number(t.pts) || 0, ...Object.fromEntries(LIVESTAT_KEYS.map(k => [k, Number(t[k]) || 0])) })) };
+        added++;
+      } catch { /* feuille LiveStats indisponible : réessayée au prochain sync */ }
+    }
+  }));
+  if (added) await storeSet("league_livestats", { games, updatedAt: Date.now() });
+  return games;
+}
+// -> { [nom normalisé]: moyenne par match des 5 stats LiveStats + leur part en % des points marqués }
+function computeLivestatStats(games) {
+  const acc = {};
+  Object.values(games).forEach(g => {
+    if (!g.teams || g.teams.length < 2) return;
+    g.teams.forEach(t => {
+      const key = normTag(t.name);
+      const s = acc[key] || (acc[key] = { n: 0, pts: 0, sum: {} });
+      s.n++; s.pts += t.pts || 0;
+      LIVESTAT_KEYS.forEach(k => { s.sum[k] = (s.sum[k] || 0) + (t[k] || 0); });
+    });
+  });
+  const out = {};
+  Object.entries(acc).forEach(([key, { n, pts, sum }]) => {
+    if (!n) return;
+    const st = {};
+    LIVESTAT_KEYS.forEach(k => {
+      st[k] = Math.round((sum[k] / n) * 10) / 10;
+      if (pts > 0) st[k + "Pct"] = Math.round((sum[k] / pts) * 1000) / 10; // % du total des points marqués (sur les mêmes matchs)
+    });
     out[key] = st;
   });
   return out;
