@@ -4207,6 +4207,47 @@ function screenCoverageColorPdf(name) {
   return REP.GREY;
 }
 
+// Équivalences demandées par l'utilisateur pour le comparatif "Screen coverage match-up" de
+// Scouting Report Stats UNIQUEMENT (ex. Step = Yellow) : déclarées par lui dans Backup → "Screen
+// coverage equivalences", jamais codées en dur ici — voir loadScreenCoverageCompareAliases /
+// ScreenCoverageAliasesCard. Ailleurs sur le site (onglets My Team et Observation, donuts "Screen
+// defense played", etc.) ces tags restent bien distincts : cette correspondance n'est utilisée
+// que par screenCoverageCompareBreakdown, jamais en dehors du comparatif, et ne modifie aucun tag
+// enregistré (contrairement aux équivalences générales de tags/joueurs, qui réécrivent les
+// données stockées).
+async function loadScreenCoverageCompareAliases() {
+  try {
+    const v = await storeGet("screen_coverage_compare_aliases");
+    return Array.isArray(v) ? v.filter(a => a && a.from && a.to) : [];
+  } catch (e) { return []; }
+}
+
+// Comme categoryBreakdown, mais fusionne d'abord les tags bruts qui partagent le même alias
+// (aliasMap, construit via buildTagAliasMap à partir de loadScreenCoverageCompareAliases) en un
+// seul bucket avant de calculer count/freq/pppp/open/tov sur l'union réelle des actions (pas une
+// moyenne des deux groupes séparés). Un tag sans équivalence déclarée reste son propre bucket.
+function screenCoverageCompareBreakdown(plays, rawLabels, aliasMap) {
+  const byCanon = new Map();
+  rawLabels.forEach(raw => {
+    const canon = (aliasMap && aliasMap.size) ? resolveTagAlias(raw, aliasMap) : raw;
+    if (!byCanon.has(canon)) byCanon.set(canon, []);
+    byCanon.get(canon).push(raw);
+  });
+  const items = [...byCanon.entries()].map(([canon, raws]) => {
+    const matching = dedupeWholePossessionPlays(plays.filter(p => raws.some(r => tagIsSet(p.tags, r))), canon);
+    const pts = matching.reduce((s, p) => s + playPoints(p.tags), 0);
+    return {
+      label: canon,
+      count: matching.length,
+      pppp: matching.length ? pts / matching.length : 0,
+      open: openPct(matching),
+      tov: tovPct(matching),
+    };
+  }).filter(g => g.count > 0);
+  const total = items.reduce((s, g) => s + g.count, 0);
+  return items.map(g => ({ ...g, freq: total ? (100 * g.count) / total : 0 }));
+}
+
 // Reproduit la logique du Dashboard original : top N tags par fréquence, avec un
 // optional "Other" bucket grouping the rest (used for the "Plays" donut).
 function topBucket(plays, labels, n, withOther) {
@@ -16168,7 +16209,7 @@ function repStripInjured(D, injuredNames) {
 // Rassemble toutes les données du Scouting Report (standings, playtypes, LiveStats, FFBB, tirs contestés,
 // plays) en un seul passage — utilisé À LA FOIS par l'export PDF et par l'affichage à l'écran de l'onglet Stats,
 // pour ne calculer qu'une seule fois (et toujours de la même façon) ce qui alimente les deux.
-async function repGatherReportData({ teamName, teams, ourStats, ourName = "Our team", onProgress }) {
+async function repGatherReportData({ teamName, teams, ourStats, ourName = "Our team", onProgress, matchFilter }) {
   let games = {};
   try { games = (await storeGet("league_games"))?.games || {}; } catch { /* classement indisponible */ }
   const all = { ...(ourStats && Object.keys(ourStats).length ? { [ourName]: { stats: ourStats } } : {}), ...teams };
@@ -16210,7 +16251,12 @@ async function repGatherReportData({ teamName, teams, ourStats, ourName = "Our t
     const calc = plays => { const o = {}; PT.labels.forEach(l => { const r = rankStat(plays, l); if (r) o[l] = r; }); return o; };
     const obs = (await storeGet("scouting_observations")) || {};
     Object.entries(obs).forEach(([n, tm]) => { const pl = observationIncludedPlays(tm); if (normTag(n) === normTag(teamName)) PT.myPlays = pl; PT.teams[n] = { off: calc(pl.filter(isOffense)), def: calc(pl.filter(isDefense)) }; });
-    const idx = (await storeGet("match_index")) || [];
+    // BUG RÉEL CORRIGÉ (demandé par l'utilisateur) : "nos" stats (playtypes, défense d'écran…)
+    // prenaient TOUS nos matchs codés, sans tenir compte des matchs sélectionnés ailleurs dans
+    // le site (sélecteur de matchs / saison) — matchFilter est null quand "tous les matchs" est
+    // sélectionné (rien à filtrer), ou un Set de clés "date||adversaire" sinon, exactement comme
+    // pour useAllObservations plus bas.
+    const idx = ((await storeGet("match_index")) || []).filter(m => !matchFilter || matchFilter.has(matchKey(m.date, m.opponent)));
     const own = [];
     for (const m of idx) { const d = await storeGet("match:" + m.id); ((d && d.plays) || []).forEach(p => own.push(p)); }
     if (own.length) PT.own = { off: calc(own.filter(isOffense)), def: calc(own.filter(isDefense)) };
@@ -16285,33 +16331,48 @@ async function repGatherReportData({ teamName, teams, ourStats, ourName = "Our t
     screenDefOverall = [...rawTheirDef].sort((a, b) => b.count - a.count)
       .map(g => ({ name: g.label, n: g.count, freq: g.freq, pppp: g.pppp, open: g.open, tov: g.tov }));
     screenDefBySpacing = computeSpacingScreenDefenseBreakdown(theirDefPlays, cats);
-    // BUG RÉEL CORRIGÉ (signalé par l'utilisateur, capture à l'appui : "Step" apparaissait avec
-    // beaucoup de volume dans le comparatif alors qu'il n'existe nulle part dans "Screen defense
-    // played", le donut de NOS propres matchs) : Scouting Observation et nos matchs (Import/Team)
-    // ont CHACUN leur propre liste de tags "Screen defense", configurée indépendamment (voir
-    // currentObservationTagCategories vs currentTagCategories) — categoryBreakdown cherchait "Step"
-    // (encore présent dans la config Observation) dans NOS matchs, où il ne reste que comme tag
-    // brut sur d'anciens imports, sans rapport avec la couverture que nos matchs suivent
-    // aujourd'hui (Yellow/Green/Red…). Le comparatif ne garde désormais que les couvertures encore
-    // configurées des DEUX côtés à la fois (intersection) — "Step" en sort, comme demandé.
+    // Scouting Observation et nos matchs (Import/Team) ont CHACUN leur propre liste de tags
+    // "Screen defense", configurée indépendamment (voir currentObservationTagCategories vs
+    // currentTagCategories), et certains tags y désignent la même couverture sous un nom
+    // différent (ex. Step = Yellow). Demandé par l'utilisateur : ce rapprochement ne doit valoir
+    // QUE pour ce comparatif, jamais pour les onglets My Team ou Observation eux-mêmes (qui
+    // doivent garder ces tags bien distincts) — donc pas de modification des tags stockés
+    // (contrairement aux équivalences de Backup), juste un regroupement local au moment de
+    // construire ce tableau, à partir des équivalences déclarées dans Backup → "Screen coverage
+    // equivalences" (jamais codées en dur ici).
     const ownCovLabels = SCREEN_DEFENSE_LIST(currentTagCategories());
-    const compareLabels = covLabels.filter(l => ownCovLabels.some(o => normTag(o) === normTag(l)));
+    const seenCov = new Set();
+    const rawCovLabels = [...covLabels, ...ownCovLabels].filter(l => {
+      const n = normTag(l);
+      if (seenCov.has(n)) return false;
+      seenCov.add(n);
+      return true;
+    });
+    const covAliasMap = buildTagAliasMap(await loadScreenCoverageCompareAliases());
     const toMap = arr => Object.fromEntries(arr.filter(g => g.count).map(g => [g.label, { n: g.count, ppp: g.pppp }]));
+    const theirDefRows = screenCoverageCompareBreakdown(theirDefPlays, rawCovLabels, covAliasMap);
+    const theirOffRows = screenCoverageCompareBreakdown(theirOffPlays, rawCovLabels, covAliasMap);
+    const ownOffRows = screenCoverageCompareBreakdown(ownOffPlays, rawCovLabels, covAliasMap);
+    const ownDefRows = screenCoverageCompareBreakdown(ownDefPlays, rawCovLabels, covAliasMap);
+    const seenLabel = new Set();
+    const compareLabels = [...theirDefRows, ...theirOffRows, ...ownOffRows, ...ownDefRows]
+      .map(g => g.label)
+      .filter(l => { const n = normTag(l); if (seenLabel.has(n)) return false; seenLabel.add(n); return true; });
     screenCompare = {
       labels: compareLabels,
-      theirDef: toMap(categoryBreakdown(theirDefPlays, compareLabels)),
-      theirOff: toMap(categoryBreakdown(theirOffPlays, compareLabels)),
-      ownOff: toMap(categoryBreakdown(ownOffPlays, compareLabels)),
-      ownDef: toMap(categoryBreakdown(ownDefPlays, compareLabels)),
+      theirDef: toMap(theirDefRows),
+      theirOff: toMap(theirOffRows),
+      ownOff: toMap(ownOffRows),
+      ownDef: toMap(ownDefRows),
     };
   } catch { /* catégories indisponibles : la section l'indique */ }
 
   return { t, all, total, rankOf, games, st, pouleName, pouleErr, pouleRankOf, LEAGUE_POULE, recentGames, PT, ptMine, ptList, ptSW, LS, lsErr, myShots, isOpen, isMade, is3, grp, CS, FF, LEAGUE, playLabels, playStats, screenDefOverall, screenDefBySpacing, screenCompare };
 }
 
-async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "Our team", ourLogo, onProgress, scoutShots = [] }) {
+async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "Our team", ourLogo, onProgress, scoutShots = [], matchFilter }) {
   const { jsPDF } = await import("jspdf");
-  const D = await repGatherReportData({ teamName, teams, ourStats, ourName, onProgress });
+  const D = await repGatherReportData({ teamName, teams, ourStats, ourName, onProgress, matchFilter });
   const { t, all, total, rankOf, games, pouleName, pouleRankOf, LEAGUE_POULE, PT, ptMine, ptList, ptSW, FF, LEAGUE, screenDefOverall, screenDefBySpacing, screenCompare } = D;
   let { LS, lsErr } = D;
   // Logos "nettoyés" (fond carré uni retiré) — certains logos enregistrés avant l'arrivée de ce
@@ -17715,23 +17776,23 @@ function RsInjuredPanel({ teamName, players, rosterNames, injured, onToggle }) {
   );
 }
 
-function ScoutingReportOnScreen({ teamName, teams, ourStats, ourName = "Our team", isCoach, players, teamLogo, teamBg, scoutingLayout, displaySettings }) {
+function ScoutingReportOnScreen({ teamName, teams, ourStats, ourName = "Our team", isCoach, players, teamLogo, teamBg, scoutingLayout, displaySettings, matchFilter }) {
   const [D, setD] = useState(null);
   const [err, setErr] = useState("");
   const [progress, setProgress] = useState("");
   const [nonce, setNonce] = useState(0);
   const [injured, setInjured] = useState([]);
   const [rosterNames, setRosterNames] = useState([]);
-  const ctx = useRef({ teams, ourStats, ourName });
-  ctx.current = { teams, ourStats, ourName };
+  const ctx = useRef({ teams, ourStats, ourName, matchFilter });
+  ctx.current = { teams, ourStats, ourName, matchFilter };
   useEffect(() => {
     let alive = true;
     setD(null); setErr(""); setProgress("");
-    repGatherReportData({ teamName, teams: ctx.current.teams, ourStats: ctx.current.ourStats, ourName: ctx.current.ourName, onProgress: (d, n) => alive && setProgress(`Loading league players ${d}/${n}…`) })
+    repGatherReportData({ teamName, teams: ctx.current.teams, ourStats: ctx.current.ourStats, ourName: ctx.current.ourName, matchFilter: ctx.current.matchFilter, onProgress: (d, n) => alive && setProgress(`Loading league players ${d}/${n}…`) })
       .then(d => { if (alive) { setD(d); setProgress(""); } })
       .catch(e => { if (alive) { setErr(String((e && e.message) || e)); setProgress(""); } });
     return () => { alive = false; };
-  }, [teamName, nonce]);
+  }, [teamName, nonce, matchFilter]);
   // Liste des joueurs à cocher "blessé" : chargée à part (léger, indépendant du gros calcul
   // ci-dessus) pour que le panneau apparaisse tout en haut dès l'ouverture de l'onglet.
   useEffect(() => {
@@ -17829,7 +17890,7 @@ function ScoutingReportOnScreen({ teamName, teams, ourStats, ourName = "Our team
   );
 }
 
-function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, initialTeam, ourStats, ourTeamName, ourTeamLogo }) {
+function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, initialTeam, ourStats, ourTeamName, ourTeamLogo, matchFilter }) {
   const [selectedTeam, setSelectedTeam] = useState(initialTeam || "");
   const [exportReport, setExportReport] = useState(null);
   const [exportMsg, setExportMsg] = useState("");
@@ -18120,7 +18181,7 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
                     // Capture EXACTE des fiches individuelles (mêmes visuels qu'à l'écran) avant de
                     // générer le PDF : exportScoutingReportPdf n'a pas accès au DOM/React lui-même.
                     const scoutShots = await captureScoutingCards("scouting-print-content");
-                    await exportScoutingReportPdf({ teamName: selectedTeam, teams: scoutingTeams || {}, ourStats, ourName: ourTeamName || undefined, ourLogo: ourTeamLogo || null, scoutShots, onProgress: (d, n) => setExportMsg(`Generating PDF… league players ${d}/${n}`) });
+                    await exportScoutingReportPdf({ teamName: selectedTeam, teams: scoutingTeams || {}, ourStats, ourName: ourTeamName || undefined, ourLogo: ourTeamLogo || null, scoutShots, matchFilter, onProgress: (d, n) => setExportMsg(`Generating PDF… league players ${d}/${n}`) });
                     setExportMsg("");
                   }
                   catch (e) { setExportMsg("PDF failed (" + (e && e.message || e) + ")"); }
@@ -18131,7 +18192,7 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
               </div>
               {/* Demandé : même ordre que le PDF (Strengths/weaknesses juste après Match context,
                   pas avant tout le reste) — rendu maintenant DANS ScoutingReportOnScreen. */}
-              <ScoutingReportOnScreen teamName={selectedTeam} teams={scoutingTeams || {}} ourStats={ourStats} ourName={ourTeamName || undefined} isCoach={isCoach} players={report.players} teamLogo={teamLogo} teamBg={teamBg} scoutingLayout={scoutingLayout} displaySettings={displaySettings} />
+              <ScoutingReportOnScreen teamName={selectedTeam} teams={scoutingTeams || {}} ourStats={ourStats} ourName={ourTeamName || undefined} isCoach={isCoach} players={report.players} teamLogo={teamLogo} teamBg={teamBg} scoutingLayout={scoutingLayout} displaySettings={displaySettings} matchFilter={matchFilter} />
             </div>
           )}
         </>
@@ -20094,7 +20155,7 @@ function ScoutingTab({ isCoach, matchFilter, initialSubtab, initialReportTeam, v
         // chargement (teams encore vide) et afficher "Team not found" en boucle, sans jamais se
         // réessayer tout seul une fois les données arrivées (même principe déjà utilisé ci-dessus
         // pour l'onglet Comparison).
-        <ScoutingReportTab isCoach={isCoach} teamNames={Object.keys(scouting.teams)} scoutingTeams={scouting.teams} onSaveLogo={scouting.saveLogo} initialTeam={initialReportTeam} ourStats={ourStats} ourTeamName={ourTeamName} ourTeamLogo={team?.logo} />
+        <ScoutingReportTab isCoach={isCoach} teamNames={Object.keys(scouting.teams)} scoutingTeams={scouting.teams} onSaveLogo={scouting.saveLogo} initialTeam={initialReportTeam} ourStats={ourStats} ourTeamName={ourTeamName} ourTeamLogo={team?.logo} matchFilter={matchFilter} />
       ))}
       {subtab === "observation" && (isCoach || v.observation) && <ObservationTab isCoach={isCoach} />}
       {subtab === "classement" && (isCoach || v.rankings) && <ScoutingRankingsTab matchFilter={matchFilter} />}
@@ -20961,6 +21022,75 @@ function TagAliasesCard() {
   );
 }
 
+// Demandé par l'utilisateur : un espace séparé, propre au comparatif "Screen coverage match-up"
+// de Scouting Report Stats, où déclarer que deux tags de couverture d'écran désignent la même
+// chose (ex. Step = Yellow), un même nom pouvant recevoir plusieurs variantes. Contrairement à
+// TagAliasesCard ci-dessus, cette correspondance ne touche JAMAIS les tags enregistrés : elle ne
+// sert qu'au moment de construire le comparatif, donc les onglets My Team et Observation
+// continuent d'afficher ces tags séparément, comme demandé.
+function ScreenCoverageAliasesCard() {
+  const [list, setList] = useState([]);
+  const [loaded, setLoaded] = useState(false);
+  const [fromText, setFromText] = useState("");
+  const [toText, setToText] = useState("");
+  const [status, setStatus] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => { loadScreenCoverageCompareAliases().then(l => { setList(l); setLoaded(true); }); }, []);
+
+  async function persist(next) {
+    setList(next);
+    await storeSet("screen_coverage_compare_aliases", next);
+  }
+  async function add() {
+    setError(""); setStatus("");
+    const from = fromText.trim(), to = toText.trim();
+    if (!from || !to) { setError("Fill in both fields."); return; }
+    if (normTag(from) === normTag(to)) { setError("These two names are already treated as the same."); return; }
+    if (list.some(a => normTag(a.from) === normTag(from))) { setError("This tag already has an equivalence here."); return; }
+    await persist([...list, { from, to }]);
+    setFromText(""); setToText("");
+    setStatus("Saved — the Screen coverage match-up comparison will now merge these two.");
+  }
+  async function remove(i) {
+    setError(""); setStatus("");
+    await persist(list.filter((_, idx) => idx !== i));
+  }
+
+  return (
+    <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 22, marginBottom: 20 }}>
+      <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 8 }}>Screen coverage equivalences (Scouting Report Stats only)</div>
+      <p style={{ color: "#8B93A1", fontSize: 13, lineHeight: 1.6, margin: "0 0 16px" }}>
+        Scouting Observation and your own matches can use different names for the same screen coverage (for example <b>Step</b> and <b>Yellow</b>).
+        Declare it here: the two will be merged ONLY in the "Screen coverage match-up" comparison of Scouting Report Stats — My Team and Observation keep showing them as separate tags everywhere else.
+        A single name can receive several variants.
+      </p>
+
+      {loaded && list.length > 0 && (
+        <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 14 }}>
+          {list.map((a, i) => (
+            <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 12px", background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8, fontSize: 13 }}>
+              <span style={{ color: "#D8DCE2" }}>{a.from}</span>
+              <span style={{ color: "#5C6470" }}>→</span>
+              <span style={{ color: TEAL, fontWeight: 600, flex: 1 }}>{a.to}</span>
+              <button onClick={() => remove(i)} title="Remove" style={{ background: "none", border: "none", color: "#8B93A1", cursor: "pointer", display: "flex" }}><Trash2 size={14} /></button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+        <input value={fromText} onChange={e => setFromText(e.target.value)} placeholder="Tag (e.g. Step)" style={{ ...inputStyle, letterSpacing: "normal", flex: "1 1 220px", minWidth: 180 }} />
+        <span style={{ color: "#5C6470" }}>→</span>
+        <input value={toText} onChange={e => setToText(e.target.value)} placeholder="Merge into (e.g. Yellow)" style={{ ...inputStyle, letterSpacing: "normal", flex: "1 1 220px", minWidth: 180 }} />
+        <button onClick={add} style={btnSecondary}>Add</button>
+      </div>
+      {status && <div style={{ fontSize: 13, color: TEAL, marginTop: 10 }}>{status}</div>}
+      {error && <div style={{ fontSize: 13, color: RED, marginTop: 10 }}>{error}</div>}
+    </div>
+  );
+}
+
 function BackupTab({ team, roster }) {
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
@@ -21060,6 +21190,7 @@ function BackupTab({ team, roster }) {
       </div>
 
       <TagAliasesCard />
+      <ScreenCoverageAliasesCard />
       <TagFinderCard />
 
       <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 22, marginBottom: 20 }}>
