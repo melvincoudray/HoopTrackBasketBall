@@ -3919,11 +3919,48 @@ function MontageTab({ isCoach }) {
   const montagesRef = useRef(null);
   montagesRef.current = montages;
 
-  useEffect(() => { loadMontages().then(l => { setMontages(l); setActiveId(l.length ? l[0].id : null); }); }, []);
+  // Demandé par l'utilisateur : ouvrir directement le DERNIER montage créé plutôt que le premier
+  // (l[0] était le plus ancien, puisque createMontage() ajoute les nouveaux à la fin du tableau).
+  // On se base sur createdAt (plus robuste que l'ordre du tableau) pour trouver le plus récent.
+  useEffect(() => {
+    loadMontages().then(l => {
+      setMontages(l);
+      const last = l.length ? l.reduce((a, b) => (b.createdAt || 0) >= (a.createdAt || 0) ? b : a) : null;
+      setActiveId(last ? last.id : null);
+    });
+  }, []);
   useEffect(() => () => {
     clearTimeout(saveTimer.current);
     if (resultRef.current) URL.revokeObjectURL(resultRef.current);
     if (busyRef.current) { runIdRef.current++; resetFfmpeg(); }
+  }, []);
+  // Synchronisation entre fenêtres/onglets (demandé par l'utilisateur : coder dans Scouting
+  // Observation dans une fenêtre et envoyer des clips vers Montage ouvert dans une autre, sans
+  // avoir à rafraîchir ou changer d'onglet pour les voir apparaître). On réinterroge périodiquement
+  // le stockage partagé et on fusionne en AJOUT SEULEMENT (nouveaux montages, nouveaux clips dans
+  // un montage déjà ouvert ici) sans jamais écraser un élément déjà présent localement, pour ne pas
+  // perdre un découpage en cours d'édition dans CETTE fenêtre.
+  useEffect(() => {
+    const iv = setInterval(async () => {
+      if (busyRef.current) return; // export vidéo en cours : ne pas perturber
+      let remote;
+      try { remote = await loadMontages(); } catch { return; }
+      const local = montagesRef.current || [];
+      const localIds = new Set(local.map(m => m.id));
+      let changed = false;
+      const merged = local.map(m => {
+        const rm = remote.find(x => x.id === m.id);
+        if (!rm) return m;
+        const localItemIds = new Set(m.items.map(i => i.id));
+        const newItems = rm.items.filter(i => !localItemIds.has(i.id));
+        if (!newItems.length) return m;
+        changed = true;
+        return { ...m, items: [...m.items, ...newItems] };
+      });
+      remote.forEach(rm => { if (!localIds.has(rm.id)) { merged.push(rm); changed = true; } });
+      if (changed) setMontages(merged);
+    }, 5000);
+    return () => clearInterval(iv);
   }, []);
 
   const active = (montages || []).find(m => m.id === activeId) || null;
