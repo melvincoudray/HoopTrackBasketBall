@@ -3070,6 +3070,33 @@ function SlideForm({ el, slide, data, editable }) {
   const info = data.standings?.[name];
   const games = (info?.recentGames || []).slice(-(el.count || 5)).reverse();
   if (!games.length) return editable ? slideEmptyBox("No recent game synced for " + name) : null;
+  // Format horizontal (demandé par l'utilisateur : une bande fine à glisser SOUS le classement
+  // plutôt qu'une liste verticale) : un badge W/L + logo par match, alignés en ligne. Le nom de
+  // l'adversaire n'est pas affiché (pas la place sur une bande fine) ; il reste disponible via le
+  // format vertical si besoin.
+  if (el.horizontal) {
+    const n = games.length;
+    const cellW = el.w / n;
+    const logoSize = Math.max(14, Math.min(cellW * 0.78, el.h * 0.62));
+    const badgeW = Math.max(16, Math.min(cellW * 0.86, logoSize * 1.05));
+    const badgeH = Math.max(11, badgeW * 0.58);
+    const fs = Math.max(8.5, Math.min(13, badgeH * 0.72));
+    return (
+      <div style={{ width: "100%", height: "100%", display: "flex", alignItems: "center", justifyContent: "space-evenly", boxSizing: "border-box" }}>
+        {games.map((g, i) => {
+          const win = g.pf > g.pa;
+          return (
+            <div key={i} style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: Math.max(2, logoSize * 0.08) }} title={g.opp}>
+              {g.oppLogo
+                ? <div style={{ width: logoSize, height: logoSize, borderRadius: "50%", backgroundImage: `url(${g.oppLogo})`, backgroundSize: "contain", backgroundRepeat: "no-repeat", backgroundPosition: "center", flexShrink: 0 }} />
+                : <div style={{ width: logoSize, height: logoSize, borderRadius: "50%", background: "rgba(255,255,255,0.12)", flexShrink: 0 }} />}
+              <div style={{ width: badgeW, height: badgeH, borderRadius: 4, background: win ? RS_GRN : RS_RED, color: "#fff", display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: fs, flexShrink: 0, fontFamily: "'Oswald', sans-serif" }}>{win ? "W" : "L"}</div>
+            </div>
+          );
+        })}
+      </div>
+    );
+  }
   const rowH = Math.max(28, Math.min(64, (el.h - 20) / games.length));
   const fs = Math.max(11, Math.min(18, rowH * 0.32));
   return (
@@ -3821,6 +3848,9 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
                         </select>
                       </SField>
                       <SField label="Games shown" w={80}><input type="number" min="1" max="10" value={sel.count || 5} onChange={e => patchEl(sel.id, { count: Math.max(1, Math.min(10, Number(e.target.value) || 5)) })} style={sInp} /></SField>
+                      <label style={{ fontSize: 12.5, color: PAPER, display: "flex", alignItems: "center", gap: 6 }}>
+                        <input type="checkbox" checked={!!sel.horizontal} onChange={e => patchEl(sel.id, { horizontal: e.target.checked })} /> Horizontal layout (a thin strip, e.g. to place under a standing)
+                      </label>
                     </>
                   )}
                 </div>
@@ -16667,7 +16697,13 @@ async function repGatherReportData({ teamName, teams, ourStats, ourName = "Our t
 
 async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "Our team", ourLogo, onProgress, scoutShots = [], matchFilter }) {
   const { jsPDF } = await import("jspdf");
-  const D = await repGatherReportData({ teamName, teams, ourStats, ourName, onProgress, matchFilter });
+  let D = await repGatherReportData({ teamName, teams, ourStats, ourName, onProgress, matchFilter });
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : des joueurs cochés "blessé" restaient visibles dans
+  // le PDF) : repStripInjured() n'était appliqué QUE sur l'écran (ScoutingReportOnScreen), jamais ici.
+  // L'export doit refléter exactement ce que le coach voit à l'écran, donc on applique le même filtre
+  // ici aussi, avant toute utilisation des données.
+  const injuredNames = await loadInjuredPlayers(teamName);
+  D = repStripInjured(D, injuredNames);
   const { t, all, total, rankOf, games, pouleName, pouleRankOf, LEAGUE_POULE, PT, ptMine, ptList, ptSW, FF, LEAGUE, screenDefOverall, screenDefBySpacing, screenCompare } = D;
   let { LS, lsErr } = D;
   // Logos "nettoyés" (fond carré uni retiré) — certains logos enregistrés avant l'arrivée de ce
@@ -17267,7 +17303,10 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
       text("SHOT CHART (LIVESTATS)", x + 10, y + 78, { size: 6, bold: true, color: REP.MUTE });
       const sz = szFor(fp.name);
       try {
-        const svg = lsShotChartSvg(sz, "969CAD");
+        // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "où est le terrain ?") : couleur de trait
+        // passée sans son "#" (couleur SVG invalide, donc trait invisible) — seules les zones et
+        // le point du panier apparaissaient, jamais les lignes du terrain.
+        const svg = lsShotChartSvg(sz, "#969CAD");
         const img = await repSvgToPng(svg.inner, svg.vb, 400);
         if (img) doc.addImage(img.png, "PNG", x + 10, y + 83, chartW, chartW * img.ratio);
       } catch { text("Shot chart unavailable.", x + 10, y + 96, { size: 6.5, color: REP.MUTE }); }
