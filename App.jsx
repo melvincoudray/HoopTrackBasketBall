@@ -14298,7 +14298,15 @@ async function unlinkScoutingPlayLink(teamName, playLabel) {
 // Résout le dessin du Playbook pour un libellé de play codé en Scouting : priorité au lien
 // manuel choisi par le coach (toujours exact), sinon on retombe sur la correspondance par nom.
 function resolveScoutingPlayDiagram(label, allPlays, links) {
-  const linkedId = links && links[label];
+  let linkedId = links && links[label];
+  // Repli : recherche NORMALISÉE de la clé (espaces/casse/accents) — un lien manuel fait sur
+  // l'écran doit être retrouvé à l'export même si le libellé y est recalculé avec un espacement ou
+  // une casse légèrement différents (sinon la liaison manuelle semble "ne pas suivre" à l'export).
+  if (!linkedId && links) {
+    const norm = normTag(label);
+    const k = Object.keys(links).find(x => normTag(x) === norm);
+    if (k) linkedId = links[k];
+  }
   if (linkedId) { const hit = allPlays.find(p => p.id === linkedId); if (hit) return hit; }
   return allPlays.find(p => normTag(p.name) === normTag(label));
 }
