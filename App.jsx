@@ -15283,6 +15283,10 @@ function drawLast(l) { const P = drawPts(l); return P[P.length - 1]; }
 // le ballon et le rond "porteur" le suivent, et le ballon accompagne aussi un dribble.
 function drawAdvance(items, lines, full) {
   const out = drawClone(items).filter(it => it.t !== "dho");
+  // Demandé par l'utilisateur : un Handoff (comme une passe) doit lui aussi transmettre le
+  // ballon — au porteur le plus proche de l'icône du Handoff — au lieu d'être simplement effacé
+  // sans effet sur qui a la balle à l'étape suivante.
+  const dhoList = items.filter(it => it.t === "dho");
   const byId = id => out.find(i => i.id === id);
   const orig = {}, cur = {}; out.forEach(i => { orig[i.id] = { x: i.x, y: i.y }; cur[i.id] = { x: i.x, y: i.y }; });
   const att = out.filter(i => i.t === "o");
@@ -15311,6 +15315,15 @@ function drawAdvance(items, lines, full) {
       const r = near(end, cands, 48);
       if (r) H = byId(r.id);
     }
+  });
+  // Handoff : le ballon passe du porteur actuel à l'attaquant le plus proche de l'icône du Handoff
+  // (en excluant le porteur lui-même, puisque le handoff se fait forcément vers un autre joueur).
+  dhoList.forEach(d => {
+    if (!H) return;
+    const cands = [];
+    att.forEach(a => { if (a.id !== H.id) { cands.push({ id: a.id, x: orig[a.id].x, y: orig[a.id].y }); cands.push({ id: a.id, x: cur[a.id].x, y: cur[a.id].y }); } });
+    const r = near({ x: d.x, y: d.y }, cands, 60);
+    if (r) H = byId(r.id);
   });
   out.forEach(i => { if (cur[i.id] && i.t !== "ball") { i.x = cur[i.id].x; i.y = cur[i.id].y; } });
   if (hadRing && H) { out.forEach(i => { if (i.t === "o") delete i.h; }); H.h = true; }
@@ -15787,7 +15800,9 @@ function DrawTab({ isCoach, team }) {
   const [confirmDel, setConfirmDel] = useState(null);
   const [newBookName, setNewBookName] = useState("");
 
-  useEffect(() => { (async () => setBooks((await storeGet("draw_playbooks")) || []))(); }, []);
+  // Demandé par l'utilisateur : tous les playbooks repliés à l'ouverture de l'onglet Draw, plutôt
+  // que dépliés par défaut.
+  useEffect(() => { (async () => { const b = (await storeGet("draw_playbooks")) || []; setBooks(b); setCollapsed(Object.fromEntries(b.map(x => [x.id, true]))); })(); }, []);
   const say = (m) => { setToast(m); setTimeout(() => setToast(""), 3500); };
   async function saveBooks(next) { setBooks(next); await storeSet("draw_playbooks", next); }
 
@@ -19037,7 +19052,12 @@ function matchesScoutingPlayer(tagName, player) {
 // doit contenir toutes les actions de l'équipe observée (attaque + défense), pas seulement celles
 // où ce joueur est le Shooter.
 function rolePlaysForPlayer(plays, player, role) {
-  return plays.filter(p => (p.roles?.[role] || []).some(name => matchesScoutingPlayer(name, player)));
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : certains clips individuels — Assists, Steals,
+  // Rebounds, Turnovers — s'affichaient 2, 3, voire 4 fois) : un même tir/possession peut avoir
+  // PLUSIEURS joueurs flaggés par SportsCode sur la même ligne (ex. le Shooter + le passeur de
+  // l'assist sur la même action), donc plusieurs lignes partagent le même __shotId — jamais
+  // dédupliqué ici, contrairement au reste de l'app (voir dedupeWholePossessionPlays).
+  return dedupeWholePossessionPlays(plays.filter(p => (p.roles?.[role] || []).some(name => matchesScoutingPlayer(name, player))));
 }
 // Libellé du Box Score FFBB -> groupe SportsCode correspondant (seules les stats qui ont un
 // équivalent direct dans les labels tagués sont cliquables ; Pts/2Pts/3Pts/FT sont déjà couverts
