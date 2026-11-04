@@ -41,7 +41,7 @@ export function parseSchedule(html) {
 
 
 // Tous les matchs (joués ou à venir) du calendrier d'une page : + horaire et journée.
-// [{ id, slug, dm: "JJ/MM", time: "HH:MM", journee: "Journée 8, Group B", home, away, played }]
+// [{ id, slug, dm: "JJ/MM", time: "HH:MM", journee: "Journée 8, Group B", home, away, played, livestat }]
 export function parseCalendar(html) {
   const out = new Map();
   const re = /<li class="display-games__third-list__entry[^"]*">([\s\S]*?)<\/li>/g;
@@ -55,7 +55,11 @@ export function parseCalendar(html) {
     const alts = [...li.matchAll(/<img class="picture"[^>]*alt="([^"]*)"/g)].map(x => decodeEntities(x[1]).trim());
     const scores = [...li.matchAll(/<span class="team__score[^"]*">\s*([^<]*?)\s*<\/span>/g)].map(x => x[1].trim());
     const [home, away] = decodeEntities(link[3]).split(/\s+vs\s+/);
-    if (!out.has(link[1])) out.set(link[1], { id: link[1], slug: link[2], dm: dt[1] ? dt[1] + "/" + dt[2] : null, time: dt[3] || null, journee: jr, home: (alts[0] || home || "").trim(), away: (alts[1] || away || "").trim(), played: /^\d+$/.test(scores[0] || "") });
+    // Id FIBA LiveStats (fibalivestats.dcd.shared.geniussports.com/u/FFBB/<id>/), présent sur chaque
+    // entrée du calendrier dès que le match a été diffusé en direct — sert à aller chercher les points
+    // contre-attaque / 2e chance / après balles perdues / banc / intérieurs (mode=livestat ci-dessous).
+    const lsId = (li.match(/fibalivestats[^"]*\/u\/FFBB\/(\d+)\//) || [])[1] || null;
+    if (!out.has(link[1])) out.set(link[1], { id: link[1], slug: link[2], dm: dt[1] ? dt[1] + "/" + dt[2] : null, time: dt[3] || null, journee: jr, home: (alts[0] || home || "").trim(), away: (alts[1] || away || "").trim(), played: /^\d+$/.test(scores[0] || ""), livestat: lsId });
   }
   return [...out.values()];
 }
@@ -199,8 +203,29 @@ export const handler = async (event) => {
     // ?mode=league -> tous les matchs joués de la ligue (page calendrier)
     if (q.mode === "league") {
       const html = await getText(ROOT + "/saison-reguliere/calendrier");
-      const matches = parseCalendar(html).filter(g => g.played).map(g => ({ id: g.id, slug: g.slug, dm: g.dm, home: g.home, away: g.away }));
+      const matches = parseCalendar(html).filter(g => g.played).map(g => ({ id: g.id, slug: g.slug, dm: g.dm, home: g.home, away: g.away, livestat: g.livestat }));
       return { statusCode: 200, headers, body: JSON.stringify({ fetchedAt: new Date().toISOString(), matches }) };
+    }
+    // ?mode=livestat&id=<id FIBA LiveStats> -> proxy serveur (CORS) de fibalivestats.dcd.shared.geniussports.com,
+    // réduit aux 2 équipes + points contre-attaque / 2e chance / après balles perdues / banc / intérieurs.
+    // Un match non diffusé (page "difficultés techniques") a un score nul des deux côtés -> traité comme indisponible.
+    if (q.mode === "livestat" && q.id) {
+      const lid = String(q.id).replace(/[^0-9]/g, "");
+      if (!lid) return { statusCode: 400, headers, body: JSON.stringify({ error: "Missing LiveStats id." }) };
+      const r = await fetch(`https://fibalivestats.dcd.shared.geniussports.com/data/${lid}/data.json`, { headers: UA });
+      if (!r.ok) return { statusCode: 502, headers, body: JSON.stringify({ error: "LiveStats answered " + r.status }) };
+      const d = await r.json().catch(() => null);
+      const teams = d && d.tm ? ["1", "2"].map(k => d.tm[k]).filter(Boolean).map(tm => ({
+        name: tm.name,
+        pts: Number(tm.tot_sPoints) || 0,
+        fbPts: Number(tm.tot_sPointsFastBreak) || 0,
+        scPts: Number(tm.tot_sPointsSecondChance) || 0,
+        toPts: Number(tm.tot_sPointsFromTurnovers) || 0,
+        benchPts: Number(tm.tot_sBenchPoints) || 0,
+        paintPts: Number(tm.tot_sPointsInThePaint) || 0,
+      })) : [];
+      if (teams.length < 2 || teams.every(t => !t.pts)) return { statusCode: 404, headers, body: JSON.stringify({ error: "No LiveStats data for this match yet." }) };
+      return { statusCode: 200, headers: { ...headers, "Cache-Control": "public, max-age=1800, s-maxage=3600" }, body: JSON.stringify({ id: lid, teams }) };
     }
     // ?mode=leaguematch&match=<id>-<slug> -> totaux des deux équipes (sans les joueurs : réponse légère)
     if (q.mode === "leaguematch" && q.match) {
