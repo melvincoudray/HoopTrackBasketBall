@@ -12993,35 +12993,62 @@ function szPolySample(s) {
   }
   return out;
 }
-// BUG RÉEL CORRIGÉ (signalé par l'utilisateur : le chiffre d'une "forme libre" fine et courbée
-// — ex. un arc de cercle non plein dessiné le long de la ligne à 3PTS — s'affichait au milieu de
-// la boîte englobante de ses sommets, donc hors de la forme réellement peinte, dans une autre
-// zone) : on calcule maintenant le vrai centre de masse de la forme peinte (contour échantillonné
-// via szPolySample, formule standard du centroïde d'un polygone), qui reste dans la forme même
-// quand elle est fine, concave ou courbée — au lieu de la simple moyenne des sommets bruts.
-function szPolyCentroid(s) {
-  const pts = szPolySample(s), n = pts.length;
-  let area = 0, cx = 0, cy = 0;
-  for (let i = 0; i < n; i++) {
-    const p0 = pts[i], p1 = pts[(i + 1) % n];
-    const cross = p0.x * p1.y - p1.x * p0.y;
-    area += cross;
-    cx += (p0.x + p1.x) * cross;
-    cy += (p0.y + p1.y) * cross;
+function szPointInPoly(x, y, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y, xj = poly[j].x, yj = poly[j].y;
+    if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) inside = !inside;
   }
-  area /= 2;
-  if (Math.abs(area) < 1e-6) {
-    const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
-    return { cx: (Math.min(...xs) + Math.max(...xs)) / 2, cy: (Math.min(...ys) + Math.max(...ys)) / 2 };
+  return inside;
+}
+function szPointToSegDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay, lenSq = dx * dx + dy * dy;
+  let t = lenSq ? ((px - ax) * dx + (py - ay) * dy) / lenSq : 0;
+  t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+function szDistToPolyBoundary(x, y, poly) {
+  let d = Infinity;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) d = Math.min(d, szPointToSegDist(x, y, poly[j].x, poly[j].y, poly[i].x, poly[i].y));
+  return d;
+}
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur, capture à l'appui : le chiffre d'une zone "forme
+// libre" dessinée en anneau/fer à cheval AUTOUR d'une autre zone — ex. Midrange entourant la
+// Raquette — s'affichait DANS cette autre zone, au centre géométrique de la boîte englobante ou
+// même du centre de masse de la forme, qui pour un anneau concave tombe dans le trou, pas dans
+// la matière peinte). On cherche maintenant, par quadrillage, le point qui est À L'INTÉRIEUR de
+// la forme réellement peinte (contour échantillonné via szPolySample) ET le plus loin possible de
+// ses bords — garanti dans la forme, même en fer à cheval, raffiné en 3 passes autour du meilleur
+// point trouvé pour rester précis sans coût excessif.
+function szPolyLabelPoint(s) {
+  const poly = szPolySample(s);
+  const xs = poly.map(p => p.x), ys = poly.map(p => p.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  let best = null, bestD = -1;
+  function scan(x0, y0, x1, y1, step) {
+    for (let y = y0; y <= y1; y += step) {
+      for (let x = x0; x <= x1; x += step) {
+        if (!szPointInPoly(x, y, poly)) continue;
+        const d = szDistToPolyBoundary(x, y, poly);
+        if (d > bestD) { bestD = d; best = { x, y }; }
+      }
+    }
   }
-  return { cx: cx / (6 * area), cy: cy / (6 * area) };
+  let step = Math.max(maxX - minX, maxY - minY) / 20 || 1;
+  scan(minX, minY, maxX, maxY, step);
+  for (let pass = 0; pass < 3 && best; pass++) {
+    step /= 4;
+    const rx = Math.max(step * 5, 2);
+    scan(Math.max(minX, best.x - rx), Math.max(minY, best.y - rx), Math.min(maxX, best.x + rx), Math.min(maxY, best.y + rx), step);
+  }
+  return best || { x: (minX + maxX) / 2, y: (minY + maxY) / 2 };
 }
 function szCenterBox(s) {
   if (s.type === "rect") return { cx: s.x + s.w / 2, cy: s.y + s.h / 2, w: s.w, h: s.h };
   if (s.type === "poly") {
     const xs = s.points.map(p => p.x), ys = s.points.map(p => p.y);
-    const c = szPolyCentroid(s);
-    return { cx: c.cx, cy: c.cy, w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+    const c = szPolyLabelPoint(s);
+    return { cx: c.x, cy: c.y, w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
   }
   if (s.type === "semicircle") {
     const bias = { up: [0, -0.35], down: [0, 0.35], left: [-0.35, 0], right: [0.35, 0] }[s.dir || "up"];
