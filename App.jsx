@@ -1754,7 +1754,7 @@ function SecondaryTagPickerModal({ name, side, category, cats, onConfirm, onClos
 // Team et Scouting. Rien n'est envoyé nulle part, et tout disparaît au rechargement de la page.
 const CLIP_VIDEO_CACHE = new Map();
 
-function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
+function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, category }) {
   const keyOf = grouping?.keyOf || (p => p.matchId);
   const labelOf = grouping?.labelOf || (p => `${p.date} vs ${p.opponent}`);
   const sortKeyOf = grouping?.sortKeyOf || (p => p.date || "");
@@ -1867,7 +1867,7 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping }) {
             const url = URL.createObjectURL(blob);
             clipUrlsRef.current.push(url);
             const label = `${noun} ${n} — ${g.label} · clip ${ci + 1}/${g.clips.length}`;
-            setClipResults(prev => [...prev, { url, label, item: { label: `${playName} — ${sideLabel} · ${g.label}`, sourceKey: cacheKeyOf(g.key), sourceName: file.name, sourceLabel: `${noun} ${g.label}`, start, end } }]);
+            setClipResults(prev => [...prev, { url, label, item: { label: `${playName} — ${sideLabel} · ${g.label}`, sourceKey: cacheKeyOf(g.key), sourceName: file.name, sourceLabel: `${noun} ${g.label}`, start, end, category } }]);
             try { await ffmpeg.deleteFile(outName); } catch (e) {}
             clipIdx++;
           }
@@ -2254,7 +2254,7 @@ function MontagePlayer({ items, urls, onClose, slideEnv }) {
 const SLIDE_W = 1280, SLIDE_H = 720;
 const SLIDE_KINDS = [
   { id: "presentation", family: "scouting", label: "Presentation", duration: 6 },
-  { id: "side", family: "scouting", label: "Side announcement (Offense / Defense)", duration: 3 },
+  { id: "side", family: "scouting", label: "Side announcement (Offense / Defense / Players)", duration: 3 },
   { id: "section", family: "scouting", label: "Sub-section announcement", duration: 5 },
   { id: "play", family: "scouting", label: "Play", duration: 8 },
   { id: "individual", family: "scouting", label: "Scouting report — individual", duration: 8 },
@@ -2357,7 +2357,7 @@ function slideVars(slide) {
     myTeam: c.myTeam || "", opponent: c.opponent || "",
     matchday: n ? L.matchday(n) : (g.journee || ""), date, time, dateTime: [date, time].filter(Boolean).join(" · "),
     venue: g.venue || "", city: g.city || "", venueCity: [g.venue, g.city].filter(Boolean).join(" — "),
-    side: c.side === "def" ? "DEFENSE" : "OFFENSE", play: c.playName || (c.playbook && c.playbook.name) || c.play || "",
+    side: c.side === "def" ? "DEFENSE" : c.side === "player" ? "PLAYERS" : "OFFENSE", play: c.playName || (c.playbook && c.playbook.name) || c.play || "",
     myScore: ms === null ? "–" : String(ms), oppScore: os === null ? "–" : String(os), score: ms === null || os === null ? "– – –" : `${ms} - ${os}`, result,
   };
 }
@@ -2612,7 +2612,13 @@ function obsTagStat(plays, label, cats) {
   const matching = dedupeWholePossessionPlays(plays.filter(p => tagIsSet(p.tags, label)), label);
   const pts = matching.reduce((s, p) => s + playPoints(p.tags), 0);
   let denom = plays.length;
-  if (lists[0]) denom = lists[0].reduce((s, l) => s + plays.filter(p => tagIsSet(p.tags, l)).length, 0);
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : les % de fréquence des cartes stat de Montage —
+  // ex. "PnR · Frequency" — ne correspondaient pas à ceux du widget "Efficiency by playtype" ni du
+  // Scouting Report). Le dénominateur sommait les occurrences de chaque label de la catégorie SANS
+  // déduplication (dedupeWholePossessionPlays), contrairement au numérateur — même bug, dans une
+  // troisième fonction qui n'avait pas encore été alignée. Même définition partout maintenant
+  // (somme des comptes DÉDUPLIQUÉS de la catégorie = categoryFreqMap/topBucket).
+  if (lists[0]) denom = lists[0].reduce((s, l) => s + dedupeWholePossessionPlays(plays.filter(p => tagIsSet(p.tags, l)), l).length, 0);
   return { count: matching.length, freq: denom ? (100 * matching.length) / denom : 0, pppp: matching.length ? pts / matching.length : 0, open: openPct(matching), tov: tovPct(matching) };
 }
 const OBS_METRICS = [["freq", "Frequency"], ["pppp", "PPPP"], ["open", "Open %"], ["tov", "% TOV"], ["count", "Actions"]];
@@ -2878,7 +2884,7 @@ async function newSlideFor(kind, prevCtx) {
 }
 function slideTitle(s) {
   const c = s.ctx || {};
-  const extra = s.kind === "play" ? (c.playName || (c.playbook && c.playbook.name) || c.play) : s.kind === "side" ? (c.side === "def" ? "Defense" : "Offense") : s.kind === "fb_section" ? ((s.elements || []).find(e => e.type === "text") || {}).content : c.opponent;
+  const extra = s.kind === "play" ? (c.playName || (c.playbook && c.playbook.name) || c.play) : s.kind === "side" ? (c.side === "def" ? "Defense" : c.side === "player" ? "Players" : "Offense") : s.kind === "fb_section" ? ((s.elements || []).find(e => e.type === "text") || {}).content : c.opponent;
   return `${slideKindLabel(s.kind, s)}${extra ? " — " + extra : ""}`;
 }
 
@@ -3639,7 +3645,17 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
                 </>
               )}
               {(slide.kind === "side" || slide.kind === "section" || slide.kind === "play" || slide.kind === "fb_section") && (
-                <SField label="Side"><select value={c.side || "off"} onChange={e => setCtx({ side: e.target.value })} style={sInp}><option value="off">Offense</option><option value="def">Defense</option></select></SField>
+                <SField label="Side">
+                  <select value={c.side || "off"} onChange={e => setCtx({ side: e.target.value })} style={sInp}>
+                    <option value="off">Offense</option>
+                    <option value="def">Defense</option>
+                    {/* Demandé par l'utilisateur : "Players" en plus d'Offense/Defense — uniquement sur le
+                        slide "Side announcement" lui-même, pas sur les autres kinds qui utilisent "Side"
+                        comme repli off/def pour leurs éléments stat (section/play/fb_section), où "player"
+                        n'aurait pas de sens pour filtrer des actions. */}
+                    {slide.kind === "side" && <option value="player">Players</option>}
+                  </select>
+                </SField>
               )}
               {slide.kind === "play" && (
                 <>
@@ -4184,6 +4200,29 @@ function MontageTab({ isCoach }) {
   const clipCount = items.filter(i => i.type === "clip").length;
   const slideCount = slideItems.length;
   const totalSec = items.reduce((s, i) => s + (i.type === "clip" ? Math.max(0, i.trimEnd - i.trimStart) : i.type === "slide" ? Math.max(0, i.duration || 0) : 0), 0);
+  // Demandé par l'utilisateur : à côté de la durée totale, répartition du temps de présentation
+  // Attaque / Défense / Joueurs — chaque clip porte maintenant sa "category" (attribuée à la
+  // création du clip dans ClipExportModal : "offense"/"defense" pour un playtype Scouting
+  // Observation, "defense" pour Screen Contest, "player" pour un clip joueur). Les clips plus
+  // anciens (créés avant cet ajout), les vidéos externes et les slides n'ont pas de catégorie —
+  // regroupés sous "Other" plutôt qu'ignorés, pour que la somme des catégories reste cohérente
+  // avec la durée totale affichée.
+  const catSec = { offense: 0, defense: 0, player: 0, other: 0 };
+  items.forEach(i => {
+    if (i.type === "slide") {
+      const d = Math.max(0, i.duration || 0);
+      // Demandé par l'utilisateur : un slide "Side announcement" (Offense / Defense / Players)
+      // compte maintenant dans la même répartition que les clips, selon le côté choisi dessus —
+      // plutôt que de tomber systématiquement dans "Other".
+      const side = i.kind === "side" ? (i.ctx || {}).side : null;
+      catSec[side === "off" ? "offense" : side === "def" ? "defense" : side === "player" ? "player" : "other"] += d;
+      return;
+    }
+    if (i.type !== "clip") return;
+    const d = Math.max(0, i.trimEnd - i.trimStart);
+    const key = catSec[i.category] !== undefined ? i.category : "other";
+    catSec[key] += d;
+  });
   const sources = sourceKeys.map(k => items.find(i => i.sourceKey === k));
   const sel = { ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "auto", minWidth: 200 };
 
@@ -4341,6 +4380,18 @@ function MontageTab({ isCoach }) {
           {(clipCount > 0 || slideCount > 0) && (
             <div style={{ padding: 14, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, display: "flex", flexDirection: "column", gap: 12 }}>
               <div style={{ fontSize: 13, color: PAPER }}>{clipCount} clip{clipCount !== 1 ? "s" : ""}{slideCount > 0 ? ` · ${slideCount} slide${slideCount !== 1 ? "s" : ""}` : ""} · {fmtClock(totalSec)} total</div>
+              {totalSec > 0 && (
+                <div style={{ fontSize: 11.5, color: "#8B93A1" }}>
+                  {[["Offense", catSec.offense, TEAL], ["Defense", catSec.defense, RED], ["Players", catSec.player, AMBER], ["Other", catSec.other, "#5C6470"]]
+                    .filter(([, s]) => s > 0)
+                    .map(([label, s, c], i) => (
+                      <span key={label}>
+                        {i > 0 && " · "}
+                        <span style={{ color: c, fontWeight: 600 }}>{label}</span> {fmtClock(s)} ({Math.round((100 * s) / totalSec)}%)
+                      </span>
+                    ))}
+                </div>
+              )}
               <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
                 <button onClick={() => setPlaying(true)} style={{ ...btnPrimary, flex: "none", background: PANEL2, color: PAPER, border: `1px solid ${LINE}` }}>Play the montage</button>
                 <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: PAPER }}>
@@ -4797,6 +4848,7 @@ function ScreenClipFlow({ title, events, index, categories, onClose }) {
           missingTimestampHint: 'use "Replace file" in Import → Screen Contest to swap {article} CSV for the .dnk project and include {pronoun}.',
           scopeNote: "currently selected sessions only.",
         }}
+        category="defense"
       />
     );
   }
@@ -5475,6 +5527,7 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
           plays={dedupeWholePossessionPlays((clipModal.side === "off" ? off : def).filter(p => tagIsSet(p.tags, clipModal.name) && (!clipModal.within || tagIsSet(p.tags, clipModal.within)) && (!clipModal.extraTags || clipModal.extraTags.length === 0 || clipModal.extraTags.some(t => tagIsSet(p.tags, t)))), clipModal.name)}
           onClose={() => setClipModal(null)}
           grouping={clipGrouping}
+          category={clipModal.side === "off" ? "offense" : "defense"}
         />
       )}
     </>
@@ -10835,6 +10888,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
           sideLabel=""
           plays={clipPlays}
           onClose={() => setShowClipsModal(false)}
+          category="player"
         />
       )}
     </div>
@@ -19336,6 +19390,7 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
           plays={roleClipModal.plays}
           onClose={() => setRoleClipModal(null)}
           grouping={clipGrouping}
+          category="player"
         />
       )}
     </div>
