@@ -12974,11 +12974,54 @@ function szSemicirclePath(s) {
   if (dir === "right") return `M ${cx} ${cy - r} A ${r} ${r} 0 0 1 ${cx} ${cy + r} Z`;
   return `M ${cx - r} ${cy} A ${r} ${r} 0 0 0 ${cx + r} ${cy} Z`;
 }
+// Approxime le contour réel d'une forme libre (points + bords courbés via "bends", voir
+// szPolyPath) par un polygone fin, en échantillonnant chaque bord courbé le long de sa vraie
+// courbe (même quadratique que le rendu SVG), pas seulement ses deux extrémités.
+function szPolySample(s) {
+  const pts = s.points, bends = s.bends || [], n = pts.length, out = [];
+  for (let i = 0; i < n; i++) {
+    const p0 = pts[i], p1 = pts[(i + 1) % n], bend = bends[i] || 0;
+    out.push(p0);
+    if (bend) {
+      const g = szEdgeGeom(pts, i);
+      const qx = g.mx + g.nx * bend, qy = g.my + g.ny * bend;
+      for (let t = 1; t <= 7; t++) {
+        const u = t / 8, v = 1 - u;
+        out.push({ x: v * v * p0.x + 2 * v * u * qx + u * u * p1.x, y: v * v * p0.y + 2 * v * u * qy + u * u * p1.y });
+      }
+    }
+  }
+  return out;
+}
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur : le chiffre d'une "forme libre" fine et courbée
+// — ex. un arc de cercle non plein dessiné le long de la ligne à 3PTS — s'affichait au milieu de
+// la boîte englobante de ses sommets, donc hors de la forme réellement peinte, dans une autre
+// zone) : on calcule maintenant le vrai centre de masse de la forme peinte (contour échantillonné
+// via szPolySample, formule standard du centroïde d'un polygone), qui reste dans la forme même
+// quand elle est fine, concave ou courbée — au lieu de la simple moyenne des sommets bruts.
+function szPolyCentroid(s) {
+  const pts = szPolySample(s), n = pts.length;
+  let area = 0, cx = 0, cy = 0;
+  for (let i = 0; i < n; i++) {
+    const p0 = pts[i], p1 = pts[(i + 1) % n];
+    const cross = p0.x * p1.y - p1.x * p0.y;
+    area += cross;
+    cx += (p0.x + p1.x) * cross;
+    cy += (p0.y + p1.y) * cross;
+  }
+  area /= 2;
+  if (Math.abs(area) < 1e-6) {
+    const xs = pts.map(p => p.x), ys = pts.map(p => p.y);
+    return { cx: (Math.min(...xs) + Math.max(...xs)) / 2, cy: (Math.min(...ys) + Math.max(...ys)) / 2 };
+  }
+  return { cx: cx / (6 * area), cy: cy / (6 * area) };
+}
 function szCenterBox(s) {
   if (s.type === "rect") return { cx: s.x + s.w / 2, cy: s.y + s.h / 2, w: s.w, h: s.h };
   if (s.type === "poly") {
     const xs = s.points.map(p => p.x), ys = s.points.map(p => p.y);
-    return { cx: xs.reduce((a, b) => a + b, 0) / xs.length, cy: ys.reduce((a, b) => a + b, 0) / ys.length, w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
+    const c = szPolyCentroid(s);
+    return { cx: c.cx, cy: c.cy, w: Math.max(...xs) - Math.min(...xs), h: Math.max(...ys) - Math.min(...ys) };
   }
   if (s.type === "semicircle") {
     const bias = { up: [0, -0.35], down: [0, 0.35], left: [-0.35, 0], right: [0.35, 0] }[s.dir || "up"];
@@ -13021,12 +13064,21 @@ const DEFAULT_SCOUTING_ZONES = [
 ];
 function useZoneShapes(context) {
   const [shapes, setShapes] = useState(null);
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : une shot map modifiée "revenait à celle
+  // initiale") : `shapes` démarre à null, qui voulait dire aussi bien "pas encore chargé depuis
+  // Supabase" que "aucune zone personnalisée, utiliser les zones par défaut" — l'éditeur
+  // (ShotZoneSettings) se montait donc avec les zones PAR DÉFAUT injectées pendant la vraie
+  // lecture réseau (storeGet), et renvoyait aussitôt ces zones par défaut au parent, qui les
+  // enregistrait — écrasant les zones personnalisées déjà sauvegardées, une fraction de seconde
+  // avant que la vraie valeur arrive. `loaded` distingue maintenant les deux cas.
+  const [loaded, setLoaded] = useState(false);
   useEffect(() => {
     let alive = true;
-    storeGet("shot_zone_shapes:" + context).then(v => { if (alive) setShapes(Array.isArray(v) && v.length ? v : null); });
+    setLoaded(false);
+    storeGet("shot_zone_shapes:" + context).then(v => { if (alive) { setShapes(Array.isArray(v) && v.length ? v : null); setLoaded(true); } });
     return () => { alive = false; };
   }, [context]);
-  return [shapes, setShapes];
+  return [shapes, setShapes, loaded];
 }
 // Graphique générique : dessine le terrain de l'onglet Draw puis colore/chiffre chaque forme
 // de `shapes` selon les stats de sa zone (zoneStats[s.zone]) — remplace le rendu 4-zones figé
@@ -13203,9 +13255,11 @@ const SHOT_ZONE_EDITOR_HTML = `<!doctype html>
           <button class="tool primary" id="addCircle">○ Cercle</button>
           <button class="tool primary" id="addSemi">◗ Demi-cercle</button>
           <button class="tool primary" id="addPoly">◈ Forme libre</button>
-          <button class="tool ghost" id="resetBtn" style="margin-left:auto">↺ Réinitialiser</button>
+          <button class="tool primary" id="saveBtn" style="margin-left:auto;background:#3DDC6F;border-color:#3DDC6F;color:#0B1F12">💾 Enregistrer</button>
+          <button class="tool ghost" id="resetBtn">↺ Réinitialiser</button>
         </div>
         <svg id="court" viewBox="0 0 500 470" preserveAspectRatio="xMidYMid meet"></svg>
+        <p class="hint" id="saveStatus" style="min-height:16px;color:#3DDC6F;font-weight:600"></p>
         <p class="hint">Glisse une forme pour la déplacer, tire les poignées (carrés) pour la redimensionner. Pour une <b>forme libre</b> : tire un sommet (carré) pour le déplacer, tire la poignée ronde au milieu d'un bord pour le courber (ex. le long de la ligne à 3PTS), clique le "+" pour ajouter un point sur un bord.</p>
       </div>
     </div>
@@ -13628,6 +13682,16 @@ const SHOT_ZONE_EDITOR_HTML = `<!doctype html>
   document.getElementById("addCircle").addEventListener("click", function () { addShape("circle"); });
   document.getElementById("addSemi").addEventListener("click", function () { addShape("semicircle"); });
   document.getElementById("addPoly").addEventListener("click", function () { addShape("poly"); });
+  // Demandé par l'utilisateur (une modification était "revenue à celle initiale") : un bouton
+  // Enregistrer explicite, bien visible, en plus de l'enregistrement automatique à chaque
+  // modification — avec une confirmation claire dans l'éditeur lui-même.
+  document.getElementById("saveBtn").addEventListener("click", function () {
+    save();
+    var st = document.getElementById("saveStatus");
+    st.textContent = "Enregistré ✓";
+    clearTimeout(st._t);
+    st._t = setTimeout(function () { st.textContent = ""; }, 2000);
+  });
   document.getElementById("resetBtn").addEventListener("click", function () {
     state.shapes = JSON.parse(JSON.stringify(DEFAULT_SEED)); state.selected = null; state.selectedPart = null; save(); render();
   });
@@ -13764,7 +13828,7 @@ const SHOT_ZONE_EDITOR_HTML = `<!doctype html>
 // Panneau Settings : un iframe par contexte, avec les zones actuelles injectées au départ ;
 // l'éditeur renvoie ses changements via postMessage, qu'on enregistre aussitôt (Supabase).
 function ShotZoneSettings({ context, title, defaultZones }) {
-  const [shapes, setShapes] = useZoneShapes(context);
+  const [shapes, setShapes, loaded] = useZoneShapes(context);
   const [saved, setSaved] = useState(false);
   useEffect(() => {
     function onMsg(e) {
@@ -13777,10 +13841,14 @@ function ShotZoneSettings({ context, title, defaultZones }) {
     return () => window.removeEventListener("message", onMsg);
   }, [context]);
   const initial = shapes || defaultZones;
+  // Ne construit (et ne monte) l'iframe qu'une fois les zones RÉELLEMENT chargées depuis
+  // Supabase (voir le commentaire dans useZoneShapes) — sinon on reconstruit sa srcDoc dès que
+  // `loaded` devient vrai, jamais avant.
   const srcDoc = useMemo(() => {
+    if (!loaded) return "";
     const inject = `<script>window.__HOOPTRACK_CONTEXT__=${JSON.stringify(context)};window.__HOOPTRACK_INITIAL_SHAPES__=${JSON.stringify(initial)};</script>`;
     return SHOT_ZONE_EDITOR_HTML.replace("<script>", inject + "<script>");
-  }, [context, shapes === null]);
+  }, [context, loaded]);
   async function resetToDefault() {
     await storeSet("shot_zone_shapes:" + context, defaultZones);
     setShapes(defaultZones);
@@ -13792,7 +13860,9 @@ function ShotZoneSettings({ context, title, defaultZones }) {
         {saved && <span style={{ fontSize: 12, color: "#3DDC6F", fontWeight: 600 }}>Enregistré ✓</span>}
         <button onClick={resetToDefault} style={{ marginLeft: "auto", fontSize: 12, padding: "5px 10px", borderRadius: 7, border: "1px solid #D7DBE1", background: "none", cursor: "pointer" }}>Réinitialiser</button>
       </div>
-      <iframe key={context} srcDoc={srcDoc} style={{ width: "100%", height: 760, border: "1px solid #D7DBE1", borderRadius: 12 }} />
+      {loaded
+        ? <iframe key={context} srcDoc={srcDoc} style={{ width: "100%", height: 760, border: "1px solid #D7DBE1", borderRadius: 12 }} />
+        : <div style={{ height: 760, border: "1px solid #D7DBE1", borderRadius: 12, display: "flex", alignItems: "center", justifyContent: "center", color: "#8B93A1", fontSize: 13 }}>Chargement…</div>}
     </div>
   );
 }
