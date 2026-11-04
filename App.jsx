@@ -3408,10 +3408,17 @@ function SlideEditor({ slide, data, imgs, onChange, onClose, onDataRefresh }) {
   useEffect(() => {
     let off = false;
     (async () => {
-      const out = [];
-      ((await storeGet("draw_playbooks")) || []).forEach(b => (b.plays || []).forEach(p => { if ((p.frames || []).length) out.push({ key: "b:" + b.id + ":" + p.id, book: b.name, name: p.name, group: p.group || "Plays", frames: p.frames }); }));
       const opp = (slide.ctx || {}).opponent;
+      const out = [];
+      // Demandé par l'utilisateur : le Staff de l'adversaire sélectionné, puis le playbook de SON
+      // club, doivent apparaître EN PREMIER dans la liste des schémas (comme pour le sélecteur
+      // "Link to Playbook diagram" de Scouting Report › Stats) — avant les playbooks des autres
+      // clubs, plutôt que dans l'ordre de stockage qui n'a aucun rapport avec l'adversaire choisi.
       if (opp) ((await storeGet("draw_staff:" + opp)) || []).forEach(p => { if ((p.frames || []).length) out.push({ key: "s:" + opp + ":" + p.id, book: "Staff — " + opp, name: p.name, group: p.group || "Plays", frames: p.frames }); });
+      const books = (await storeGet("draw_playbooks")) || [];
+      const ownBooks = opp ? books.filter(b => b.club === opp) : [];
+      const otherBooks = opp ? books.filter(b => b.club !== opp) : books;
+      [...ownBooks, ...otherBooks].forEach(b => (b.plays || []).forEach(p => { if ((p.frames || []).length) out.push({ key: "b:" + b.id + ":" + p.id, book: b.name, name: p.name, group: p.group || "Plays", frames: p.frames }); }));
       if (!off) setDrawPlays(out);
     })();
     return () => { off = true; };
@@ -14325,9 +14332,15 @@ async function loadPlaybookPlays(teamName) {
   try { const b = await storeGet("draw_playbooks"); books = Array.isArray(b) ? b : []; } catch { /* aucun playbook */ }
   let staff = [];
   try { const b = await storeGet("draw_staff:" + teamName); staff = Array.isArray(b) ? b : []; } catch { /* aucun */ }
+  // Demandé par l'utilisateur : dans les sélecteurs "Link to Playbook diagram" (Scouting Report ›
+  // Stats, et le Draw lui-même), le playbook du club déjà associé à l'équipe sélectionnée (Draw ›
+  // Export › Club) doit apparaître EN PREMIER, avant les playbooks des autres clubs — plutôt que
+  // dans l'ordre de stockage, qui n'a aucun rapport avec l'équipe qu'on est en train de consulter.
+  const own = books.filter(b => b.club === teamName);
+  const others = books.filter(b => b.club !== teamName);
   return [
     ...staff.filter(p => (p.frames || []).length).map(p => ({ id: "staff:" + p.id, label: "Staff · " + p.name, name: p.name, frames: p.frames })),
-    ...books.flatMap(b => (b.plays || []).filter(p => (p.frames || []).length).map(p => ({ id: "book:" + b.id + ":" + p.id, label: b.name + " · " + p.name, name: p.name, frames: p.frames }))),
+    ...[...own, ...others].flatMap(b => (b.plays || []).filter(p => (p.frames || []).length).map(p => ({ id: "book:" + b.id + ":" + p.id, label: b.name + " · " + p.name, name: p.name, frames: p.frames }))),
   ];
 }
 async function loadScoutingPlayLinks(teamName) { return (await storeGet("scouting_play_links:" + teamName)) || {}; }
