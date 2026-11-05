@@ -200,18 +200,25 @@ export const handler = async (event) => {
       return { statusCode: 200, headers, body: JSON.stringify({ games: res }) };
     }
 
-    // ?mode=upcoming&team=vitre -> prochains matchs NON joués de l'équipe (bloc "derniers/prochains
-    // matchs" de sa page), dans l'ordre d'affichage du site (déjà chronologique) :
-    // [{ opponent, dm: "JJ/MM", time, venue, journee }] — utilisé par l'accueil pour détecter
-    // automatiquement "Next game" / "2nd Next Game" (demandé par l'utilisateur).
+    // ?mode=upcoming&team=vitre -> prochains matchs NON joués de l'équipe, à partir du calendrier
+    // COMPLET de la saison (même liste que le mode par défaut, qui ne garde lui que les matchs
+    // déjà joués) : [{ opponent, dm: "JJ/MM", time, journee }] — utilisé par l'accueil pour
+    // détecter automatiquement "Next game" / "2nd Next Game" (demandé par l'utilisateur).
+    // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : 2 matchs à venir sur le site FFBB, mais un
+    // seul remonté ici) : la 1ère version lisait le petit bloc "derniers/prochains matchs" de la
+    // page équipe, qui n'affiche souvent qu'UN SEUL match à venir même quand le calendrier
+    // complet en contient plusieurs. On lit maintenant ce calendrier complet (même source que
+    // parseSchedule/parseCalendar pour les matchs joués), en ne gardant que les matchs SANS
+    // score, ce qui couvre tous les matchs à venir programmés par la ligue, pas seulement le
+    // tout prochain.
     if (q.mode === "upcoming") {
       const lead = await lead0();
       const ownPath = teamPathOf(lead, team);
       if (!ownPath) return { statusCode: 404, headers, body: JSON.stringify({ error: "Team not found in the NM1 table." }) };
       const html = await getText(ownPath.startsWith("http") ? ownPath : ROOT + ownPath);
-      const games = parseVenues(html)
-        .filter(g => !g.played)
-        .map(g => ({ opponent: norm(g.home) === team ? g.away : g.home, dm: g.dm, time: g.time, venue: g.venue, journee: g.journee }));
+      const games = parseCalendar(html)
+        .filter(g => !g.played && (norm(g.home) === team || norm(g.away) === team))
+        .map(g => ({ opponent: norm(g.home) === team ? g.away : g.home, dm: g.dm, time: g.time, journee: g.journee }));
       return { statusCode: 200, headers, body: JSON.stringify({ games }) };
     }
 
