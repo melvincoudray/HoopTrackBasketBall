@@ -14438,7 +14438,13 @@ function resolveScoutingPlayDiagram(label, allPlays, links) {
     if (k) linkedId = links[k];
   }
   if (linkedId) { const hit = allPlays.find(p => p.id === linkedId); if (hit) return hit; }
-  return allPlays.find(p => normTag(p.name) === normTag(label));
+  // Correspondance par nom : s'il existe PLUSIEURS dessins portant ce nom (par ex. un import
+  // "Staff" à une seule étape ET le même play complet à 3-4 étapes dans le Playbook), on garde
+  // celui qui a le PLUS d'étapes plutôt que le premier trouvé dans la liste — sinon on peut tomber
+  // sur une version à 1 seule étape alors qu'il en existe une à 2, 3 ou 4 (signalé par l'utilisateur).
+  const matches = allPlays.filter(p => normTag(p.name) === normTag(label));
+  if (!matches.length) return null;
+  return matches.reduce((best, p) => ((p.frames || []).length > (best.frames || []).length ? p : best));
 }
 
 function embedUrl(url) {
@@ -18262,8 +18268,8 @@ function RsPlays({ playStats, teamName, isCoach }) {
         <div style={{ flex: 1, minWidth: 0 }}>
           <div style={{ fontSize: 11, color: PAPER }}>{it.label}</div>
           {isCoach && teamName && (
-            <select value={links[it.label] || ""} onChange={e => link(it.label, e.target.value)} style={{ fontSize: 9.5, color: AMBER, background: "none", border: `1px solid ${LINE}`, borderRadius: 4, marginTop: 2, maxWidth: 230 }}>
-              <option value="">{pl ? `Auto-matched: ${pl.label} (change…)` : "Link to Playbook diagram…"}</option>
+            <select value={links[it.label] || ""} onChange={e => link(it.label, e.target.value)} style={{ fontSize: 9.5, color: pl ? AMBER : "#E8743B", background: "none", border: `1px solid ${pl ? LINE : "#E8743B"}`, borderRadius: 4, marginTop: 2, maxWidth: 230 }}>
+              <option value="">{pl ? `Auto-matched: ${pl.label} (change…)` : "Not linked — click to choose a diagram"}</option>
               {allPlays.map(p => <option key={p.id} value={p.id}>{p.label}</option>)}
             </select>
           )}
