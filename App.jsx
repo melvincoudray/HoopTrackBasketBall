@@ -19,10 +19,55 @@ const PANEL = "#161B22";
 const PANEL2 = "#1D232C";
 const LINE = "#2A323D";
 const PAPER = "#F3F1EA";
-const AMBER = "#F2A93B";
-const AMBER_DIM = "#8A6425";
+// AMBER / AMBER_DIM sont en "let" (pas "const") — demandé par l'utilisateur : un joueur peut
+// changer la couleur d'accent de l'interface depuis Paramètres, ce qui réassigne ces deux
+// variables pour CET appareil uniquement (préférence locale, jamais partagée via le stockage
+// d'équipe — voir ACCENT_COLOR_CHOICES et applyAccentColor plus bas).
+let AMBER = "#F2A93B";
+let AMBER_DIM = "#8A6425";
 const TEAL = "#2FB8A6";
 const RED = "#E15A4E";
+
+// Palette de couleurs d'accent proposée aux joueurs dans Paramètres — reprend les teintes déjà
+// utilisées ailleurs dans l'app (CHART_COLORS plus bas), pour rester cohérent visuellement.
+const ACCENT_COLOR_CHOICES = ["#F2A93B", "#2FB8A6", "#E15A4E", "#7C9CF2", "#C97BE0", "#5CC98A", "#E0B85C", "#5CB3E0"];
+
+// Assombrit une couleur hex d'un certain facteur (0 à 1) — sert à dériver AMBER_DIM depuis la
+// couleur d'accent choisie, par le même ratio que la paire par défaut F2A93B / 8A6425.
+function darkenHex(hex, factor = 0.42) {
+  const n = parseInt(hex.replace("#", ""), 16);
+  const r = Math.round(((n >> 16) & 255) * (1 - factor));
+  const g = Math.round(((n >> 8) & 255) * (1 - factor));
+  const b = Math.round((n & 255) * (1 - factor));
+  return "#" + [r, g, b].map(v => Math.max(0, Math.min(255, v)).toString(16).padStart(2, "0")).join("");
+}
+// Applique une nouvelle couleur d'accent à TOUTE l'interface de cet appareil (AMBER, AMBER_DIM,
+// et la première teinte de CHART_COLONS — copiée par valeur à sa création, donc à resynchroniser
+// explicitement). Un bump de accentVersion (voir App()) force ensuite le nouveau rendu.
+function applyAccentColor(hex) {
+  AMBER = hex;
+  AMBER_DIM = darkenHex(hex);
+  CHART_COLORS[0] = hex;
+}
+// Préférence de couleur — STRICTEMENT LOCALE à cet appareil/navigateur, par joueur (même
+// logique que saveLocalSession/loadLocalSession ci-dessous) : ne passe jamais par le stockage
+// partagé de l'équipe, sinon le choix d'un joueur changerait l'interface de tout le monde.
+function accentColorStorageKey(playerName) { return "hooptrack_accent_" + TEAM_PREFIX + (playerName || ""); }
+async function saveLocalAccentColor(playerName, hex) {
+  const key = accentColorStorageKey(playerName);
+  try {
+    if (typeof localStorage !== "undefined") { localStorage.setItem(key, hex); return; }
+  } catch (e) { console.error("[accent] localStorage.setItem FAILED on", key, ":", e); }
+  try { if (window.storage) await window.storage.set(key, hex, false); } catch (e) {}
+}
+async function loadLocalAccentColor(playerName) {
+  const key = accentColorStorageKey(playerName);
+  try {
+    if (typeof localStorage !== "undefined") return localStorage.getItem(key) || null;
+  } catch (e) {}
+  try { if (window.storage) { const r = await window.storage.get(key, false); return r ? r.value : null; } } catch (e) {}
+  return null;
+}
 
 const POSITIONS = { "Point Guard": ["Aiden", "Miro", "Nathan"], "Forward": ["Isayah", "Leo", "Timeo", "Tivon", "Kayode", "Thierry", "Maksim"], "Big": ["Salvator", "Jaspert", "Arthur", "Walter"] };
 function positionOf(first) {
@@ -6382,6 +6427,62 @@ async function notifyTeam(teamId, title, body) {
   }
 }
 
+// Historique des modifications — demandé par l'utilisateur, visible par tout le monde (coach et
+// joueurs) : journal partagé des actions-clés (import de match, box score même automatique,
+// rebound/screen contest, ajout d'un match en scouting observation, ajout d'un entraînement).
+// Stocké via storeSet/storeGet (déjà préfixé par équipe via TEAM_PREFIX), donc visible par tous
+// les appareils de l'équipe. Limité aux 40 dernières entrées pour ne pas grossir indéfiniment.
+async function logActivity(type, label) {
+  try {
+    const current = (await storeGet("activity_log")) || [];
+    const entry = { id: uid(), type, label, at: new Date().toISOString() };
+    await storeSet("activity_log", [entry, ...current].slice(0, 40));
+  } catch (e) {
+    // Le journal ne doit jamais faire échouer l'action elle-même (import, ajout…).
+    console.error("[activity_log] logActivity FAILED:", e);
+  }
+}
+
+const ACTIVITY_TYPE_LABELS = {
+  match: "Match imported",
+  boxscore: "Box score imported",
+  reboundContest: "Rebound contest imported",
+  screenContest: "Screen contest imported",
+  scoutingObservation: "Match added to scouting observation",
+  training: "Training added",
+};
+const ACTIVITY_ICONS = {
+  match: { Icon: Upload, color: TEAL },
+  boxscore: { Icon: ClipboardList, color: TEAL },
+  reboundContest: { Icon: TrendingUp, color: TEAL },
+  screenContest: { Icon: TrendingDown, color: TEAL },
+  scoutingObservation: { Icon: Search, color: TEAL },
+  training: { Icon: Calendar, color: TEAL },
+};
+function timeAgo(iso) {
+  const diff = Date.now() - new Date(iso).getTime();
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return "just now";
+  if (min < 60) return `${min}m ago`;
+  const h = Math.floor(min / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+function useActivityLog() {
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      const list = (await storeGet("activity_log")) || [];
+      if (alive) { setEntries(list); setLoading(false); }
+    })();
+    return () => { alive = false; };
+  }, []);
+  return { entries, loading };
+}
+
 function useShootingGridSessions() {
   const [index, setIndex] = useState([]);
   const [grids, setGrids] = useState({}); // { id: { id, date, label, situations: [...] } }
@@ -6945,11 +7046,19 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [team, setTeam] = useState(null); // {id, name, logo, ...} — équipe active
   const [session, setSession] = useState(null); // {name, role}
+  // Bump à chaque changement de couleur d'accent (Paramètres joueur) — AMBER/AMBER_DIM sont
+  // des variables de module mutées directement (voir applyAccentColor plus haut), donc ce
+  // compteur n'est jamais lu : il sert uniquement à déclencher un nouveau rendu de tout l'arbre
+  // pour que les composants relisent la nouvelle valeur.
+  const [accentVersion, setAccentVersion] = useState(0);
   const [roster, setRoster] = useState([]);
   const [matchesIndex, setMatchesIndex] = useState([]); // [{id,date,opponent,playsCount}]
   const [matches, setMatches] = useState({}); // id -> {plays}
   const [boxScoreIndex, setBoxScoreIndex] = useState([]); // [{id,date,opponent,matchedCount}]
   const [tab, setTab] = useState("home");
+  // Sous-onglet de "Import" — demandé par l'utilisateur : l'onglet "Full Stats" (séparé) a été
+  // retiré de la barre du bas et fusionné ici, comme deuxième sous-vue de l'import.
+  const [importSubtab, setImportSubtab] = useState("coding");
   const [homeNav, setHomeNav] = useState(null); // { playerSubtab } ou { scoutingSubtab, scoutingTeam } — consommé une fois puis remis à null
   const [selectedPlayer, setSelectedPlayer] = useState(null);
   const [selectedMatchKeys, setSelectedMatchKeys] = useState(null); // null = tous les matchs
@@ -6986,6 +7095,9 @@ export default function App() {
     const out = await syncFfbbBoxScores(r, season);
     if (out.changed) setBoxScoreIndex(out.idx);
     await storeSet("ffbb_box_last_sync", Date.now());
+    // Demandé par l'utilisateur : la synchro FFBB automatique doit aussi apparaître dans
+    // l'historique des modifications, pas seulement l'import manuel.
+    if (out.added) logActivity("boxscore", `${out.added} box score${out.added !== 1 ? "s" : ""} auto-synced (FFBB)`);
     return out;
   }
   useEffect(() => {
@@ -6996,6 +7108,28 @@ export default function App() {
     const t = setInterval(tick, 3600000);
     return () => { alive = false; clearInterval(t); };
   }, [team, loading, session?.role, roster.length > 0]);
+
+  // Couleur d'accent — demandé par l'utilisateur : chaque joueur peut choisir la sienne depuis
+  // Paramètres (voir applyAccentColor/ACCENT_COLOR_CHOICES plus haut). Préférence strictement
+  // locale à cet appareil, rechargée dès qu'une session joueur est identifiée.
+  useEffect(() => {
+    if (!session || session.role !== "player") return;
+    let alive = true;
+    (async () => {
+      const saved = await loadLocalAccentColor(session.name);
+      if (alive && saved) {
+        applyAccentColor(saved);
+        setAccentVersion(v => v + 1);
+      }
+    })();
+    return () => { alive = false; };
+  }, [session?.name, session?.role]);
+
+  async function changeAccentColor(hex) {
+    applyAccentColor(hex);
+    setAccentVersion(v => v + 1);
+    await saveLocalAccentColor(session?.name, hex);
+  }
 
   // Badges : recalculés au changement d'équipe, de roster, de box scores ou d'onglet (les séances
   // et objectifs peuvent avoir changé entre-temps).
@@ -7316,13 +7450,33 @@ export default function App() {
             matchFilter={effectiveMatchFilter}
             team={team}
             goToPlayer={(subtab) => { setSelectedPlayer(session.name); setHomeNav({ playerSubtab: subtab }); setTab("players"); }}
+            goToPlayers={() => { setSelectedPlayer(null); setTab("players"); }}
             goToScouting={(subtab, teamName) => { setHomeNav({ scoutingSubtab: subtab, scoutingTeam: teamName }); setTab("scouting"); }}
             goToTeam={() => setTab("team")}
             goToPlanning={() => setTab("planning")}
+            goToDraw={() => setTab("draw")}
+            goToMontage={() => setTab("montage")}
             visibility={visibility}
           />
         )}
         {tab === "import" && session.role === "coach" && (
+          <>
+            {/* Sous-onglet "Full Stats" fusionné ici (demandé par l'utilisateur, remplace
+                l'ancien onglet séparé dans la barre du bas) : bascule entre le fichier de
+                coding et les box scores, au sein du même onglet "Import". */}
+            <div style={{ display: "flex", alignItems: "center", gap: 4, background: PANEL2, borderRadius: 11, padding: 4, marginBottom: 20, width: "fit-content" }}>
+              <button type="button" onClick={() => setImportSubtab("coding")} style={{
+                background: importSubtab === "coding" ? AMBER : "none", color: importSubtab === "coding" ? "#0E1116" : "#AEB5BF",
+                border: "none", borderRadius: 8, padding: "7px 16px", cursor: "pointer", fontSize: 12, fontWeight: 800,
+              }}>Coding file</button>
+              <button type="button" onClick={() => setImportSubtab("boxscore")} style={{
+                background: importSubtab === "boxscore" ? AMBER : "none", color: importSubtab === "boxscore" ? "#0E1116" : "#AEB5BF",
+                border: "none", borderRadius: 8, padding: "7px 16px", cursor: "pointer", fontSize: 12, fontWeight: 800,
+              }}>Box scores</button>
+            </div>
+          </>
+        )}
+        {tab === "import" && session.role === "coach" && importSubtab === "coding" && (
           <ImportTab
             roster={roster}
             teamName={team.name}
@@ -7366,6 +7520,7 @@ export default function App() {
               // Demandé par l'utilisateur : notifier toute l'équipe à chaque nouveau match
               // importé (coding file).
               notifyTeam(team.id, "New match imported", `${meta.opponent} · ${meta.date}`);
+              logActivity("match", `${meta.opponent} · ${meta.date}`);
             }}
             matchesIndex={matchesIndex}
             onDeleteMatch={async (id, label) => {
@@ -7416,7 +7571,7 @@ export default function App() {
             }}
           />
         )}
-        {tab === "boxscore" && session.role === "coach" && (
+        {tab === "import" && session.role === "coach" && importSubtab === "boxscore" && (
           <BoxScoreTab
             roster={roster}
             index={boxScoreIndex}
@@ -7439,6 +7594,7 @@ export default function App() {
                 setActiveMatchType(meta.matchType);
                 userTouchedSelectionRef.current = false;
               }
+              logActivity("boxscore", `${meta.opponent} · ${meta.date}`);
             }}
             onDelete={async (id, label) => {
               await requestDeletion(team.id, team.name, "boxscore", label, { id });
@@ -7554,6 +7710,9 @@ export default function App() {
             <div style={{ height: 26 }} />
             <BoxColumnAliasesSettings />
           </div>
+        )}
+        {tab === "settings" && session.role === "player" && (
+          <PlayerSettingsTab currentColor={AMBER} onChangeColor={changeAccentColor} />
         )}
       </div>
       <BottomTabBar tab={tab} setTab={(t) => { setHomeNav(null); setTab(t); }} isCoach={session.role === "coach"} visibility={visibility} />
@@ -8270,16 +8429,18 @@ function HomeSectionLink({ eyebrow, title, onClick }) {
   );
 }
 
-function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, team, goToPlayer, goToScouting, goToTeam, goToPlanning, visibility }) {
+function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, team, goToPlayer, goToPlayers, goToScouting, goToTeam, goToPlanning, goToDraw, goToMontage, visibility }) {
   const box = useBoxScore(playerName, matchFilter);
   const advanced = useTeamAdvancedStats(matchFilter);
   const objectives = useObjectives(playerName || "");
   const push = usePushNotifications(team?.id, session?.name);
+  // Historique des modifications — demandé par l'utilisateur, visible par tout le monde (voir
+  // logActivity/useActivityLog plus haut).
+  const activity = useActivityLog();
   const [trainings, setTrainings] = useState([]);
   // Total réel des séances (pas seulement les 3 dernières gardées dans `trainings`) — utilisé
   // par le nouveau bloc "Season record" de l'accueil (demandé par l'utilisateur).
   const [trainingsTotal, setTrainingsTotal] = useState(0);
-  const [playbookCount, setPlaybookCount] = useState(0);
   const [mentalEntries, setMentalEntries] = useState([]);
   const [wellnessEntries, setWellnessEntries] = useState([]);
   const [wSlot, setWSlot] = useState("wake");
@@ -8349,7 +8510,24 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   }, [playerName]);
 
   useEffect(() => { storeGet("next_game_team").then(n => setNextGame(n || "")); }, []);
-  useEffect(() => { storeGet("draw_playbooks").then(b => setPlaybookCount((b || []).length)); }, []);
+  // Demandé par l'utilisateur : pour le coach, le second repère du "Season record" devient le
+  // nombre total d'entraînements de l'équipe (et non plus le nombre de playbooks). Comme les
+  // séances collectives (CollectiveTraining) écrivent une entrée séparée par joueur sans id de
+  // séance commun, on déduplique par signature (date + thématique + thème + durée) pour compter
+  // les séances distinctes plutôt que de les compter une fois par joueur inclus.
+  useEffect(() => {
+    if (!isCoach) return;
+    let alive = true;
+    (async () => {
+      const seen = new Set();
+      for (const p of roster) {
+        const entries = (await storeGet("training:" + p.name)) || [];
+        entries.forEach(e => seen.add([e.date, e.thematique, e.theme, e.duree].join("|")));
+      }
+      if (alive) setTrainingsTotal(seen.size);
+    })();
+    return () => { alive = false; };
+  }, [isCoach, roster]);
 
   async function saveNextGame(name) {
     setNextGame(name);
@@ -8492,50 +8670,11 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
             <div style={{ fontSize: 10, fontWeight: 800, color: "rgba(14,17,22,0.65)", textTransform: "uppercase", letterSpacing: "0.08em", marginTop: 2 }}>Wins – losses</div>
           </div>
           <div style={{ textAlign: "right" }}>
-            <div style={{ fontSize: 24, fontWeight: 800, color: INK }}>{isCoach ? playbookCount : trainingsTotal}</div>
-            <div style={{ fontSize: 9.5, fontWeight: 800, color: "rgba(14,17,22,0.65)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{isCoach ? "Playbooks" : "Trainings"}</div>
+            <div style={{ fontSize: 24, fontWeight: 800, color: INK }}>{trainingsTotal}</div>
+            <div style={{ fontSize: 9.5, fontWeight: 800, color: "rgba(14,17,22,0.65)", textTransform: "uppercase", letterSpacing: "0.06em" }}>Trainings</div>
           </div>
         </div>
       </div>
-
-      {/* Accès rapides — demandé par l'utilisateur : les joueurs n'ont besoin que de leur
-          fiche, l'équipe, le scouting et le planning (pas Draw/Montage, réservés au coach,
-          déjà accessibles pour lui depuis la barre du bas). */}
-      {!isCoach && (
-        <div style={{ marginBottom: 26 }}>
-          <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: "0.02em", marginBottom: 10 }}>QUICK ACCESS</div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-            <button onClick={() => goToPlayer("stats")} style={{ gridColumn: "span 2", display: "flex", alignItems: "center", gap: 14, padding: 16, borderRadius: 16, background: AMBER, border: "none", textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}>
-              <BarChart3 size={24} color={INK} />
-              <div>
-                <div style={{ fontSize: 15, fontWeight: 800, color: INK }}>My card</div>
-                <div style={{ fontSize: 11, color: "rgba(14,17,22,0.65)", fontWeight: 700 }}>Stats, objectives, role</div>
-              </div>
-            </button>
-            {(visibility || DEFAULT_VISIBILITY).tabs.team && (
-              <button onClick={goToTeam} style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 14, padding: 14, borderRadius: 14, background: PANEL, border: `1px solid ${LINE}`, textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}>
-                <Users size={18} color={TEAL} />
-                <div style={{ fontSize: 12.5, fontWeight: 800, color: PAPER }}>Team</div>
-              </button>
-            )}
-            {(visibility || DEFAULT_VISIBILITY).tabs.scouting && (
-              <button onClick={() => goToScouting()} style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 14, padding: 14, borderRadius: 14, background: PANEL, border: `1px solid ${LINE}`, textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}>
-                <Search size={18} color={TEAL} />
-                <div style={{ fontSize: 12.5, fontWeight: 800, color: PAPER }}>Scouting</div>
-              </button>
-            )}
-            {(visibility || DEFAULT_VISIBILITY).tabs.planning && (
-              <button onClick={goToPlanning} style={{ gridColumn: "span 2", display: "flex", alignItems: "center", gap: 12, padding: 14, borderRadius: 14, background: PANEL, border: `1px solid ${LINE}`, textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}>
-                <Calendar size={18} color={TEAL} />
-                <div>
-                  <div style={{ fontSize: 12.5, fontWeight: 800, color: PAPER }}>Planning</div>
-                  <div style={{ fontSize: 10.5, color: "#8B93A1" }}>Sessions & games</div>
-                </div>
-              </button>
-            )}
-          </div>
-        </div>
-      )}
 
       {/* Demandé par l'utilisateur : possibilité d'activer les notifications push, pour
           recevoir sur l'appareil (même app fermée) : nouveau match importé, nouvelle
@@ -8628,6 +8767,30 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
         </div>
       )}
 
+      {/* Historique des modifications — demandé par l'utilisateur : visible par tout le monde
+          (coach et joueurs), avec les 6 types d'actions suivis (import de match, box score même
+          automatique, rebound contest, screen contest, ajout d'un match en scouting
+          observation, ajout d'un entraînement équipe ou individuel). */}
+      {activity.entries.length > 0 && (
+        <div style={{ marginBottom: 26 }}>
+          <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 8 }}>Recent activity</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {activity.entries.slice(0, 6).map(e => {
+              const { Icon, color } = ACTIVITY_ICONS[e.type] || { Icon: Bell, color: "#8B93A1" };
+              return (
+                <div key={e.id} style={{ display: "flex", alignItems: "center", gap: 10, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 8, padding: "8px 12px" }}>
+                  <Icon size={15} color={color} style={{ flexShrink: 0 }} />
+                  <div style={{ flex: 1, minWidth: 0, fontSize: 12.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {ACTIVITY_TYPE_LABELS[e.type] || e.type}<span style={{ color: "#5C6470" }}> — {e.label}</span>
+                  </div>
+                  <div style={{ fontSize: 10.5, color: "#5C6470", flexShrink: 0 }}>{timeAgo(e.at)}</div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {playerName && (() => {
         const pd = (visibility || DEFAULT_VISIBILITY).playerDetail || DEFAULT_VISIBILITY.playerDetail;
         return (
@@ -8696,24 +8859,6 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
             </>
           )}
 
-          {(isCoach || (visibility || DEFAULT_VISIBILITY).team.advanced) && (
-            <>
-              <HomeSectionLink eyebrow="Team" title="Four Factors" onClick={goToTeam} />
-              {advanced.loading ? <EmptyState text="Loading…" /> : !advanced.perMatch.length ? (
-                <EmptyState text="No box score found in memory. Import a file from the 'Full Stats' tab (top menu)." />
-              ) : (
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 26 }}>
-                  <StatPill label="ORTG" value={ortg !== null ? ortg.toFixed(1) : "–"} tone="teal" />
-                  <StatPill label="DRTG" value={drtg !== null ? drtg.toFixed(1) : "–"} tone="red" />
-                  <StatPill label="eFG%" value={efg !== null ? efg.toFixed(1) + "%" : "–"} />
-                  <StatPill label="TOV%" value={tovPct !== null ? tovPct.toFixed(1) + "%" : "–"} tone="red" />
-                  <StatPill label="FTA/FGA" value={ftRate !== null ? ftRate.toFixed(2) : "–"} />
-                  <StatPill label="OREB%" value={orebPct !== null ? orebPct.toFixed(1) + "%" : "–"} />
-                </div>
-              )}
-            </>
-          )}
-
           {pd.stats && (
             <>
               <HomeSectionLink eyebrow="Box score" title="Your totals" onClick={() => goToPlayer("stats")} />
@@ -8748,38 +8893,107 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
         );
       })()}
 
-      {(isCoach || (visibility || DEFAULT_VISIBILITY).tabs.team) && (
-        <>
-          {(isCoach || (visibility || DEFAULT_VISIBILITY).team.advanced) && (
-            <>
-              <HomeSectionLink eyebrow="Team" title="Four Factors" onClick={goToTeam} />
-              {advanced.loading ? <EmptyState text="Loading…" /> : !advanced.perMatch.length ? (
-                <EmptyState text="No box score found in memory. Import a file from the 'Full Stats' tab (top menu)." />
-              ) : (
-                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 26 }}>
-                  <StatPill label="ORTG" value={ortg !== null ? ortg.toFixed(1) : "–"} tone="teal" />
-                  <StatPill label="DRTG" value={drtg !== null ? drtg.toFixed(1) : "–"} tone="red" />
-                  <StatPill label="eFG%" value={efg !== null ? efg.toFixed(1) + "%" : "–"} />
-                  <StatPill label="TOV%" value={tovPct !== null ? tovPct.toFixed(1) + "%" : "–"} tone="red" />
-                  <StatPill label="FTA/FGA" value={ftRate !== null ? ftRate.toFixed(2) : "–"} />
-                  <StatPill label="OREB%" value={orebPct !== null ? orebPct.toFixed(1) + "%" : "–"} />
+      {/* Accès rapides — demandé par l'utilisateur : les joueurs n'ont besoin que de leur
+          fiche, l'équipe, le scouting et le planning (pas Draw/Montage, réservés au coach,
+          déjà accessibles pour lui depuis la barre du bas). Placé en tout dernier sur
+          l'accueil (demandé par l'utilisateur : "le quick access tout en bas"). */}
+      {!isCoach && (
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: "0.02em", marginBottom: 10 }}>QUICK ACCESS</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <button onClick={() => goToPlayer("stats")} style={{ gridColumn: "span 2", display: "flex", alignItems: "center", gap: 14, padding: 16, borderRadius: 16, background: AMBER, border: "none", textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}>
+              <BarChart3 size={24} color={INK} />
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 800, color: INK }}>My card</div>
+                <div style={{ fontSize: 11, color: "rgba(14,17,22,0.65)", fontWeight: 700 }}>Stats, objectives, role</div>
+              </div>
+            </button>
+            {(visibility || DEFAULT_VISIBILITY).tabs.team && (
+              <button onClick={goToTeam} style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 14, padding: 14, borderRadius: 14, background: PANEL, border: `1px solid ${LINE}`, textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}>
+                <Users size={18} color={TEAL} />
+                <div style={{ fontSize: 12.5, fontWeight: 800, color: PAPER }}>Team</div>
+              </button>
+            )}
+            {(visibility || DEFAULT_VISIBILITY).tabs.scouting && (
+              <button onClick={() => goToScouting()} style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 14, padding: 14, borderRadius: 14, background: PANEL, border: `1px solid ${LINE}`, textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}>
+                <Search size={18} color={TEAL} />
+                <div style={{ fontSize: 12.5, fontWeight: 800, color: PAPER }}>Scouting</div>
+              </button>
+            )}
+            {(visibility || DEFAULT_VISIBILITY).tabs.planning && (
+              <button onClick={goToPlanning} style={{ gridColumn: "span 2", display: "flex", alignItems: "center", gap: 12, padding: 14, borderRadius: 14, background: PANEL, border: `1px solid ${LINE}`, textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}>
+                <Calendar size={18} color={TEAL} />
+                <div>
+                  <div style={{ fontSize: 12.5, fontWeight: 800, color: PAPER }}>Planning</div>
+                  <div style={{ fontSize: 10.5, color: "#8B93A1" }}>Sessions & games</div>
                 </div>
-              )}
-            </>
-          )}
-
-          {(isCoach || (visibility || DEFAULT_VISIBILITY).team.teamPlay) && (
-            <>
-              <HomeSectionLink eyebrow="Coding file" title="Team playtypes & shooting selection" onClick={goToTeam} />
-              {teamOff.length === 0 && teamDef.length === 0 ? (
-                <EmptyState text="No action coded yet (Import Match tab)." />
-              ) : (
-                <OffenseDefenseBreakdown off={teamOff} def={teamDef} detailTables={false} />
-              )}
-            </>
-          )}
-        </>
+              </button>
+            )}
+          </div>
+        </div>
       )}
+
+      {/* Accès rapides coach — demandé par l'utilisateur : même bloc "Quick access" que les
+          joueurs, mais avec les raccourcis utiles au coach (effectif, équipe, scouting, draw,
+          montage) plutôt que sa propre fiche. Placé en tout dernier sur l'accueil (demandé par
+          l'utilisateur : "le quick access tout en bas"). */}
+      {isCoach && (
+        <div style={{ marginBottom: 10 }}>
+          <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: "0.02em", marginBottom: 10 }}>QUICK ACCESS</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <button onClick={goToPlayers} style={{ gridColumn: "span 2", display: "flex", alignItems: "center", gap: 14, padding: 16, borderRadius: 16, background: TEAL, border: "none", textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}>
+              <Users size={24} color={INK} />
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 800, color: INK }}>Players</div>
+                <div style={{ fontSize: 11, color: "rgba(14,17,22,0.65)", fontWeight: 700 }}>Full roster & player cards</div>
+              </div>
+            </button>
+            <button onClick={goToTeam} style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 14, padding: 14, borderRadius: 14, background: PANEL, border: `1px solid ${LINE}`, textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}>
+              <LayoutGrid size={18} color={TEAL} />
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: PAPER }}>Team</div>
+            </button>
+            <button onClick={() => goToScouting()} style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 14, padding: 14, borderRadius: 14, background: PANEL, border: `1px solid ${LINE}`, textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}>
+              <Search size={18} color={TEAL} />
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: PAPER }}>Scouting</div>
+            </button>
+            <button onClick={goToDraw} style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 14, padding: 14, borderRadius: 14, background: PANEL, border: `1px solid ${LINE}`, textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}>
+              <Pencil size={18} color={TEAL} />
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: PAPER }}>Draw</div>
+            </button>
+            <button onClick={goToMontage} style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 14, padding: 14, borderRadius: 14, background: PANEL, border: `1px solid ${LINE}`, textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}>
+              <Film size={18} color={TEAL} />
+              <div style={{ fontSize: 12.5, fontWeight: 800, color: PAPER }}>Montage</div>
+            </button>
+          </div>
+        </div>
+      )}
+
+    </div>
+  );
+}
+
+// Paramètres joueur — demandé par l'utilisateur : contrairement à l'écran Settings complet du
+// coach (saison, catégories de colonnes, zones de tir…), les joueurs n'ont accès qu'au choix de
+// la couleur d'accent de l'interface, strictement locale à leur appareil (voir applyAccentColor
+// et saveLocalAccentColor plus haut).
+function PlayerSettingsTab({ currentColor, onChangeColor }) {
+  return (
+    <div>
+      <SectionTitle eyebrow="Settings" title="Interface color" />
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18 }}>
+        <div style={{ fontSize: 12.5, color: "#8B93A1", marginBottom: 16 }}>
+          Choose the accent color used across your Home screen, buttons and highlights. This only changes how the app looks on this device.
+        </div>
+        <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+          {ACCENT_COLOR_CHOICES.map(c => (
+            <button key={c} type="button" onClick={() => onChangeColor(c)} style={{
+              width: 40, height: 40, borderRadius: "50%", background: c, cursor: "pointer", padding: 0,
+              border: currentColor === c ? `3px solid ${PAPER}` : "3px solid transparent",
+              boxShadow: currentColor === c ? `0 0 0 1.5px ${c}` : "none",
+            }} aria-label={c} />
+          ))}
+        </div>
+      </div>
     </div>
   );
 }
@@ -8790,14 +9004,16 @@ function BottomTabBar({ tab, setTab, isCoach, visibility }) {
     { id: "home", label: "Home", icon: Home },
     ...(isCoach || v.tabs.planning ? [{ id: "planning", label: "Planning", icon: Calendar }] : []),
     ...(isCoach ? [{ id: "import", label: "Import", icon: Upload }] : []),
-    ...(isCoach ? [{ id: "boxscore", label: "Full Stats", icon: ClipboardList }] : []),
     ...(isCoach || v.tabs.players ? [{ id: "players", label: "Players", icon: Users }] : []),
     ...(isCoach || v.tabs.team ? [{ id: "team", label: "Team", icon: LayoutGrid }] : []),
     ...(isCoach || v.tabs.scouting ? [{ id: "scouting", label: "Scouting", icon: Search }] : []),
     ...(isCoach || v.tabs.draw ? [{ id: "draw", label: "Draw", icon: Pencil }] : []),
     ...(isCoach || v.tabs.montage ? [{ id: "montage", label: "Montage", icon: Film }] : []),
     ...(isCoach ? [{ id: "backup", label: "Backup", icon: Download }] : []),
-    ...(isCoach ? [{ id: "settings", label: "Settings", icon: ClipboardList }] : []),
+    // Settings existe maintenant aussi pour les joueurs — demandé par l'utilisateur, limité à
+    // la couleur d'accent de l'interface (voir PlayerSettingsTab) ; le coach garde l'écran
+    // complet existant (équipe, visibilité, etc.).
+    { id: "settings", label: "Settings", icon: ClipboardList },
   ];
   return (
     <div style={{ position: "fixed", left: 0, right: 0, bottom: 0, zIndex: 100 }}>
@@ -9782,7 +9998,9 @@ function ReboundContestImportPanel({ roster }) {
   async function confirmImport() {
     if (!preview) return;
     setBusy(true);
-    await addSession({ label: label.trim() || tabName, date, events: preview.events });
+    const sessionLabel = label.trim() || tabName;
+    await addSession({ label: sessionLabel, date, events: preview.events });
+    logActivity("reboundContest", `${sessionLabel} · ${date}`);
     setBusy(false); setPreview(null); setLabel("");
   }
 
@@ -9897,7 +10115,9 @@ function ScreenContestImportPanel({ roster }) {
   async function confirmImport() {
     if (!preview) return;
     setBusy(true);
-    await addSession({ label: label.trim() || tabName, date, events: preview.events });
+    const sessionLabel = label.trim() || tabName;
+    await addSession({ label: sessionLabel, date, events: preview.events });
+    logActivity("screenContest", `${sessionLabel} · ${date}`);
     setBusy(false); setPreview(null); setLabel("");
   }
 
@@ -10714,7 +10934,7 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
       )}
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Offense / Defense</h2>
-      <OffenseDefenseBreakdown off={off} def={def} forPrint />
+      <OffenseDefenseBreakdown off={off} def={def} forPrint detailTables={false} />
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Objectives</h2>
       {(() => {
@@ -10913,7 +11133,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
           <>
             <SectionTitle eyebrow="Source: Box Score" title="Official totals" />
             {box.loading ? null : box.entries.length === 0 ? (
-              <div style={{ marginBottom: 26 }}><EmptyState text="No box score imported — import one from the 'Full Stats' tab to display official totals (points, %, rebounds, assists…)." /></div>
+              <div style={{ marginBottom: 26 }}><EmptyState text="No box score imported — import one from the 'Import' tab (Box scores) to display official totals (points, %, rebounds, assists…)." /></div>
             ) : (
               <>
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 14 }}>
@@ -10991,7 +11211,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
               </>
             )}
 
-            <OffenseDefenseBreakdown off={off} def={def} enableClipExport />
+            <OffenseDefenseBreakdown off={off} def={def} enableClipExport detailTables={false} />
           </>
         )}
 
@@ -11869,7 +12089,7 @@ function ObjectivesPanel({ playerName, isCoach, box, off, def, matchFilter }) {
 const DEFAULT_TRAINING_THEMES = ["Pts + Indiv", "Pts - Indiv", "Coll Off", "Coll Def"];
 
 // Types de match (ex. "Friendly Game", "Season Game", "Play-Off Game") — propres à chaque
-// équipe, extensibles par le coach depuis les onglets Import Match / Full Stats.
+// équipe, extensibles par le coach depuis l'onglet Import (coding file / box scores).
 const DEFAULT_MATCH_TYPES = ["Friendly Game", "Season Game", "Play-Off Game"];
 function useMatchTypes() {
   const [types, setTypes] = useState(DEFAULT_MATCH_TYPES);
@@ -11987,6 +12207,7 @@ function TrainingLog({ playerName, isCoach }) {
 
   async function save() {
     setBusy(true);
+    const isNew = !editingId;
     const next = editingId
       ? entries.map(e => e.id === editingId ? { ...e, ...form } : e)
       : [{ id: uid(), ...form }, ...entries];
@@ -11995,6 +12216,9 @@ function TrainingLog({ playerName, isCoach }) {
     const sorted = next.slice().sort((a, b) => b.date.localeCompare(a.date));
     await storeSet("training:" + playerName, sorted);
     setEntries(sorted);
+    // Journal des modifications — uniquement pour un VRAI ajout, pas une simple édition d'une
+    // séance déjà existante (demandé par l'utilisateur : "ajout d'un entraînement").
+    if (isNew) logActivity("training", `${form.theme || form.thematique} · ${form.date} (${playerName})`);
     resetForm();
     setBusy(false);
   }
@@ -13000,7 +13224,7 @@ function TeamAdvancedStats({ advanced, isCoach }) {
   if (!advanced.perMatch.length) {
     return (
       <div>
-        <EmptyState text="No box score found in memory. Import a file from the 'Full Stats' tab (top menu) — this file, not the coding one, feeds this tab." />
+        <EmptyState text="No box score found in memory. Import a file from the 'Import' tab (Box scores) — this file, not the coding one, feeds this tab." />
       </div>
     );
   }
@@ -18600,7 +18824,7 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
   const [exportReport, setExportReport] = useState(null);
   const [exportMsg, setExportMsg] = useState("");
   const report = useScoutingReport(selectedTeam || null);
-  const [subtab, setSubtab] = useState("stats"); // ouvre directement sur "Stats" (le plus consulté)
+  const [subtab, setSubtab] = useState("collectif"); // ouvre directement sur "Collective" (demandé par l'utilisateur)
   const [editing, setEditing] = useState(null); // null | "new" | player object
   const [confirmDeletePlayerId, setConfirmDeletePlayerId] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -18638,6 +18862,29 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
   // Synchro de l'effectif depuis le site FFBB NM1 : joueur déjà créé (même nom) -> SEULE la photo
   // est remplacée (si le site en a une) ; joueur absent -> fiche créée (nom, numéro, taille, poste,
   // photo) avec notes/plan/main forte vides pour que le coach les complète.
+  // Sur téléphone, la largeur réelle de la carte joueur est bien plus étroite que l'estimation
+  // par défaut (pensée pour desktop) — photo et texte débordaient donc hors du cadre visible
+  // (signalé par l'utilisateur, onglet "Individual"). On mesure la largeur réelle de la colonne
+  // pour que la carte s'y ajuste, UNIQUEMENT sur téléphone (<860px, même seuil que le reste de
+  // l'appli) pour ne rien changer au rendu desktop existant.
+  const cardsListRef = useRef(null);
+  const [cardsListW, setCardsListW] = useState(0);
+  useEffect(() => {
+    const el = cardsListRef.current;
+    if (!el) return;
+    const measure = () => setCardsListW(el.clientWidth);
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  const [isMobileScoutingCard, setIsMobileScoutingCard] = useState(() => typeof window !== "undefined" && window.innerWidth < 860);
+  useEffect(() => {
+    function onResize() { setIsMobileScoutingCard(window.innerWidth < 860); }
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
   const [rosterMsg, setRosterMsg] = useState("");
   const [rosterBusy, setRosterBusy] = useState(false);
   async function syncFfbbRoster() {
@@ -18838,12 +19085,13 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
               {report.players.length === 0 && !editing ? (
                 <EmptyState text="No player scouted yet." />
               ) : (
-                <div className="screen-only">
+                <div className="screen-only" ref={cardsListRef}>
                   {report.players.map((p, i) => (
                     <ScoutingPlayerCard key={p.id} player={p} isCoach={isCoach} bgPhoto={teamBg?.photo} bgDarkness={teamBg?.darkness} bgStretch={teamBg?.stretch} teamLogo={teamLogo} chartScale={displaySettings?.chartScale} layout={scoutingLayout}
                       onEdit={() => setEditing(p)} onDelete={() => report.deletePlayer(p.id)} onEditLayout={() => setEditingLayoutFor(p.id)}
                       onMoveUp={() => report.movePlayer(p.id, "up")} onMoveDown={() => report.movePlayer(p.id, "down")}
-                      isFirst={i === 0} isLast={i === report.players.length - 1} />
+                      isFirst={i === 0} isLast={i === report.players.length - 1}
+                      fitWidthPx={isMobileScoutingCard ? (cardsListW || undefined) : undefined} />
                   ))}
                 </div>
               )}
@@ -19152,7 +19400,7 @@ function ObservationPrintReport({ name, team }) {
         </>
       )}
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Offense / Defense</h2>
-      <OffenseDefenseBreakdown off={off} def={def} categories={cats} forPrint />
+      <OffenseDefenseBreakdown off={off} def={def} categories={cats} forPrint detailTables={false} />
     </div>
   );
 }
@@ -19527,7 +19775,7 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
                 ) : null;
               })()}
               {playerOff.length + playerDef.length > 0
-                ? <OffenseDefenseBreakdown off={playerOff} def={playerDef} categories={categories} enableClipExport clipGrouping={clipGrouping} />
+                ? <OffenseDefenseBreakdown off={playerOff} def={playerDef} categories={categories} enableClipExport clipGrouping={clipGrouping} detailTables={false} />
                 : <EmptyState text="No tagged action for this player in the observation yet." />}
             </div>
           </div>
@@ -19696,6 +19944,7 @@ function ObservationTeamPanel({ teamName, team, isCoach, onChangeTeam }) {
           enableClipExport
           clipGrouping={clipGrouping}
           topContent={<ObservationPlayerStrip players={scoutingPlayers} off={off} def={def} isCoach={isCoach} categories={categories} clipGrouping={clipGrouping} teamName={teamName} />}
+          detailTables={false}
         />
       )}
     </>
@@ -20149,6 +20398,7 @@ function ObservationTab({ isCoach }) {
     await storeSet("scouting_observations", next);
     setObserved(next);
     setSelected(name);
+    logActivity("scoutingObservation", `${name} · ${preview.fileName || "file"}`);
     setPreview(null); setTeamName("");
     if (fileRef.current) fileRef.current.value = "";
     setBusy(false);
@@ -22105,6 +22355,7 @@ function CollectiveTraining({ roster }) {
         await storeSet("training:" + player.name, [entry, ...existing]);
       }
       setStatus(`Session added to ${selected.length} player${selected.length !== 1 ? "s" : ""} — saved under: ${selected.map(id => { const p = roster.find(pl => pl.id === id); return p ? `"${p.name}"` : "?"; }).join(", ")}.`);
+      logActivity("training", `${theme} · ${date} (team, ${selected.length} player${selected.length !== 1 ? "s" : ""})`);
       setTheme(""); setObjective(""); setCommentaire(""); setComments({});
     } catch (err) {
       setError("Save failed: " + (err.message || "erreur inconnue"));
@@ -22233,7 +22484,7 @@ function TeamPrintReport({ team, rows, otherLabels, advanced, teamOff, teamDef, 
       )}
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Team Play — Offense / Defense</h2>
-      <OffenseDefenseBreakdown off={teamOff} def={teamDef} forPrint />
+      <OffenseDefenseBreakdown off={teamOff} def={teamDef} forPrint detailTables={false} />
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Resources</h2>
       {resources.length === 0 ? <p>No resource shared.</p> : (
@@ -23496,7 +23747,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
 
       {subtab === "classement" && (isCoach || v.standings) && (
         rows.length === 0 ? (
-          <EmptyState text="Import box scores ('Full Stats' tab) to display the team standings — this is the source of truth for totals." />
+          <EmptyState text="Import box scores ('Import' tab, Box scores) to display the team standings — this is the source of truth for totals." />
         ) : (
           <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, overflow: "hidden" }}>
             <div style={{ display: "grid", gridTemplateColumns: `0.3fr 1.6fr 0.7fr 0.8fr ${otherLabels.map(() => "0.8fr").join(" ")}`, padding: "10px 16px", fontSize: 11, textTransform: "uppercase", letterSpacing: "0.05em", color: "#5C6470", borderBottom: `1px solid ${LINE}` }}>
