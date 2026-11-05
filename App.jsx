@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useLayoutEffect, useMemo, useRef } from "react";
+import React, { useState, useEffect, useLayoutEffect, useMemo, useRef, useCallback } from "react";
 import { createRoot } from "react-dom/client";
 import * as XLSX from "xlsx";
 import initSqlJs from "sql.js";
@@ -8534,6 +8534,39 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
     await storeSet("next_game_team", name);
   }
 
+  // Détection automatique du prochain match — demandé par l'utilisateur : utilise le calendrier
+  // officiel FFBB (même source que la synchro des box scores, équipe réglée dans Settings) pour
+  // remplir "Next game" tout seul, SANS écraser un choix fait à la main par le coach : si le
+  // champ stocké ne correspond plus au dernier adversaire auto-détecté (donc changé à la main
+  // depuis), on respecte ce choix et on ne le touche plus — jusqu'à ce que le coach revienne sur
+  // l'auto-détection lui-même (en resélectionnant l'adversaire proposé). "2nd Next Game"
+  // (coach uniquement) est un second raccourci purement automatique, vers l'adversaire suivant.
+  const [upcomingGames, setUpcomingGames] = useState([]); // [{ opponent, dm, time, venue, journee }, ...]
+  useEffect(() => {
+    if (!isCoach || !roster.length) return;
+    let alive = true;
+    (async () => {
+      try {
+        const teamParam = (await storeGet("ffbb_box_team")) || "Vitré";
+        const res = await fetch("/.netlify/functions/ffbb-nm1-matches?mode=upcoming&team=" + encodeURIComponent(teamParam));
+        const data = await res.json().catch(() => ({}));
+        if (!alive || !res.ok) return;
+        const games = data.games || [];
+        setUpcomingGames(games);
+        if (games.length) {
+          const autoOpp = (await storeGet("next_game_auto_opponent")) || "";
+          const current = (await storeGet("next_game_team")) || "";
+          if (!current || current === autoOpp) {
+            await storeSet("next_game_team", games[0].opponent);
+            await storeSet("next_game_auto_opponent", games[0].opponent);
+            if (alive) setNextGame(games[0].opponent);
+          }
+        }
+      } catch { /* silencieux, comme la synchro box score — ne doit jamais bloquer l'accueil */ }
+    })();
+    return () => { alive = false; };
+  }, [isCoach, roster.length]);
+
   async function submitWellness() {
     setWBusy(true); setWStatus("");
     const today = todayLocal();
@@ -8609,7 +8642,13 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
               {playerName && <PlayerBadges name={playerName} size={40} max={4} expandable />}
             </div>
             <div style={{ display: "inline-block", marginTop: 10, background: INK, color: PAPER, fontSize: 11, fontWeight: 700, padding: "5px 11px", borderRadius: 100 }}>
-              {isCoach ? "Head coach" : ([me?.position, me?.jersey ? `#${me.jersey}` : null].filter(Boolean).join(" · ") || "Player")}
+              {/* BUG RÉEL CORRIGÉ (signalé par l'utilisateur) : "Head coach" était codé en dur,
+                  alors que le nom affiché juste au-dessus (session.name) est déjà le rôle
+                  exact choisi à la connexion ("Head coach", "Assistant coach", "Analyst"...) —
+                  répéter "Head coach" ici était donc faux pour tout le monde sauf le head
+                  coach. "Staff" (même libellé générique que dans la barre du haut) évite la
+                  redondance avec le nom déjà affiché juste au-dessus. */}
+              {isCoach ? "Staff" : ([me?.position, me?.jersey ? `#${me.jersey}` : null].filter(Boolean).join(" · ") || "Player")}
             </div>
           </div>
         </div>
@@ -8705,6 +8744,21 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 10.5, color: AMBER, fontWeight: 700, letterSpacing: "0.08em" }}>NEXT GAME</div>
                 <div style={{ fontWeight: 700, fontSize: 15 }}>{nextGame}</div>
+              </div>
+              <ChevronRight size={16} color="#5C6470" />
+            </button>
+          )}
+          {/* "2nd Next Game" — demandé par l'utilisateur : raccourci coach uniquement vers
+              l'adversaire suivant (purement auto-détecté, pas de sélection manuelle pour
+              celui-ci), pour préparer le match d'après sans attendre que le premier soit joué. */}
+          {isCoach && upcomingGames[1] && scouting.teams[upcomingGames[1].opponent] && (
+            <button onClick={() => goToScouting("rapport", upcomingGames[1].opponent)} style={{ display: "flex", alignItems: "center", gap: 14, width: "100%", maxWidth: 320, padding: "14px 16px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, color: PAPER, cursor: "pointer", textAlign: "left", fontFamily: "inherit", marginTop: 10 }}>
+              <div style={{ width: 44, height: 44, borderRadius: 8, background: PANEL2, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+                {scouting.teams[upcomingGames[1].opponent].logo ? <img src={scouting.teams[upcomingGames[1].opponent].logo} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }} /> : <span style={{ fontSize: 18, fontWeight: 800, color: TEAL }}>{upcomingGames[1].opponent[0]}</span>}
+              </div>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 10.5, color: TEAL, fontWeight: 700, letterSpacing: "0.08em" }}>2ND NEXT GAME</div>
+                <div style={{ fontWeight: 700, fontSize: 15 }}>{upcomingGames[1].opponent}</div>
               </div>
               <ChevronRight size={16} color="#5C6470" />
             </button>
@@ -18867,18 +18921,23 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
   // (signalé par l'utilisateur, onglet "Individual"). On mesure la largeur réelle de la colonne
   // pour que la carte s'y ajuste, UNIQUEMENT sur téléphone (<860px, même seuil que le reste de
   // l'appli) pour ne rien changer au rendu desktop existant.
-  const cardsListRef = useRef(null);
+  // BUG RÉEL CORRIGÉ : un useRef classique + useEffect([]) ne mesurait RIEN, parce que les
+  // joueurs (report.players) se chargent de façon asynchrone — le <div> à mesurer n'existe donc
+  // pas encore au moment où cet effet (qui ne s'exécute qu'une seule fois, au montage) tournait.
+  // Une ref "callback" se redéclenche à chaque fois que le <div> apparaît réellement dans le
+  // DOM, même après coup, ce qui corrige la mesure.
+  const [cardsListEl, setCardsListEl] = useState(null);
+  const cardsListRef = useCallback(node => setCardsListEl(node), []);
   const [cardsListW, setCardsListW] = useState(0);
   useEffect(() => {
-    const el = cardsListRef.current;
-    if (!el) return;
-    const measure = () => setCardsListW(el.clientWidth);
+    if (!cardsListEl) return;
+    const measure = () => setCardsListW(cardsListEl.clientWidth);
     measure();
     if (typeof ResizeObserver === "undefined") return;
     const ro = new ResizeObserver(measure);
-    ro.observe(el);
+    ro.observe(cardsListEl);
     return () => ro.disconnect();
-  }, []);
+  }, [cardsListEl]);
   const [isMobileScoutingCard, setIsMobileScoutingCard] = useState(() => typeof window !== "undefined" && window.innerWidth < 860);
   useEffect(() => {
     function onResize() { setIsMobileScoutingCard(window.innerWidth < 860); }
