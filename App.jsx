@@ -19734,6 +19734,19 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
   const confirmedTags = useMemo(() => new Set(allTags.filter(t => tagMap[t] === true)), [allTags, tagMap]);
   const confirmedNorm = useMemo(() => new Set([...confirmedTags].map(normTag)), [confirmedTags]);
   const matched = players.filter(p => p.ffbbStats || scoutingPlayerNameCandidates(p).some(c => confirmedNorm.has(c)));
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : écran blanc à l'ouverture de Scouting →
+  // Observation d'une équipe, erreur React "Rendered more hooks than during the previous
+  // render") : ce useMemo était déclaré APRÈS les deux "return null" ci-dessous — donc pas
+  // appelé du tout sur un rendu qui s'arrête à l'un de ces "return", mais appelé sur un rendu
+  // qui va plus loin (ex. une fois les joueurs chargés) : React voit alors un nombre de hooks
+  // différent d'un rendu à l'autre et plante. Remonté ici, AVANT les "return", comme tous les
+  // autres hooks du composant — toujours appelé, quel que soit le rendu.
+  const roleClipCounts = useMemo(() => {
+    if (!openPlayer) return {};
+    const counts = {};
+    for (const [label, role] of Object.entries(ROLE_CLIP_MAP)) counts[label] = rolePlaysForPlayer(combinedPlays, openPlayer, role).length;
+    return counts;
+  }, [openPlayer, combinedPlays]);
 
   if (!allTags.length && !matched.length) return null;
   if (!isCoach && !matched.length) return null;
@@ -19742,13 +19755,6 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
     const match = (p) => p.player && confirmedTags.has(p.player) && matchesScoutingPlayer(p.player, player);
     return { playerOff: off.filter(match), playerDef: def.filter(match) };
   }
-
-  const roleClipCounts = useMemo(() => {
-    if (!openPlayer) return {};
-    const counts = {};
-    for (const [label, role] of Object.entries(ROLE_CLIP_MAP)) counts[label] = rolePlaysForPlayer(combinedPlays, openPlayer, role).length;
-    return counts;
-  }, [openPlayer, combinedPlays]);
 
   function openRoleClips(label) {
     const role = ROLE_CLIP_MAP[label];
