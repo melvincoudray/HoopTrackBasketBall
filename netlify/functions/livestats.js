@@ -10,7 +10,10 @@
 // Le navigateur ne peut pas lire data.json directement (pas de CORS) : cette fonction sert de relais.
 const ROOT = "https://nm1.ffbb.com";
 const LIVE = "https://fibalivestats.dcd.shared.geniussports.com";
-const UA = { "User-Agent": "HoopTrack/1.0 (livestats sync)" };
+// UA "HoopTrack/1.0" OK pour nm1.ffbb.com, mais geniussports.com bloque (403) les clients non-navigateur :
+// on se fait passer pour un vrai navigateur + Referer sur la page LiveStats concernée (confirmé le 05/11/2026 :
+// la même URL /data/<id>/data.json répond bien en JSON complet depuis un vrai navigateur).
+const UA = { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", "Accept": "*/*" };
 const norm = s => String(s).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
 const dec = s => String(s).replace(/&amp;/g, "&").replace(/&quot;/g, '"').replace(/&#0?39;|&apos;|&rsquo;/g, "'").replace(/&eacute;/g, "é").replace(/&egrave;/g, "è");
 const headers = { "Content-Type": "application/json", "Cache-Control": "no-cache" };
@@ -51,7 +54,7 @@ export const handler = async (event) => {
     }
     if (q.live) {
       const id = String(q.live).replace(/\D/g, "");
-      const r = await fetch(`${LIVE}/data/${id}/data.json`, { headers: UA });
+      const r = await fetch(`${LIVE}/data/${id}/data.json`, { headers: { ...UA, Referer: `${LIVE}/u/FFBB/${id}/` } });
       if (!r.ok) return { statusCode: 502, headers, body: JSON.stringify({ error: "LiveStats answered " + r.status }) };
       const d = await r.json();
       const teams = {};
