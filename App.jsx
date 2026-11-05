@@ -8429,6 +8429,20 @@ function HomeSectionLink({ eyebrow, title, onClick }) {
   );
 }
 
+// "2nd Next Game" (voir plus bas) n'apparaissait jamais : l'adversaire vient du calendrier FFBB
+// (orthographe FFBB, ex. "Les Sables d'Olonne"), alors que la fiche Scouting Report existante peut
+// avoir été créée avec une orthographe légèrement différente (accent, apostrophe, "Les" en moins…) —
+// une égalité stricte entre les deux chaînes échouait donc silencieusement. On cherche maintenant la
+// fiche Scouting Report correspondante de façon souple (même normalisation que le reste du site),
+// et on renvoie sa VRAIE clé (celle à utiliser pour l'ouvrir), pas le nom FFBB tel quel.
+function matchScoutingTeamKey(teams, name) {
+  if (!name || !teams) return null;
+  if (teams[name]) return name;
+  const n = normTag(name);
+  const keys = Object.keys(teams);
+  return keys.find(k => normTag(k) === n) || keys.find(k => normTag(k).includes(n) || n.includes(normTag(k))) || null;
+}
+
 function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, team, goToPlayer, goToPlayers, goToScouting, goToTeam, goToPlanning, goToDraw, goToMontage, visibility }) {
   const box = useBoxScore(playerName, matchFilter);
   const advanced = useTeamAdvancedStats(matchFilter);
@@ -8751,18 +8765,22 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
           {/* "2nd Next Game" — demandé par l'utilisateur : raccourci coach uniquement vers
               l'adversaire suivant (purement auto-détecté, pas de sélection manuelle pour
               celui-ci), pour préparer le match d'après sans attendre que le premier soit joué. */}
-          {isCoach && upcomingGames[1] && scouting.teams[upcomingGames[1].opponent] && (
-            <button onClick={() => goToScouting("rapport", upcomingGames[1].opponent)} style={{ display: "flex", alignItems: "center", gap: 14, width: "100%", maxWidth: 320, padding: "14px 16px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, color: PAPER, cursor: "pointer", textAlign: "left", fontFamily: "inherit", marginTop: 10 }}>
-              <div style={{ width: 44, height: 44, borderRadius: 8, background: PANEL2, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
-                {scouting.teams[upcomingGames[1].opponent].logo ? <img src={scouting.teams[upcomingGames[1].opponent].logo} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }} /> : <span style={{ fontSize: 18, fontWeight: 800, color: TEAL }}>{upcomingGames[1].opponent[0]}</span>}
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 10.5, color: TEAL, fontWeight: 700, letterSpacing: "0.08em" }}>2ND NEXT GAME</div>
-                <div style={{ fontWeight: 700, fontSize: 15 }}>{upcomingGames[1].opponent}</div>
-              </div>
-              <ChevronRight size={16} color="#5C6470" />
-            </button>
-          )}
+          {isCoach && upcomingGames[1] && (() => {
+            const key2 = matchScoutingTeamKey(scouting.teams, upcomingGames[1].opponent);
+            if (!key2) return null;
+            return (
+              <button onClick={() => goToScouting("rapport", key2)} style={{ display: "flex", alignItems: "center", gap: 14, width: "100%", maxWidth: 320, padding: "14px 16px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, color: PAPER, cursor: "pointer", textAlign: "left", fontFamily: "inherit", marginTop: 10 }}>
+                <div style={{ width: 44, height: 44, borderRadius: 8, background: PANEL2, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+                  {scouting.teams[key2].logo ? <img src={scouting.teams[key2].logo} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }} /> : <span style={{ fontSize: 18, fontWeight: 800, color: TEAL }}>{upcomingGames[1].opponent[0]}</span>}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 10.5, color: TEAL, fontWeight: 700, letterSpacing: "0.08em" }}>2ND NEXT GAME</div>
+                  <div style={{ fontWeight: 700, fontSize: 15 }}>{upcomingGames[1].opponent}</div>
+                </div>
+                <ChevronRight size={16} color="#5C6470" />
+              </button>
+            );
+          })()}
         </div>
       )}
 
