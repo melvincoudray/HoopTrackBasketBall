@@ -42,24 +42,36 @@ export function parseSchedule(html) {
 
 // Tous les matchs (joués ou à venir) du calendrier d'une page : + horaire et journée.
 // [{ id, slug, dm: "JJ/MM", time: "HH:MM", journee: "Journée 8, Group B", home, away, played, livestat }]
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur le 05/11/2026 : "Next Game" auto ne remontait AUCUN
+// match à venir, alors que le calendrier FFBB en affiche bien) : on exigeait jusqu'ici le lien vers
+// la page de match (/saison-reguliere/match/<id>-<slug>, avec son propre title="Home vs Away") pour
+// identifier CHAQUE match — or cette page de match n'existe que pour les matchs déjà joués (elle est
+// créée après coup). Pour un match pas encore joué, le <li> n'a donc pas ce lien du tout, et l'entrée
+// était silencieusement ignorée. Le conteneur englobant (title="Home vs Away" + lien FIBA LiveStats),
+// lui, est bien présent sur TOUS les matchs, joués ou non — on le lit en priorité, et on ne se sert
+// du lien vers la page de match que pour récupérer l'id/slug FFBB (utile pour aller lire le box score
+// détaillé une fois le match joué).
 export function parseCalendar(html) {
   const out = new Map();
   const re = /<li class="display-games__third-list__entry[^"]*">([\s\S]*?)<\/li>/g;
   let m;
   while ((m = re.exec(html))) {
     const li = m[1];
+    const cont = li.match(/<div class="display-games__third-list__entry__container[^"]*"[^>]*href="[^"]*\/u\/FFBB\/(\d+)\/?"[^>]*title="([^"]*)"/);
+    if (!cont) continue;
+    const lsId = cont[1];
     const link = li.match(/href="\/saison-reguliere\/match\/(\d+)-([^"]+)"[^>]*title="([^"]*)"/);
-    if (!link) continue;
     const dt = strip((li.match(/<span class="date">([\s\S]*?)<\/span>/) || [])[1] || "").match(/(\d{2})\/(\d{2})\s+(\d{2}:\d{2})/) || [];
     const jr = strip((li.match(/<span class="game__day">([\s\S]*?)<\/span>/) || [])[1] || "");
     const alts = [...li.matchAll(/<img class="picture"[^>]*alt="([^"]*)"/g)].map(x => decodeEntities(x[1]).trim());
     const scores = [...li.matchAll(/<span class="team__score[^"]*">\s*([^<]*?)\s*<\/span>/g)].map(x => x[1].trim());
-    const [home, away] = decodeEntities(link[3]).split(/\s+vs\s+/);
-    // Id FIBA LiveStats (fibalivestats.dcd.shared.geniussports.com/u/FFBB/<id>/), présent sur chaque
-    // entrée du calendrier dès que le match a été diffusé en direct — sert à aller chercher les points
-    // contre-attaque / 2e chance / après balles perdues / banc / intérieurs (mode=livestat ci-dessous).
-    const lsId = (li.match(/fibalivestats[^"]*\/u\/FFBB\/(\d+)\//) || [])[1] || null;
-    if (!out.has(link[1])) out.set(link[1], { id: link[1], slug: link[2], dm: dt[1] ? dt[1] + "/" + dt[2] : null, time: dt[3] || null, journee: jr, home: (alts[0] || home || "").trim(), away: (alts[1] || away || "").trim(), played: /^\d+$/.test(scores[0] || ""), livestat: lsId });
+    const [home, away] = decodeEntities(cont[2]).split(/\s+vs\s+/);
+    // Id/slug FFBB de la page de match (pour le box score détaillé) : seulement si déjà joué. Sinon,
+    // on se rabat sur l'id FIBA LiveStats (unique et déjà présent dans tous les cas) pour identifier
+    // le match de façon stable.
+    const id = link ? link[1] : "ls" + lsId;
+    const slug = link ? link[2] : null;
+    if (!out.has(id)) out.set(id, { id, slug, dm: dt[1] ? dt[1] + "/" + dt[2] : null, time: dt[3] || null, journee: jr, home: (alts[0] || home || "").trim(), away: (alts[1] || away || "").trim(), played: /^\d+$/.test(scores[0] || ""), livestat: lsId });
   }
   return [...out.values()];
 }
