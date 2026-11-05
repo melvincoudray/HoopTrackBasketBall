@@ -5229,11 +5229,13 @@ function BreakdownChart({ title, data }) {
 // misc." (PPPP, ex. paniers marqués) ou "Shot selection" (Open, ex. Open/Contested), quel(s)
 // tag(s) combiner avec celui de la ligne — car "paniers marqués" n'est pas un tag unique mais
 // plusieurs (2PT+, 3PT+, FT+…), et le coach doit pouvoir choisir lesquels inclure.
-function MetricBarList({ title, items, color = AMBER, onItemClick, onPpppClick, onOpenClick, onTovClick }) {
+function MetricBarList({ title, items, color = AMBER, onItemClick, onPpppClick, onOpenClick, onTovClick, bare = false }) {
   if (!items.length) return null;
-  return (
-    <div data-no-split="true" style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, flex: "1 1 320px" }}>
-      <div style={{ fontSize: 13, fontWeight: 700, color: PAPER, marginBottom: 4 }}>{title}</div>
+  // bare=true (demandé par l'utilisateur, pour fusionner visuellement cette liste avec son
+  // donut dans UnifiedBreakdownCard) : on rend seulement l'en-tête + les lignes, sans le cadre
+  // ni le titre qui dupliquaient la carte englobante — la carte appelante fournit déjà les deux.
+  const rows = (
+    <>
       <div style={{ display: "grid", gridTemplateColumns: "1.1fr 1fr 0.55fr 0.55fr 0.55fr", padding: "8px 0 6px", fontSize: 10.5, textTransform: "uppercase", letterSpacing: "0.05em", color: "#5C6470", borderBottom: `1px solid ${LINE}` }}>
         <div>Name</div><div>Frequency</div><div>PPPP</div><div>Open</div><div>% TOV</div>
       </div>
@@ -5252,6 +5254,47 @@ function MetricBarList({ title, items, color = AMBER, onItemClick, onPpppClick, 
           <div onClick={onTovClick && it.tov > 0 ? () => onTovClick(it.name) : undefined} title={onTovClick && it.tov > 0 ? "View clips of these actions that end in a turnover" : undefined} style={{ fontFamily: "ui-monospace, monospace", color: it.tov !== null && it.tov !== undefined && it.tov > 0 ? RED : "#5C6470", cursor: onTovClick && it.tov > 0 ? "pointer" : "default" }}>{it.tov !== null && it.tov !== undefined ? it.tov.toFixed(0) + "%" : "–"}</div>
         </div>
       ))}
+    </>
+  );
+  if (bare) return rows;
+  return (
+    <div data-no-split="true" style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18, flex: "1 1 320px" }}>
+      <div style={{ fontSize: 13, fontWeight: 700, color: PAPER, marginBottom: 4 }}>{title}</div>
+      {rows}
+    </div>
+  );
+}
+
+// Carte unifiée (donut + efficacité DANS la même carte, filet de couleur en haut) — demandé
+// par l'utilisateur pour que la cohabitation de tous les blocs Plays/Playtypes/Shooting
+// Selection/Screen defense/Spacing reste lisible, au lieu de deux cartes identiques
+// (DonutCard puis MetricBarList) empilées à chaque fois. Le donut lui-même n'a pas changé
+// ("j'aime bien mon donut") : on réutilise DonutChart/DonutLegend tels quels.
+function UnifiedBreakdownCard({ accent, donutTitle, donutData, donutNote, donutUnit, showDonut = true, metricTitle, items, metricColor, onItemClick, onPpppClick, onOpenClick, onTovClick, showMetric = true }) {
+  const hasItems = showMetric && items && items.length > 0;
+  if (!showDonut && !hasItems) return null;
+  return (
+    <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 14, overflow: "hidden", flex: "1 1 320px" }}>
+      <div style={{ height: 4, background: accent }} />
+      <div style={{ padding: 18 }}>
+        {showDonut && (
+          <>
+            <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 12 }}>{donutTitle}</div>
+            <div style={{ display: "flex", gap: 16, alignItems: "center", marginBottom: hasItems ? 16 : 0 }}>
+              <DonutChart data={donutData} unit={donutUnit} size={92} />
+              <div style={{ flex: 1 }}>
+                {donutData.length ? <DonutLegend data={donutData} onItemClick={onItemClick} /> : <span style={{ fontSize: 12.5, color: "#5C6470" }}>{donutNote || "Not enough data."}</span>}
+              </div>
+            </div>
+          </>
+        )}
+        {hasItems && (
+          <div style={showDonut ? { borderTop: `1px solid ${LINE}`, paddingTop: 12 } : undefined}>
+            <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>{metricTitle}</div>
+            <MetricBarList items={items} color={metricColor} onItemClick={onItemClick} onPpppClick={onPpppClick} onOpenClick={onOpenClick} onTovClick={onTovClick} bare />
+          </div>
+        )}
+      </div>
     </div>
   );
 }
@@ -5316,7 +5359,12 @@ function tagBreakdown(source) {
 // date/adversaire sur ces imports. N'a d'effet que là où l'appelant le passe explicitement —
 // aujourd'hui Team > Team Play, la fiche joueur et Scouting > Observation (voir TeamTab /
 // PlayerDetail / ObservationTab / ScoutingStaffPanel).
-function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, enableClipExport = false, clipGrouping, topContent }) {
+function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, enableClipExport = false, clipGrouping, topContent, forPrint = false }) {
+  // Demandé par l'utilisateur : un seul toggle Attaque/Défense à l'écran plutôt que les deux
+  // blocs empilés d'un coup (mêmes graphiques en double, l'un sous l'autre) — pour garder la
+  // cohabitation de tous les blocs lisible. En PDF (forPrint), pas de bouton cliquable
+  // possible sur papier : les deux côtés restent affichés l'un après l'autre comme avant.
+  const [side, setSide] = useState("off");
   const cats = categories || currentTagCategories();
   const [clipModal, setClipModal] = useState(null); // { name, side: "off"|"def", extraTags? } | null
   // Demandé par l'utilisateur : cliquer sur PPPP ou Open doit d'abord demander QUELS tags de
@@ -5390,108 +5438,93 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
 
   if (!off.length && !def.length) return <EmptyState text="No action coded yet (Import Match tab)." />;
 
+  // Construit la liste des cartes unifiées (donut + efficacité) d'un côté donné, dans le même
+  // ordre qu'avant (Plays, Shooting Selection/Playtypes, Screen defense, Spacing, catégories
+  // personnalisées, puis Screen defense par Spacing) — un filet de couleur différent par
+  // catégorie, qui reste le même repère (ex. Plays = toujours la 1ère couleur) qu'on regarde
+  // l'attaque ou la défense, pour s'y retrouver en changeant d'onglet.
+  function buildCards(isOff) {
+    const metricColor = isOff ? AMBER : TEAL;
+    const sideKey = isOff ? "off" : "def";
+    const clip = isOff ? clipOff : clipDef;
+    const onItemClick = enableClipExport ? (name, within) => setClipModal({ name, side: sideKey, within }) : undefined;
+    const onPpppClick = isOff ? ppppClickOff : ppppClickDef;
+    const onOpenClick = isOff ? openClickOff : openClickDef;
+    const onTovClick = isOff ? tovClickOff : tovClickDef;
+    let i = 0;
+    const next = () => CHART_COLORS[i++ % CHART_COLORS.length];
+    const cards = [];
+    if (isOff) {
+      cards.push({ key: "plays", accent: next(), donutTitle: "Plays (game entries)", donutData: offPlaysDonut.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), metricTitle: "Efficiency by play", items: offPlaysList, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
+      cards.push({ key: "shooting", accent: next(), donutTitle: "Shooting Selection", donutData: offShooting, donutNote: "Open/Contested tags not present yet.", metricTitle: "Efficiency by playtype", items: offPlaytypesList, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
+      cards.push({ key: "screendef", accent: next(), donutTitle: "Screen defense faced (opponent coverage)", donutData: offScreenDef.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No screen coverage tag detected.", metricTitle: "Efficiency by coverage faced", items: offScreenDef, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
+      cards.push({ key: "spacing", accent: next(), donutTitle: "Spacing played on screens", donutData: offSpacing.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No spacing tag detected.", metricTitle: "Efficiency by spacing", items: offSpacing, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
+      customOff.filter(c => c.items.length).forEach(c => {
+        const style = chartStyleFor(c.name);
+        cards.push({ key: "custom-off-" + c.name, accent: next(), showDonut: style === "simple" || style === "both", donutTitle: c.name, donutData: c.items.map((it, j) => ({ ...it, color: CHART_COLORS[j % CHART_COLORS.length] })), showMetric: style === "detailed" || style === "both", metricTitle: c.name, items: c.items, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
+      });
+      offSpacingScreenDef.forEach(s => {
+        cards.push({
+          key: "off-spacing-" + s.spacing, accent: next(), donutTitle: `${s.spacing} — screen defense faced`, donutData: s.breakdown.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No screen coverage tag on these plays.",
+          metricTitle: `${s.spacing} — efficiency by coverage`, items: s.breakdown, metricColor,
+          onItemClick: enableClipExport ? (name) => setClipModal({ name, side: "off", within: s.spacing }) : undefined,
+          onPpppClick: enableClipExport ? (name) => setSecondaryPicker({ name, side: "off", category: "Results & misc.", within: s.spacing }) : undefined,
+          onOpenClick: enableClipExport ? (name) => setSecondaryPicker({ name, side: "off", category: "Shot selection", within: s.spacing }) : undefined,
+          onTovClick: enableClipExport ? (name) => setClipModal({ name, side: "off", extraTags: ["TOV"], within: s.spacing }) : undefined,
+        });
+      });
+    } else {
+      cards.push({ key: "shooting", accent: next(), donutTitle: "Shooting Selection (defense)", donutData: defShooting, donutNote: "Open/Contested tags not present yet.", metricTitle: "Playtypes defended — efficiency", items: defPlaytypesList, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
+      cards.push({ key: "mistakes", accent: next(), donutTitle: "Defensive mistakes", donutData: defMistakes, donutNote: "No defensive mistake tag detected.", metricTitle: "Plays defended — efficiency", items: defPlaysList, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
+      cards.push({ key: "screendef", accent: next(), donutTitle: "Screen defense played", donutData: defScreenDef.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No screen coverage tag detected.", metricTitle: "Efficiency by coverage used", items: defScreenDef, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
+      cards.push({ key: "spacing", accent: next(), donutTitle: "Spacing faced on screens", donutData: defSpacing.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No spacing tag detected.", metricTitle: "Efficiency by spacing faced", items: defSpacing, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
+      customDef.filter(c => c.items.length).forEach(c => {
+        const style = chartStyleFor(c.name);
+        cards.push({ key: "custom-def-" + c.name, accent: next(), showDonut: style === "simple" || style === "both", donutTitle: c.name, donutData: c.items.map((it, j) => ({ ...it, color: CHART_COLORS[j % CHART_COLORS.length] })), showMetric: style === "detailed" || style === "both", metricTitle: c.name, items: c.items, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
+      });
+      defSpacingScreenDef.forEach(s => {
+        cards.push({
+          key: "def-spacing-" + s.spacing, accent: next(), donutTitle: `${s.spacing} — screen defense used`, donutData: s.breakdown.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No screen coverage tag on these plays.",
+          metricTitle: `${s.spacing} — efficiency by coverage`, items: s.breakdown, metricColor,
+          onItemClick: enableClipExport ? (name) => setClipModal({ name, side: "def", within: s.spacing }) : undefined,
+          onPpppClick: enableClipExport ? (name) => setSecondaryPicker({ name, side: "def", category: "Results & misc.", within: s.spacing }) : undefined,
+          onOpenClick: enableClipExport ? (name) => setSecondaryPicker({ name, side: "def", category: "Shot selection", within: s.spacing }) : undefined,
+          onTovClick: enableClipExport ? (name) => setClipModal({ name, side: "def", extraTags: ["TOV"], within: s.spacing }) : undefined,
+        });
+      });
+    }
+    return cards;
+  }
+
+  function renderCards(cards) {
+    return (
+      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 26 }}>
+        {cards.map(c => <UnifiedBreakdownCard key={c.key} {...c} />)}
+      </div>
+    );
+  }
+
+  const offCards = buildCards(true);
+  const defCards = buildCards(false);
+
   return (
     <>
       {topContent}
-      <SectionTitle eyebrow="Source: coding file" title="Offense — how the ball is played" />
-      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 26 }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-          <DonutCard title="Plays (game entries)" data={offPlaysDonut.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} onItemClick={clipOff} />
-          <MetricBarList title="Efficiency by play" items={offPlaysList} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} onTovClick={tovClickOff} />
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-          <DonutCard title="Shooting Selection" data={offShooting} note="Open/Contested tags not present yet." />
-          <MetricBarList title="Efficiency by playtype" items={offPlaytypesList} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} onTovClick={tovClickOff} />
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-          <DonutCard title="Screen defense faced (opponent coverage)" data={offScreenDef.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag detected." onItemClick={clipOff} />
-          <MetricBarList title="Efficiency by coverage faced" items={offScreenDef} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} onTovClick={tovClickOff} />
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-          <DonutCard title="Spacing played on screens" data={offSpacing.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No spacing tag detected." onItemClick={clipOff} />
-          <MetricBarList title="Efficiency by spacing" items={offSpacing} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} onTovClick={tovClickOff} />
-        </div>
-        {/* Catégories personnalisées (créées dans Settings, au-delà des 4 intégrées ci-dessus)
-            — intégrées directement ici, dans la même grille, sans section "Custom"/"Other"
-            séparée qui les isolait tout en bas auparavant. */}
-        {customOff.filter(c => c.items.length).map(c => {
-          const style = chartStyleFor(c.name);
-          return (
-            <div key={"off-" + c.name} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-              {(style === "simple" || style === "both") && <DonutCard title={c.name} data={c.items.map((it, i) => ({ ...it, color: CHART_COLORS[i % CHART_COLORS.length] }))} onItemClick={clipOff} />}
-              {(style === "detailed" || style === "both") && <MetricBarList title={c.name} items={c.items} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off" }) : undefined} onPpppClick={ppppClickOff} onOpenClick={openClickOff} onTovClick={tovClickOff} />}
-            </div>
-          );
-        })}
-      </div>
-
-      <SectionTitle eyebrow="Source: coding file" title="Defense — what we defend against" />
-      <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 26 }}>
-        <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-          <DonutCard title="Shooting Selection (defense)" data={defShooting} note="Open/Contested tags not present yet." />
-          <MetricBarList title="Playtypes defended — efficiency" items={defPlaytypesList} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} onTovClick={tovClickDef} />
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-          <DonutCard title="Defensive mistakes" data={defMistakes} note="No defensive mistake tag detected." onItemClick={clipDef} />
-          <MetricBarList title="Plays defended — efficiency" items={defPlaysList} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} onTovClick={tovClickDef} />
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-          <DonutCard title="Screen defense played" data={defScreenDef.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag detected." onItemClick={clipDef} />
-          <MetricBarList title="Efficiency by coverage used" items={defScreenDef} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} onTovClick={tovClickDef} />
-        </div>
-        <div style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-          <DonutCard title="Spacing faced on screens" data={defSpacing.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No spacing tag detected." onItemClick={clipDef} />
-          <MetricBarList title="Efficiency by spacing faced" items={defSpacing} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} onTovClick={tovClickDef} />
-        </div>
-        {customDef.filter(c => c.items.length).map(c => {
-          const style = chartStyleFor(c.name);
-          return (
-            <div key={"def-" + c.name} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-              {(style === "simple" || style === "both") && <DonutCard title={c.name} data={c.items.map((it, i) => ({ ...it, color: CHART_COLORS[i % CHART_COLORS.length] }))} onItemClick={clipDef} />}
-              {(style === "detailed" || style === "both") && <MetricBarList title={c.name} items={c.items} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def" }) : undefined} onPpppClick={ppppClickDef} onOpenClick={openClickDef} onTovClick={tovClickDef} />}
-            </div>
-          );
-        })}
-      </div>
-
-      {/* Demandé par l'utilisateur, en plus des sections ci-dessus : défense d'écran vue selon
-          le Spacing utilisé — un bloc par valeur de Spacing (existante ou ajoutée plus tard
-          dans Settings), attaque et défense. */}
-      {(offSpacingScreenDef.length > 0 || defSpacingScreenDef.length > 0) && (
+      {forPrint ? (
         <>
-          <SectionTitle eyebrow="Source: coding file" title="Screen defense by spacing" />
-          {offSpacingScreenDef.length > 0 && (
-            <>
-              <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 10 }}>Offense — coverage faced, by spacing</div>
-              {/* BUG RÉEL CORRIGÉ (signalé par l'utilisateur, capture d'écran) : les cartes
-                  étaient trop étroites (260px au lieu des 320px utilisés partout ailleurs dans
-                  ce composant), coupant les pourcentages sur le bord droit — et MetricBarList
-                  (qui affiche PPPP et %Open) manquait entièrement, alors que chaque autre bloc
-                  de cette section l'a toujours en plus du donut. Corrigé pour suivre exactement
-                  le même schéma que "Screen defense faced"/"Spacing played" juste au-dessus. */}
-              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 20 }}>
-                {offSpacingScreenDef.map(s => (
-                  <div key={"off-spacing-" + s.spacing} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-                    <DonutCard title={s.spacing} data={s.breakdown.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag on these plays." onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off", within: s.spacing }) : undefined} />
-                    <MetricBarList title={`${s.spacing} — efficiency by coverage`} items={s.breakdown} color={AMBER} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "off", within: s.spacing }) : undefined} onPpppClick={enableClipExport ? (name) => setSecondaryPicker({ name, side: "off", category: "Results & misc.", within: s.spacing }) : undefined} onOpenClick={enableClipExport ? (name) => setSecondaryPicker({ name, side: "off", category: "Shot selection", within: s.spacing }) : undefined} onTovClick={enableClipExport ? (name) => setClipModal({ name, side: "off", extraTags: ["TOV"], within: s.spacing }) : undefined} />
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
-          {defSpacingScreenDef.length > 0 && (
-            <>
-              <div style={{ fontSize: 12, color: "#8B93A1", marginBottom: 10 }}>Defense — coverage used, by spacing</div>
-              <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 26 }}>
-                {defSpacingScreenDef.map(s => (
-                  <div key={"def-spacing-" + s.spacing} style={{ display: "flex", flexDirection: "column", gap: 16, flex: "1 1 320px" }}>
-                    <DonutCard title={s.spacing} data={s.breakdown.map((d, i) => ({ ...d, color: CHART_COLORS[i % CHART_COLORS.length] }))} note="No screen coverage tag on these plays." onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def", within: s.spacing }) : undefined} />
-                    <MetricBarList title={`${s.spacing} — efficiency by coverage`} items={s.breakdown} color={TEAL} onItemClick={enableClipExport ? (name) => setClipModal({ name, side: "def", within: s.spacing }) : undefined} onPpppClick={enableClipExport ? (name) => setSecondaryPicker({ name, side: "def", category: "Results & misc.", within: s.spacing }) : undefined} onOpenClick={enableClipExport ? (name) => setSecondaryPicker({ name, side: "def", category: "Shot selection", within: s.spacing }) : undefined} onTovClick={enableClipExport ? (name) => setClipModal({ name, side: "def", extraTags: ["TOV"], within: s.spacing }) : undefined} />
-                  </div>
-                ))}
-              </div>
-            </>
-          )}
+          <SectionTitle eyebrow="Source: coding file" title="Offense — how the ball is played" />
+          {renderCards(offCards)}
+          <SectionTitle eyebrow="Source: coding file" title="Defense — what we defend against" />
+          {renderCards(defCards)}
+        </>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 4, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 4, marginBottom: 20 }}>
+            <button type="button" onClick={() => setSide("off")} style={{ flex: 1, background: side === "off" ? AMBER : "transparent", color: side === "off" ? INK : "#AEB5BF", border: "none", borderRadius: 9, padding: 9, cursor: "pointer", fontSize: 13, fontWeight: side === "off" ? 800 : 700, fontFamily: "inherit" }}>Offense</button>
+            <button type="button" onClick={() => setSide("def")} style={{ flex: 1, background: side === "def" ? AMBER : "transparent", color: side === "def" ? INK : "#AEB5BF", border: "none", borderRadius: 9, padding: 9, cursor: "pointer", fontSize: 13, fontWeight: side === "def" ? 800 : 700, fontFamily: "inherit" }}>Defense</button>
+          </div>
+          <SectionTitle eyebrow="Source: coding file" title={side === "off" ? "Offense — how the ball is played" : "Defense — what we defend against"} />
+          {renderCards(side === "off" ? offCards : defCards)}
         </>
       )}
 
@@ -8243,6 +8276,10 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   const objectives = useObjectives(playerName || "");
   const push = usePushNotifications(team?.id, session?.name);
   const [trainings, setTrainings] = useState([]);
+  // Total réel des séances (pas seulement les 3 dernières gardées dans `trainings`) — utilisé
+  // par le nouveau bloc "Season record" de l'accueil (demandé par l'utilisateur).
+  const [trainingsTotal, setTrainingsTotal] = useState(0);
+  const [playbookCount, setPlaybookCount] = useState(0);
   const [mentalEntries, setMentalEntries] = useState([]);
   const [wellnessEntries, setWellnessEntries] = useState([]);
   const [wSlot, setWSlot] = useState("wake");
@@ -8300,7 +8337,11 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
       // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : les séances n'étaient pas dans l'ordre
       // chronologique, mais dans l'ordre d'insertion dans l'app) : trié explicitement par date
       // décroissante avant de ne garder que les 3 plus récentes.
-      storeGet("training:" + playerName).then(t => setTrainings((t || []).slice().sort((a, b) => b.date.localeCompare(a.date)).slice(0, 3)));
+      storeGet("training:" + playerName).then(t => {
+        const all = t || [];
+        setTrainingsTotal(all.length);
+        setTrainings(all.slice().sort((a, b) => b.date.localeCompare(a.date)).slice(0, 3));
+      });
       storeGet("mental:" + playerName).then(m => setMentalEntries(m || []));
       storeGet("wellness:" + playerName).then(w => setWellnessEntries(w || []));
       storeGet("role:" + playerName).then(r => setRole(r || null));
@@ -8308,6 +8349,7 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   }, [playerName]);
 
   useEffect(() => { storeGet("next_game_team").then(n => setNextGame(n || "")); }, []);
+  useEffect(() => { storeGet("draw_playbooks").then(b => setPlaybookCount((b || []).length)); }, []);
 
   async function saveNextGame(name) {
     setNextGame(name);
@@ -8358,58 +8400,142 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
     ? mentalEntries.reduce((s, e) => s + (Object.values(e.ratings || {}).reduce((a, b) => a + b, 0) / (Object.values(e.ratings || {}).length || 1)), 0) / mentalEntries.length
     : null;
 
+  // Fiche du joueur dans l'effectif (numéro, poste) pour le nouveau bandeau d'accueil.
+  const me = playerName ? roster.find(p => p.name === playerName) : null;
+  // Bilan victoires/défaites de la saison, calculé à partir des box scores déjà importés
+  // (pts vs opponentScore) — demandé par l'utilisateur pour le nouveau bloc "Season record"
+  // de l'accueil, plutôt qu'une donnée inventée.
+  const record = advanced.perMatch.reduce((acc, m) => {
+    if (m.pts != null && m.opponentScore != null) {
+      if (m.pts > m.opponentScore) acc.w++;
+      else if (m.pts < m.opponentScore) acc.l++;
+    }
+    return acc;
+  }, { w: 0, l: 0 });
+
   return (
     <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 16, marginBottom: 24, flexWrap: "wrap" }}>
-        <div>
-          <div style={{ fontFamily: "ui-monospace, monospace", color: AMBER, fontSize: 12, letterSpacing: "0.1em", marginBottom: 4 }}>WELCOME</div>
-          <div style={{ display: "flex", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
-            <h1 style={{ fontSize: 22, fontWeight: 800, margin: 0 }}>{session.name}</h1>
-            {playerName && <PlayerBadges name={playerName} size={46} max={4} expandable />}
+      {/* Nouveau bandeau d'accueil : bloc couleur plein avec coupe diagonale et numéro de
+          maillot (ou initiale coach) en filigrane — maquette validée par l'utilisateur dans
+          un canvas Design avant implémentation ici. Couleur selon le rôle (AMBER joueur,
+          TEAL coach) pour rester dans la palette déjà utilisée ailleurs dans l'app. */}
+      <div style={{ position: "relative", borderRadius: 20, overflow: "hidden", marginBottom: 20 }}>
+        <div style={{ position: "relative", background: isCoach ? TEAL : AMBER, clipPath: "polygon(0 0, 100% 0, 100% 82%, 0 100%)", padding: "26px 24px 36px", overflow: "hidden" }}>
+          <div style={{ position: "absolute", top: -28, right: -10, fontSize: 170, fontWeight: 800, lineHeight: 1, color: INK, opacity: 0.14, userSelect: "none" }} aria-hidden="true">
+            {isCoach ? "C" : (me?.jersey ? `#${me.jersey}` : "")}
+          </div>
+          <div style={{ position: "relative", zIndex: 1 }}>
+            <div style={{ fontSize: 11, fontWeight: 800, letterSpacing: "0.14em", color: "rgba(14,17,22,0.65)", textTransform: "uppercase", marginBottom: 4 }}>Hello</div>
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 12, flexWrap: "wrap" }}>
+              <h1 style={{ fontSize: 28, fontWeight: 800, margin: 0, color: INK, lineHeight: 1.05 }}>{session.name}</h1>
+              {playerName && <PlayerBadges name={playerName} size={40} max={4} expandable />}
+            </div>
+            <div style={{ display: "inline-block", marginTop: 10, background: INK, color: PAPER, fontSize: 11, fontWeight: 700, padding: "5px 11px", borderRadius: 100 }}>
+              {isCoach ? "Head coach" : ([me?.position, me?.jersey ? `#${me.jersey}` : null].filter(Boolean).join(" · ") || "Player")}
+            </div>
           </div>
         </div>
+      </div>
 
-        <div style={{ maxWidth: 280, width: "100%", flexShrink: 0 }}>
-          {isCoach ? (
-            editingMessage ? (
-              <div style={{ background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 10, padding: 12 }}>
-                <textarea value={messageDraft} onChange={e => setMessageDraft(e.target.value)} rows={3} placeholder="Message shown to players on their Home screen…"
-                  style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", resize: "vertical", fontSize: 13, marginBottom: 8 }} />
-                <div style={{ display: "flex", gap: 8 }}>
-                  <button disabled={messageBusy} onClick={saveHomeMessage} style={{ ...btnPrimary, width: "auto", padding: "6px 14px", fontSize: 12.5 }}>{messageBusy ? "…" : "Save"}</button>
-                  <button onClick={() => setEditingMessage(false)} style={{ ...btnSecondary, padding: "6px 14px", fontSize: 12.5 }}>Cancel</button>
-                </div>
+      <div style={{ marginBottom: 20 }}>
+        {isCoach ? (
+          editingMessage ? (
+            <div style={{ background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 10, padding: 12 }}>
+              <textarea value={messageDraft} onChange={e => setMessageDraft(e.target.value)} rows={3} placeholder="Message shown to players on their Home screen…"
+                style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", resize: "vertical", fontSize: 13, marginBottom: 8 }} />
+              <div style={{ display: "flex", gap: 8 }}>
+                <button disabled={messageBusy} onClick={saveHomeMessage} style={{ ...btnPrimary, width: "auto", padding: "6px 14px", fontSize: 12.5 }}>{messageBusy ? "…" : "Save"}</button>
+                <button onClick={() => setEditingMessage(false)} style={{ ...btnSecondary, padding: "6px 14px", fontSize: 12.5 }}>Cancel</button>
               </div>
-            ) : homeMessage ? (
-              <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12 }}>
-                <div style={{ fontSize: 12.5, color: PAPER, lineHeight: 1.5, whiteSpace: "pre-wrap", marginBottom: 8 }}>{homeMessage}</div>
-                <div style={{ display: "flex", gap: 12 }}>
-                  <button onClick={() => { setMessageDraft(homeMessage); setEditingMessage(true); }} style={{ fontSize: 11.5, color: AMBER, background: "none", border: "none", cursor: "pointer" }}>Edit</button>
-                  {confirmClearMessage ? (
-                    <>
-                      <button onClick={() => { clearHomeMessage(); setConfirmClearMessage(false); }} style={{ fontSize: 11.5, color: RED, background: "none", border: "none", cursor: "pointer" }}>Confirm</button>
-                      <button onClick={() => setConfirmClearMessage(false)} style={{ fontSize: 11.5, color: "#8B93A1", background: "none", border: "none", cursor: "pointer" }}>Cancel</button>
-                    </>
-                  ) : (
-                    <button onClick={() => setConfirmClearMessage(true)} style={{ fontSize: 11.5, color: "#5C6470", background: "none", border: "none", cursor: "pointer" }}>Remove</button>
-                  )}
-                </div>
+            </div>
+          ) : homeMessage ? (
+            <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 12 }}>
+              <div style={{ fontSize: 12.5, color: PAPER, lineHeight: 1.5, whiteSpace: "pre-wrap", marginBottom: 8 }}>{homeMessage}</div>
+              <div style={{ display: "flex", gap: 12 }}>
+                <button onClick={() => { setMessageDraft(homeMessage); setEditingMessage(true); }} style={{ fontSize: 11.5, color: AMBER, background: "none", border: "none", cursor: "pointer" }}>Edit</button>
+                {confirmClearMessage ? (
+                  <>
+                    <button onClick={() => { clearHomeMessage(); setConfirmClearMessage(false); }} style={{ fontSize: 11.5, color: RED, background: "none", border: "none", cursor: "pointer" }}>Confirm</button>
+                    <button onClick={() => setConfirmClearMessage(false)} style={{ fontSize: 11.5, color: "#8B93A1", background: "none", border: "none", cursor: "pointer" }}>Cancel</button>
+                  </>
+                ) : (
+                  <button onClick={() => setConfirmClearMessage(true)} style={{ fontSize: 11.5, color: "#5C6470", background: "none", border: "none", cursor: "pointer" }}>Remove</button>
+                )}
               </div>
-            ) : (
-              <button onClick={() => { setMessageDraft(""); setEditingMessage(true); }} style={{ fontSize: 12, color: "#5C6470", background: "none", border: `1px dashed ${LINE}`, borderRadius: 10, padding: "10px 12px", cursor: "pointer", width: "100%", textAlign: "left" }}>
-                + Write a message for players' Home screen
-              </button>
-            )
+            </div>
           ) : (
-            homeMessage && (
-              <div style={{ background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 10, padding: 12 }}>
-                <div style={{ fontSize: 10.5, fontWeight: 700, color: AMBER, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>Message from the coach</div>
-                <div style={{ fontSize: 12.5, color: PAPER, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{homeMessage}</div>
-              </div>
-            )
-          )}
+            <button onClick={() => { setMessageDraft(""); setEditingMessage(true); }} style={{ fontSize: 12, color: "#5C6470", background: "none", border: `1px dashed ${LINE}`, borderRadius: 10, padding: "10px 12px", cursor: "pointer", width: "100%", textAlign: "left" }}>
+              + Write a message for players' Home screen
+            </button>
+          )
+        ) : (
+          homeMessage && (
+            <div style={{ background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 10, padding: 12 }}>
+              <div style={{ fontSize: 10.5, fontWeight: 700, color: AMBER, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6 }}>Message from the coach</div>
+              <div style={{ fontSize: 12.5, color: PAPER, lineHeight: 1.5, whiteSpace: "pre-wrap" }}>{homeMessage}</div>
+            </div>
+          )
+        )}
+      </div>
+
+      {/* Bilan — demandé par l'utilisateur ("j'aime bien l'idée de mettre le bilan sur
+          l'accueil") : victoires/défaites calculées à partir des box scores déjà importés
+          (jamais une donnée inventée), + un second repère (séances pour un joueur,
+          playbooks pour le coach), en bloc couleur plutôt qu'en petite carte discrète. */}
+      <div style={{ marginBottom: 20 }}>
+        <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: "0.02em", marginBottom: 10 }}>SEASON RECORD</div>
+        <div style={{ background: TEAL, borderRadius: 18, padding: "16px 18px", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            <div style={{ fontSize: 40, fontWeight: 800, lineHeight: 1, color: INK }}>
+              {record.w + record.l > 0 ? <>{record.w}<span style={{ opacity: 0.45 }}>–</span>{record.l}</> : "–"}
+            </div>
+            <div style={{ fontSize: 10, fontWeight: 800, color: "rgba(14,17,22,0.65)", textTransform: "uppercase", letterSpacing: "0.08em", marginTop: 2 }}>Wins – losses</div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontSize: 24, fontWeight: 800, color: INK }}>{isCoach ? playbookCount : trainingsTotal}</div>
+            <div style={{ fontSize: 9.5, fontWeight: 800, color: "rgba(14,17,22,0.65)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{isCoach ? "Playbooks" : "Trainings"}</div>
+          </div>
         </div>
       </div>
+
+      {/* Accès rapides — demandé par l'utilisateur : les joueurs n'ont besoin que de leur
+          fiche, l'équipe, le scouting et le planning (pas Draw/Montage, réservés au coach,
+          déjà accessibles pour lui depuis la barre du bas). */}
+      {!isCoach && (
+        <div style={{ marginBottom: 26 }}>
+          <div style={{ fontSize: 12, fontWeight: 800, letterSpacing: "0.02em", marginBottom: 10 }}>QUICK ACCESS</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+            <button onClick={() => goToPlayer("stats")} style={{ gridColumn: "span 2", display: "flex", alignItems: "center", gap: 14, padding: 16, borderRadius: 16, background: AMBER, border: "none", textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}>
+              <BarChart3 size={24} color={INK} />
+              <div>
+                <div style={{ fontSize: 15, fontWeight: 800, color: INK }}>My card</div>
+                <div style={{ fontSize: 11, color: "rgba(14,17,22,0.65)", fontWeight: 700 }}>Stats, objectives, role</div>
+              </div>
+            </button>
+            {(visibility || DEFAULT_VISIBILITY).tabs.team && (
+              <button onClick={goToTeam} style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 14, padding: 14, borderRadius: 14, background: PANEL, border: `1px solid ${LINE}`, textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}>
+                <Users size={18} color={TEAL} />
+                <div style={{ fontSize: 12.5, fontWeight: 800, color: PAPER }}>Team</div>
+              </button>
+            )}
+            {(visibility || DEFAULT_VISIBILITY).tabs.scouting && (
+              <button onClick={() => goToScouting()} style={{ display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 14, padding: 14, borderRadius: 14, background: PANEL, border: `1px solid ${LINE}`, textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}>
+                <Search size={18} color={TEAL} />
+                <div style={{ fontSize: 12.5, fontWeight: 800, color: PAPER }}>Scouting</div>
+              </button>
+            )}
+            {(visibility || DEFAULT_VISIBILITY).tabs.planning && (
+              <button onClick={goToPlanning} style={{ gridColumn: "span 2", display: "flex", alignItems: "center", gap: 12, padding: 14, borderRadius: 14, background: PANEL, border: `1px solid ${LINE}`, textAlign: "left", cursor: "pointer", fontFamily: "inherit" }}>
+                <Calendar size={18} color={TEAL} />
+                <div>
+                  <div style={{ fontSize: 12.5, fontWeight: 800, color: PAPER }}>Planning</div>
+                  <div style={{ fontSize: 10.5, color: "#8B93A1" }}>Sessions & games</div>
+                </div>
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Demandé par l'utilisateur : possibilité d'activer les notifications push, pour
           recevoir sur l'appareil (même app fermée) : nouveau match importé, nouvelle
@@ -10588,7 +10714,7 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
       )}
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Offense / Defense</h2>
-      <OffenseDefenseBreakdown off={off} def={def} />
+      <OffenseDefenseBreakdown off={off} def={def} forPrint />
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Objectives</h2>
       {(() => {
@@ -19026,7 +19152,7 @@ function ObservationPrintReport({ name, team }) {
         </>
       )}
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Offense / Defense</h2>
-      <OffenseDefenseBreakdown off={off} def={def} categories={cats} />
+      <OffenseDefenseBreakdown off={off} def={def} categories={cats} forPrint />
     </div>
   );
 }
@@ -22107,7 +22233,7 @@ function TeamPrintReport({ team, rows, otherLabels, advanced, teamOff, teamDef, 
       )}
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Team Play — Offense / Defense</h2>
-      <OffenseDefenseBreakdown off={teamOff} def={teamDef} />
+      <OffenseDefenseBreakdown off={teamOff} def={teamDef} forPrint />
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Resources</h2>
       {resources.length === 0 ? <p>No resource shared.</p> : (
@@ -22711,6 +22837,10 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
   const [error, setError] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
   const [requestedIds, setRequestedIds] = useState(new Set());
+  // Vue jour / semaine — demandé par l'utilisateur : la vue "jour" (bande de pastilles +
+  // cartes détaillées) et la vue "semaine" (cartes-ticket compactes par jour).
+  const [planningViewMode, setPlanningViewMode] = useState("week");
+  const [selectedDayKey, setSelectedDayKey] = useState(toDateKey(new Date()));
   const formRef = useRef();
   // Export du planning vers un modèle PDF importé — demandé par l'utilisateur.
   const { template: exportTemplate, loading: templateLoading, save: saveExportTemplate, clear: clearExportTemplate } = usePlanningExportTemplate();
@@ -22837,6 +22967,95 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
   for (const ev of visibleEvents) { if (byDay[ev.date]) byDay[ev.date].push(ev); }
   for (const k in byDay) byDay[k].sort((a, b) => a.startTime.localeCompare(b.startTime));
 
+  // Boutons d'action d'un événement (edit / dupliquer / supprimer, badge "en attente", confirmation
+  // de suppression) — factorisé pour être identique dans la vue jour et la vue semaine.
+  function renderEventActions(ev) {
+    if (!isCoach) return null;
+    if (requestedIds.has(ev.id)) return <span style={{ fontSize: 11, color: AMBER, flexShrink: 0 }}>Pending admin approval</span>;
+    if (confirmDeleteId === ev.id) {
+      return (
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+          <button onClick={() => handleDelete(ev)} style={{ background: RED, border: "none", borderRadius: 6, color: "#fff", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Yes</button>
+          <button onClick={() => setConfirmDeleteId(null)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Cancel</button>
+        </div>
+      );
+    }
+    return (
+      <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
+        <button onClick={() => loadIntoForm(ev, true)} title="Edit" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><ClipboardList size={14} /></button>
+        <button onClick={() => loadIntoForm(ev, false)} title="Duplicate to another day" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Plus size={14} /></button>
+        <button onClick={() => setConfirmDeleteId(ev.id)} title="Delete" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={14} /></button>
+      </div>
+    );
+  }
+
+  // Vue jour : carte détaillée par événement (pastille horaire, badge type, lieu, chips joueurs).
+  function renderDayEventCard(ev) {
+    const hasPlayers = ev.playerIds && ev.playerIds.length > 0;
+    return (
+      <div key={ev.id} style={{ background: PANEL, border: `1px solid ${LINE}`, borderLeft: `4px solid ${ev.color}`, borderRadius: 12, padding: "12px 14px" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10, marginBottom: 8 }}>
+          <span style={{ fontSize: 11, fontWeight: 800, fontFamily: "ui-monospace, monospace", background: PANEL2, color: PAPER, padding: "3px 8px", borderRadius: 7 }}>{ev.startTime}–{ev.endTime}</span>
+          <span style={{ fontSize: 10, fontWeight: 800, color: ev.color, textTransform: "uppercase", letterSpacing: "0.04em" }}>{ev.type}</span>
+        </div>
+        <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10 }}>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <div style={{ fontSize: 14, fontWeight: 700, marginBottom: 3 }}>{ev.title}</div>
+            {ev.location && <div style={{ fontSize: 11.5, color: "#8B93A1", marginBottom: 7 }}>{ev.location}</div>}
+            {isCoach && (
+              hasPlayers ? (
+                <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                  {ev.playerIds.map(id => {
+                    const p = roster.find(r => r.id === id);
+                    return p ? <span key={id} style={{ fontSize: 10.5, fontWeight: 700, color: "#0E1116", background: ev.color, padding: "3px 9px", borderRadius: 20 }}>{p.first}</span> : null;
+                  })}
+                </div>
+              ) : (
+                <span style={{ fontSize: 10.5, fontWeight: 700, color: "#8B93A1", background: PANEL2, padding: "3px 9px", borderRadius: 20 }}>Whole team</span>
+              )
+            )}
+          </div>
+          {renderEventActions(ev)}
+        </div>
+      </div>
+    );
+  }
+
+  // Vue semaine : un jour = une carte "ticket" (talon coloré + numéro, événements condensés à droite).
+  function renderWeekDayCard(d) {
+    const key = toDateKey(d);
+    const isToday = key === toDateKey(new Date());
+    const dayEvents = byDay[key] || [];
+    return (
+      <div key={key} style={{ display: "flex", background: PANEL, border: `${isToday ? 1.5 : 1}px solid ${isToday ? AMBER : LINE}`, borderRadius: 14, overflow: "hidden" }}>
+        <div style={{ width: 54, flexShrink: 0, background: isToday ? AMBER : PANEL2, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", padding: "10px 0" }}>
+          <div style={{ fontSize: 9.5, fontWeight: 800, color: isToday ? "rgba(14,17,22,0.65)" : "#5C6470", textTransform: "uppercase" }}>{d.toLocaleDateString("en-US", { weekday: "short" })}</div>
+          <div style={{ fontSize: 20, fontWeight: 800, color: isToday ? "#0E1116" : PAPER }}>{d.getDate()}</div>
+        </div>
+        <div style={{ flex: 1, padding: "10px 14px", display: "flex", flexDirection: "column", gap: 9, minWidth: 0 }}>
+          {dayEvents.length === 0 ? (
+            <div style={{ fontSize: 12, color: "#5C6470", alignSelf: "center" }}>—</div>
+          ) : dayEvents.map((ev, i) => (
+            <div key={ev.id} style={{ borderTop: i > 0 ? `1px solid ${LINE}` : "none", paddingTop: i > 0 ? 9 : 0 }}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                <span style={{ fontSize: 10, fontWeight: 700, fontFamily: "ui-monospace, monospace", color: "#8B93A1", width: 40, flexShrink: 0, marginTop: 1 }}>{ev.startTime}</span>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13, fontWeight: 700 }}>{ev.title} <span style={{ color: "#5C6470", fontWeight: 400 }}>· {ev.type}</span></div>
+                  <div style={{ fontSize: 10.5, color: "#5C6470" }}>
+                    {ev.location ? ev.location + " · " : ""}
+                    {!ev.playerIds || ev.playerIds.length === 0 ? "Whole team" : ev.playerIds.map(id => roster.find(p => p.id === id)?.first).filter(Boolean).join(", ")}
+                  </div>
+                </div>
+                <span style={{ width: 7, height: 7, borderRadius: 2, background: ev.color, flexShrink: 0, marginTop: 4 }} />
+                {renderEventActions(ev)}
+              </div>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div>
       {isCoach && (
@@ -22918,61 +23137,72 @@ function PlanningTab({ isCoach, team, roster = [], playerName }) {
         </div>
       )}
 
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
-        <button onClick={() => setWeekStart(addDays(weekStart, -7))} style={btnSecondary}><ChevronLeft size={15} /></button>
-        <div style={{ fontSize: 13.5, fontWeight: 700 }}>{formatDayLabel(days[0])} – {formatDayLabel(days[6])}</div>
-        <button onClick={() => setWeekStart(addDays(weekStart, 7))} style={btnSecondary}><ChevronRight size={15} /></button>
+      {/* Bascule Vue jour / Vue semaine — demandé par l'utilisateur. */}
+      <div style={{ display: "flex", alignItems: "center", gap: 4, background: PANEL2, borderRadius: 11, padding: 4, marginBottom: 16, width: "fit-content" }}>
+        <button type="button" onClick={() => setPlanningViewMode("day")} style={{
+          background: planningViewMode === "day" ? AMBER : "none", color: planningViewMode === "day" ? "#0E1116" : "#AEB5BF",
+          border: "none", borderRadius: 8, padding: "7px 16px", cursor: "pointer", fontSize: 12, fontWeight: 800,
+        }}>Day</button>
+        <button type="button" onClick={() => setPlanningViewMode("week")} style={{
+          background: planningViewMode === "week" ? AMBER : "none", color: planningViewMode === "week" ? "#0E1116" : "#AEB5BF",
+          border: "none", borderRadius: 8, padding: "7px 16px", cursor: "pointer", fontSize: 12, fontWeight: 800,
+        }}>Week</button>
       </div>
 
-      <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-        {days.map(d => {
-          const key = toDateKey(d);
-          const isToday = key === toDateKey(new Date());
-          return (
-            <div key={key}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: isToday ? AMBER : "#8B93A1", textTransform: "uppercase", marginBottom: 6 }}>
-                {formatDayLabel(d)}{isToday ? " · Today" : ""}
-              </div>
-              {byDay[key].length === 0 ? (
-                <div style={{ fontSize: 12.5, color: "#5C6470", paddingLeft: 4 }}>—</div>
-              ) : (
-                <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                  {byDay[key].map(ev => (
-                    <div key={ev.id} style={{ display: "flex", alignItems: "center", gap: 10, background: PANEL, border: `1px solid ${LINE}`, borderLeft: `4px solid ${ev.color}`, borderRadius: 8, padding: "8px 12px" }}>
-                      <div style={{ fontSize: 12, color: "#8B93A1", width: 90, flexShrink: 0 }}>{ev.startTime}–{ev.endTime}</div>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ fontSize: 13.5, fontWeight: 600 }}>{ev.title} <span style={{ color: "#5C6470", fontWeight: 400 }}>· {ev.type}</span></div>
-                        {ev.location && <div style={{ fontSize: 11.5, color: "#5C6470" }}>{ev.location}</div>}
-                        {isCoach && (
-                          <div style={{ fontSize: 11, color: "#5C6470" }}>
-                            {!ev.playerIds || ev.playerIds.length === 0 ? "Whole team" : ev.playerIds.map(id => roster.find(p => p.id === id)?.first).filter(Boolean).join(", ")}
-                          </div>
-                        )}
-                      </div>
-                      {isCoach && (
-                        requestedIds.has(ev.id) ? (
-                          <span style={{ fontSize: 11, color: AMBER, flexShrink: 0 }}>Pending admin approval</span>
-                        ) : confirmDeleteId === ev.id ? (
-                          <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
-                            <button onClick={() => handleDelete(ev)} style={{ background: RED, border: "none", borderRadius: 6, color: "#fff", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Yes</button>
-                            <button onClick={() => setConfirmDeleteId(null)} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: "#8B93A1", fontSize: 11, padding: "4px 8px", cursor: "pointer" }}>Cancel</button>
-                          </div>
-                        ) : (
-                          <div style={{ display: "flex", gap: 8, alignItems: "center", flexShrink: 0 }}>
-                            <button onClick={() => loadIntoForm(ev, true)} title="Edit" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><ClipboardList size={14} /></button>
-                            <button onClick={() => loadIntoForm(ev, false)} title="Duplicate to another day" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Plus size={14} /></button>
-                            <button onClick={() => setConfirmDeleteId(ev.id)} title="Delete" style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex" }}><Trash2 size={14} /></button>
-                          </div>
-                        )
-                      )}
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          );
-        })}
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: planningViewMode === "day" ? 12 : 16 }}>
+        <button onClick={() => { const nw = addDays(weekStart, -7); setWeekStart(nw); setSelectedDayKey(toDateKey(nw)); }} style={btnSecondary}><ChevronLeft size={15} /></button>
+        <div style={{ fontSize: 13.5, fontWeight: 700 }}>{formatDayLabel(days[0])} – {formatDayLabel(days[6])}</div>
+        <button onClick={() => { const nw = addDays(weekStart, 7); setWeekStart(nw); setSelectedDayKey(toDateKey(nw)); }} style={btnSecondary}><ChevronRight size={15} /></button>
       </div>
+
+      {planningViewMode === "day" ? (
+        <>
+          {/* Bande de jours défilante — jour sélectionné en plein AMBER, pastille colorée si événement. */}
+          <div style={{ display: "flex", gap: 7, overflowX: "auto", marginBottom: 16, paddingBottom: 2 }}>
+            {days.map(d => {
+              const key = toDateKey(d);
+              const isSelected = key === selectedDayKey;
+              const dayEvents = byDay[key] || [];
+              return (
+                <button key={key} type="button" onClick={() => setSelectedDayKey(key)} style={{
+                  flex: "0 0 auto", width: 46, textAlign: "center", padding: "10px 0 8px", borderRadius: 14, cursor: "pointer",
+                  background: isSelected ? AMBER : PANEL, border: isSelected ? "none" : `1px solid ${LINE}`,
+                }}>
+                  <div style={{ fontSize: 9.5, fontWeight: isSelected ? 800 : 700, color: isSelected ? "rgba(14,17,22,0.65)" : "#5C6470", textTransform: "uppercase" }}>
+                    {d.toLocaleDateString("en-US", { weekday: "short" })}
+                  </div>
+                  <div style={{ fontSize: isSelected ? 16 : 15, fontWeight: 800, margin: "3px 0", color: isSelected ? "#0E1116" : PAPER }}>{d.getDate()}</div>
+                  <span style={{ display: "inline-block", width: 4, height: 4, borderRadius: "50%", background: dayEvents.length > 0 ? (isSelected ? "#0E1116" : dayEvents[0].color) : "transparent" }} />
+                </button>
+              );
+            })}
+          </div>
+
+          {(() => {
+            const selDate = days.find(d => toDateKey(d) === selectedDayKey) || days[0];
+            const selEvents = byDay[toDateKey(selDate)] || [];
+            return (
+              <>
+                <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between", marginBottom: 12 }}>
+                  <div style={{ fontSize: 16, fontWeight: 800 }}>{selDate.toLocaleDateString("en-US", { weekday: "long", day: "numeric", month: "long" })}</div>
+                  <div style={{ fontSize: 11, color: "#5C6470" }}>{selEvents.length} event{selEvents.length !== 1 ? "s" : ""}</div>
+                </div>
+                {selEvents.length === 0 ? (
+                  <div style={{ fontSize: 12.5, color: "#5C6470", marginBottom: 6 }}>No events this day.</div>
+                ) : (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                    {selEvents.map(renderDayEventCard)}
+                  </div>
+                )}
+              </>
+            );
+          })()}
+        </>
+      ) : (
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          {days.map(d => renderWeekDayCard(d))}
+        </div>
+      )}
 
       {/* Demandé par l'utilisateur : "Export" et "Save template" en bas de la page, pas en
           haut — déplacé depuis le tout début du composant. */}
