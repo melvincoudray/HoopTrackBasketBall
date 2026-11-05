@@ -8556,6 +8556,16 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   // l'auto-détection lui-même (en resélectionnant l'adversaire proposé). "2nd Next Game"
   // (coach uniquement) est un second raccourci purement automatique, vers l'adversaire suivant.
   const [upcomingGames, setUpcomingGames] = useState([]); // [{ opponent, dm, time, venue, journee }, ...]
+  // "2nd Next Game" : même principe que "Next game" (auto-détecté, mais modifiable à la main sans
+  // être écrasé) — demandé par l'utilisateur, qui veut pouvoir le régler lui-même si jamais
+  // l'auto-détection ne trouve rien pour l'instant (adversaire pas encore présent côté FFBB, etc).
+  const [nextGame2, setNextGame2] = useState("");
+  useEffect(() => { storeGet("next_game_2_team").then(n => setNextGame2(n || "")); }, []);
+  async function saveNextGame2(name) {
+    setNextGame2(name);
+    await storeSet("next_game_2_team", name);
+    await storeSet("next_game_2_auto_opponent", ""); // choix manuel : ne plus le considérer comme auto
+  }
   useEffect(() => {
     if (!isCoach || !roster.length) return;
     let alive = true;
@@ -8574,6 +8584,15 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
             await storeSet("next_game_team", games[0].opponent);
             await storeSet("next_game_auto_opponent", games[0].opponent);
             if (alive) setNextGame(games[0].opponent);
+          }
+        }
+        if (games.length > 1) {
+          const autoOpp2 = (await storeGet("next_game_2_auto_opponent")) || "";
+          const current2 = (await storeGet("next_game_2_team")) || "";
+          if (!current2 || current2 === autoOpp2) {
+            await storeSet("next_game_2_team", games[1].opponent);
+            await storeSet("next_game_2_auto_opponent", games[1].opponent);
+            if (alive) setNextGame2(games[1].opponent);
           }
         }
       } catch { /* silencieux, comme la synchro box score — ne doit jamais bloquer l'accueil */ }
@@ -8763,24 +8782,40 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
             </button>
           )}
           {/* "2nd Next Game" — demandé par l'utilisateur : raccourci coach uniquement vers
-              l'adversaire suivant (purement auto-détecté, pas de sélection manuelle pour
-              celui-ci), pour préparer le match d'après sans attendre que le premier soit joué. */}
-          {isCoach && upcomingGames[1] && (() => {
-            const key2 = matchScoutingTeamKey(scouting.teams, upcomingGames[1].opponent);
-            if (!key2) return null;
-            return (
-              <button onClick={() => goToScouting("rapport", key2)} style={{ display: "flex", alignItems: "center", gap: 14, width: "100%", maxWidth: 320, padding: "14px 16px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, color: PAPER, cursor: "pointer", textAlign: "left", fontFamily: "inherit", marginTop: 10 }}>
-                <div style={{ width: 44, height: 44, borderRadius: 8, background: PANEL2, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
-                  {scouting.teams[key2].logo ? <img src={scouting.teams[key2].logo} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }} /> : <span style={{ fontSize: 18, fontWeight: 800, color: TEAL }}>{upcomingGames[1].opponent[0]}</span>}
-                </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 10.5, color: TEAL, fontWeight: 700, letterSpacing: "0.08em" }}>2ND NEXT GAME</div>
-                  <div style={{ fontWeight: 700, fontSize: 15 }}>{upcomingGames[1].opponent}</div>
-                </div>
-                <ChevronRight size={16} color="#5C6470" />
-              </button>
-            );
-          })()}
+              l'adversaire suivant. Auto-détecté comme "Next game" ci-dessus (même logique, sans
+              écraser un choix fait à la main), MAIS aussi réglable manuellement via ce menu —
+              demandé par l'utilisateur pour pouvoir le renseigner lui-même si l'auto-détection n'a
+              encore rien trouvé (calendrier FFBB pas encore à jour, etc). La carte s'affiche dès
+              qu'un nom est choisi, même si aucune fiche Scouting Report ne correspond encore —
+              cliquer dessus ouvre/crée quand même la fiche pour ce nom, plutôt que de rester caché.
+              */}
+          {isCoach && (
+            <>
+              <select value={nextGame2} onChange={e => saveNextGame2(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", maxWidth: 320, marginTop: 14, marginBottom: nextGame2 ? 10 : 0 }}>
+                <option value="">— 2nd Next Game: select opponent —</option>
+                {upcomingGames[1] && !scouting.teams[upcomingGames[1].opponent] && !Object.keys(scouting.teams).some(k => normTag(k) === normTag(upcomingGames[1].opponent)) && (
+                  <option value={upcomingGames[1].opponent}>{upcomingGames[1].opponent} (FFBB — not yet scouted)</option>
+                )}
+                {Object.keys(scouting.teams).map(n => <option key={n} value={n}>{n}</option>)}
+              </select>
+              {nextGame2 && (() => {
+                const key2 = matchScoutingTeamKey(scouting.teams, nextGame2) || nextGame2;
+                const logo = scouting.teams[key2]?.logo;
+                return (
+                  <button onClick={() => goToScouting("rapport", key2)} style={{ display: "flex", alignItems: "center", gap: 14, width: "100%", maxWidth: 320, padding: "14px 16px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, color: PAPER, cursor: "pointer", textAlign: "left", fontFamily: "inherit" }}>
+                    <div style={{ width: 44, height: 44, borderRadius: 8, background: PANEL2, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+                      {logo ? <img src={logo} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }} /> : <span style={{ fontSize: 18, fontWeight: 800, color: TEAL }}>{nextGame2[0]}</span>}
+                    </div>
+                    <div style={{ flex: 1 }}>
+                      <div style={{ fontSize: 10.5, color: TEAL, fontWeight: 700, letterSpacing: "0.08em" }}>2ND NEXT GAME</div>
+                      <div style={{ fontWeight: 700, fontSize: 15 }}>{nextGame2}</div>
+                    </div>
+                    <ChevronRight size={16} color="#5C6470" />
+                  </button>
+                );
+              })()}
+            </>
+          )}
         </div>
       )}
 
