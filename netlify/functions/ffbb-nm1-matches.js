@@ -200,6 +200,21 @@ export const handler = async (event) => {
       return { statusCode: 200, headers, body: JSON.stringify({ games: res }) };
     }
 
+    // ?mode=upcoming&team=vitre -> prochains matchs NON joués de l'équipe (bloc "derniers/prochains
+    // matchs" de sa page), dans l'ordre d'affichage du site (déjà chronologique) :
+    // [{ opponent, dm: "JJ/MM", time, venue, journee }] — utilisé par l'accueil pour détecter
+    // automatiquement "Next game" / "2nd Next Game" (demandé par l'utilisateur).
+    if (q.mode === "upcoming") {
+      const lead = await lead0();
+      const ownPath = teamPathOf(lead, team);
+      if (!ownPath) return { statusCode: 404, headers, body: JSON.stringify({ error: "Team not found in the NM1 table." }) };
+      const html = await getText(ownPath.startsWith("http") ? ownPath : ROOT + ownPath);
+      const games = parseVenues(html)
+        .filter(g => !g.played)
+        .map(g => ({ opponent: norm(g.home) === team ? g.away : g.home, dm: g.dm, time: g.time, venue: g.venue, journee: g.journee }));
+      return { statusCode: 200, headers, body: JSON.stringify({ games }) };
+    }
+
     // ?mode=league -> tous les matchs joués de la ligue (page calendrier)
     if (q.mode === "league") {
       const html = await getText(ROOT + "/saison-reguliere/calendrier");
