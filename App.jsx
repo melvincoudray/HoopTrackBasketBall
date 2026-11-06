@@ -8561,6 +8561,19 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   // l'auto-détection ne trouve rien pour l'instant (adversaire pas encore présent côté FFBB, etc).
   const [nextGame2, setNextGame2] = useState("");
   useEffect(() => { storeGet("next_game_2_team").then(n => setNextGame2(n || "")); }, []);
+  // Logo du "2nd Next Game" — demandé par l'utilisateur : tant qu'aucune fiche Scouting Report
+  // n'a encore de logo pour cet adversaire (cas courant, vu que ce raccourci pointe souvent vers
+  // une équipe pas encore scoutée), on va chercher le logo directement sur la FFBB (même source/
+  // fonction que le reste du site, ffbbLogoFor), plutôt que d'afficher juste une lettre.
+  const [nextGame2Logo, setNextGame2Logo] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    if (!nextGame2) { setNextGame2Logo(null); return; }
+    const key2 = matchScoutingTeamKey(scouting.teams, nextGame2);
+    if (key2 && scouting.teams[key2]?.logo) { setNextGame2Logo(null); return; }
+    ffbbLogoFor(nextGame2).then(png => { if (alive) setNextGame2Logo(png); });
+    return () => { alive = false; };
+  }, [nextGame2, scouting.teams]);
   async function saveNextGame2(name) {
     setNextGame2(name);
     await storeSet("next_game_2_team", name);
@@ -8800,7 +8813,7 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
               </select>
               {nextGame2 && (() => {
                 const key2 = matchScoutingTeamKey(scouting.teams, nextGame2) || nextGame2;
-                const logo = scouting.teams[key2]?.logo;
+                const logo = scouting.teams[key2]?.logo || nextGame2Logo;
                 return (
                   <button onClick={() => goToScouting("rapport", key2)} style={{ display: "flex", alignItems: "center", gap: 14, width: "100%", maxWidth: 320, padding: "14px 16px", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, color: PAPER, cursor: "pointer", textAlign: "left", fontFamily: "inherit" }}>
                     <div style={{ width: 44, height: 44, borderRadius: 8, background: PANEL2, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
@@ -16750,24 +16763,40 @@ function repFmt(key, v) {
   return sc && sc.pct ? v.toFixed(1) + " %" : Number.isInteger(v) ? String(v) : v.toFixed(1);
 }
 // Classement + matchs d'une équipe à partir des totaux de la ligue (league_games).
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "Last 5 games" = "No game yet." pour une équipe
+// dont pourtant des matchs étaient bien synchronisés) : le nom d'équipe tel qu'il apparaît sur la
+// feuille de match box score FFBB (utilisé ici comme clé, via mode=leaguematch) peut différer du
+// nom utilisé partout ailleurs sur le site, venu du calendrier (ex. nom officiel du club vs nom de
+// la ville — même type d'écart que pour LiveStats, voir lsTeamSide ci-dessous) — une recherche
+// stricte par normTag() ne trouvait donc rien pour ces équipes-là. On cherche maintenant aussi par
+// mot significatif (>= 4 lettres) commun aux deux noms.
 function repStandings(games, teamNames) {
   const rec = {};
-  const list = [];
   Object.values(games || {}).forEach(g => {
     if (!g.teams || g.teams.length < 2) return;
     const [a, b] = g.teams;
     const pa = a.t.pts, pb = b.t.pts;
     [[a, b, pa, pb, true], [b, a, pb, pa, false]].forEach(([x, y, px, py, home]) => {
       const k = normTag(x.name);
-      const r = rec[k] || (rec[k] = { w: 0, l: 0, pf: 0, pa: 0, games: [] });
+      const r = rec[k] || (rec[k] = { srcName: x.name, w: 0, l: 0, pf: 0, pa: 0, games: [] });
       if (px > py) r.w++; else r.l++;
       r.pf += px; r.pa += py;
       r.games.push({ date: g.date || "", opp: y.name, pf: px, pa: py, home });
     });
   });
   Object.values(rec).forEach(r => r.games.sort((x, y) => String(x.date).localeCompare(String(y.date))));
-  const rows = teamNames.map(n => ({ name: n, ...(rec[normTag(n)] || { w: 0, l: 0, pf: 0, pa: 0, games: [] }) }))
-    .sort((x, y) => (y.w - x.w) || ((y.pf - y.pa) - (x.pf - x.pa)));
+  const words = s => String(s).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 4);
+  const findRec = (n) => {
+    const key = normTag(n);
+    if (rec[key]) return rec[key];
+    const nWords = words(n);
+    return Object.values(rec).find(r => words(r.srcName).some(w => nWords.includes(w))) || null;
+  };
+  const rows = teamNames.map(n => {
+    const found = findRec(n);
+    const { srcName, ...rest } = found || { w: 0, l: 0, pf: 0, pa: 0, games: [] };
+    return { name: n, ...rest };
+  }).sort((x, y) => (y.w - x.w) || ((y.pf - y.pa) - (x.pf - x.pa)));
   return rows;
 }
 // ---------------------------------------------------------------------------
@@ -16776,12 +16805,26 @@ function repStandings(games, teamNames) {
 // continue sur le terrain (tranches de 2 min, remise à zéro à la mi-temps), séquences du dernier match.
 // Possessions = FGA + 0.44·FTA − OREB + TOV. Points = variation du score (le drapeau "scoring" n'est pas fiable).
 // ---------------------------------------------------------------------------
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "LiveStats unavailable" partout alors que les
+// matchs étaient bien trouvés ET lisibles) : le nom affiché sur le calendrier FFBB (ex. "Les
+// Sables d'Olonne", nom de la ville) ne correspond pas forcément au nom du club tel qu'il apparaît
+// DANS le flux LiveStats (ex. "LES SABLES VENDEE BASKET", nom officiel du club) — une comparaison
+// de la chaîne entière ne trouvait donc aucune correspondance et TOUS les matchs de l'équipe
+// étaient traités comme illisibles. On se rabat maintenant sur un mot significatif (>= 4 lettres)
+// commun aux deux noms (même principe que la correction déjà faite plus haut pour les noms de
+// joueurs composés), en plus de la comparaison complète.
 function lsTeamSide(g, teamName) {
-  const n = s => String(s).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().replace(/[^a-z0-9]/g, "");
-  const key = n(teamName);
-  const a = n(g.teams[1].name), b = n(g.teams[2].name);
-  if (a.includes(key) || key.includes(a)) return 1;
-  if (b.includes(key) || key.includes(b)) return 2;
+  const n = s => String(s).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase();
+  const words = s => n(s).split(/[^a-z0-9]+/).filter(w => w.length >= 4);
+  const flat = s => n(s).replace(/[^a-z0-9]/g, "");
+  const key = flat(teamName), keyWords = words(teamName);
+  const matches = (name) => {
+    const f = flat(name);
+    if (f.includes(key) || key.includes(f)) return true;
+    return words(name).some(w => keyWords.includes(w));
+  };
+  if (matches(g.teams[1].name)) return 1;
+  if (matches(g.teams[2].name)) return 2;
   return 0;
 }
 // Fatigue : granularité des tranches (demandé par l'utilisateur : 30 s, pas 2 min) — même
