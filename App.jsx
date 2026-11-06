@@ -5478,8 +5478,10 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
   // affichées automatiquement ici, attaque et défense, sans rien coder de plus.
   const BUILTIN_CATEGORIES = new Set(["Player", "Playtypes", "Plays", "Shot selection", "Defensive mistakes", "Screen defense", "Spacing", "Shot zone", "Results & misc."]);
   const customCategoryNames = Object.keys(cats).filter(n => !BUILTIN_CATEGORIES.has(n));
-  const customOff = useMemo(() => customCategoryNames.map(name => ({ name, items: topBucket(off, categoryTags(name, cats), 8, false) })), [off, customCategoryNames.join(",")]);
-  const customDef = useMemo(() => customCategoryNames.map(name => ({ name, items: topBucket(def, categoryTags(name, cats), 8, false) })), [def, customCategoryNames.join(",")]);
+  // Comme pour Plays/Playtypes (voir plus haut) : pas de troncature non plus sur les catégories
+  // personnalisées — demandé par l'utilisateur, oublié lors du premier passage.
+  const customOff = useMemo(() => customCategoryNames.map(name => ({ name, items: topBucket(off, categoryTags(name, cats), undefined, false) })), [off, customCategoryNames.join(",")]);
+  const customDef = useMemo(() => customCategoryNames.map(name => ({ name, items: topBucket(def, categoryTags(name, cats), undefined, false) })), [def, customCategoryNames.join(",")]);
 
   if (!off.length && !def.length) return <EmptyState text="No action coded yet (Import Match tab)." />;
 
@@ -23848,14 +23850,15 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
   const [subtab, setSubtab] = useState(defaultTeamSubtab);
   const [exportReport, setExportReport] = useState(null);
 
-  // Colonnes de stats communes à afficher (hors points, déjà en tête) : les 3 plus fréquentes
-  // parmi tous les joueurs ayant un box score.
+  // Colonnes de stats communes à afficher (hors points, déjà en tête) : toutes celles présentes
+  // chez au moins un joueur ayant un box score, triées par fréquence (demandé par l'utilisateur :
+  // ne pas limiter l'affichage).
   const otherLabels = useMemo(() => {
     const freq = {};
     Object.values(box.byPlayer).forEach(b => {
       b.statLabels.forEach(l => { if (l !== b.ptsLabel) freq[l] = (freq[l] || 0) + 1; });
     });
-    return Object.entries(freq).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([l]) => l);
+    return Object.entries(freq).sort((a, b) => b[1] - a[1]).map(([l]) => l);
   }, [box.byPlayer]);
 
   const rows = roster.map(p => {
