@@ -1124,6 +1124,74 @@ async function saveCategoryChartStyles(styles) {
   await storeSet("category_chart_styles", styles);
 }
 
+// Demandé par l'utilisateur : un tag brut de la forme "#14 Antoine Bibolet-Ruche" (numéro de
+// maillot + nom, posé par un groupe SportsCode non reconnu comme joueur, ex. un rôle sans
+// correspondance) est redondant avec les joueurs déjà cochés ailleurs — jamais un vrai tag
+// exploitable. Détecté une seule fois, utilisé à l'import (.dnk et .SCTimeline).
+function isJerseyNumberedName(s) { return /^#\s*\d+\s+\S/.test(String(s).trim()); }
+
+// Liste de mots à ignorer complètement à l'import d'un fichier de coding — demandé par
+// l'utilisateur ("Baseline", "Sideline"…, des tags sans intérêt pour lui) : une fois ajoutés ici,
+// ils disparaissent à la fois de l'alerte "non reconnus" ET des stats (donut/rentabilité),
+// n'importe où sur le site. Liste UNIQUE, partagée par Import Match ET Scouting Observation
+// (demandé explicitement : "les deux, nous ne sommes jamais trop sûrs").
+let IGNORED_CODING_TAGS = null;
+function currentIgnoredTagsSet() { return new Set((IGNORED_CODING_TAGS || []).map(normTag)); }
+async function loadIgnoredTags() {
+  IGNORED_CODING_TAGS = (await storeGet("ignored_coding_tags")) || [];
+}
+async function saveIgnoredTags(list) {
+  IGNORED_CODING_TAGS = list;
+  await storeSet("ignored_coding_tags", list);
+}
+
+// Tranches de "temps de tir" (temps au chrono d'attaque restant au moment de l'action) —
+// demandé par l'utilisateur : ces valeurs numériques brutes (ex. "23.8") arrivaient jusqu'ici
+// comme autant de tags "non reconnus" différents. Elles sont maintenant classées automatiquement
+// dans une tranche configurable, affichée comme une catégorie à part (Donut + Rentabilité) dans
+// OffenseDefenseBreakdown — jamais besoin de les ajouter une à une dans Settings. Tranches par
+// défaut sur 0-24s (chrono d'attaque), modifiables/ajoutables dans Settings.
+const DEFAULT_SHOT_TIME_RANGES = [
+  { id: "r0", label: "0-6s", min: 0, max: 6 },
+  { id: "r1", label: "6-12s", min: 6, max: 12 },
+  { id: "r2", label: "12-18s", min: 12, max: 18 },
+  { id: "r3", label: "18-24s", min: 18, max: 24 },
+];
+let SHOT_TIME_RANGES = null;
+function currentShotTimeRanges() { return SHOT_TIME_RANGES || DEFAULT_SHOT_TIME_RANGES; }
+function shotTimeRangeLabels() { return currentShotTimeRanges().map(r => r.label); }
+function bucketForShotTime(value) {
+  const list = currentShotTimeRanges();
+  for (const r of list) { if (value >= r.min && value < r.max) return r.label; }
+  const last = list[list.length - 1];
+  if (last && value === last.max) return last.label; // borne haute exacte de la dernière tranche
+  return null; // hors de toute tranche configurée (ex. temps de match, pas temps de tir) : laissé en tag normal
+}
+async function loadShotTimeRanges() {
+  const stored = await storeGet("shot_time_ranges");
+  if (Array.isArray(stored) && stored.length) { SHOT_TIME_RANGES = stored; return; }
+  SHOT_TIME_RANGES = JSON.parse(JSON.stringify(DEFAULT_SHOT_TIME_RANGES));
+  await storeSet("shot_time_ranges", SHOT_TIME_RANGES);
+}
+async function saveShotTimeRanges(ranges) {
+  SHOT_TIME_RANGES = ranges;
+  await storeSet("shot_time_ranges", ranges);
+}
+
+// Point d'entrée unique utilisé par les deux formats de fichier de coding (.dnk et .SCTimeline)
+// pour classer un tag brut non reconnu comme joueur : mot à ignorer (Settings) → disparaît
+// complètement ; nombre tombant dans une tranche de temps de tir configurée → classé dans sa
+// tranche ; sinon → tag normal, inchangé.
+function classifyRawTagName(rawName) {
+  const trimmed = String(rawName).trim();
+  if (currentIgnoredTagsSet().has(normTag(trimmed))) return { kind: "ignore" };
+  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+    const bucket = bucketForShotTime(parseFloat(trimmed));
+    if (bucket) return { kind: "shotTime", label: bucket };
+  }
+  return { kind: "tag", name: trimmed };
+}
+
 // Chargement paresseux de sql.js (une seule fois, partagé par tous les imports) — le binaire
 // wasm est chargé depuis jsdelivr (CDN public, pas de dépendance à un bundler particulier),
 // avec la version figée exactement sur celle du package npm "sql.js" pour éviter tout
@@ -1219,8 +1287,12 @@ async function parseDnkCodingFile(arrayBuffer, cats, unknownColumnDefault = "pla
         // correspond déjà à un joueur connu dans Settings (filet de sécurité si un projet
         // DNK nomme sa catégorie différemment).
         if (playerCategoryIds.has(info.categoryId) || knownPlayers.has(norm)) { flaggedPlayers.push(info.name); continue; }
-        tags[info.name] = 1;
-        if (!knownTags.has(norm) && unknownColumnDefault === "tag") unconfirmedTagsSet.add(info.name);
+        if (isJerseyNumberedName(info.name)) continue; // redondant avec les joueurs déjà cochés ailleurs
+        const cls = classifyRawTagName(info.name);
+        if (cls.kind === "ignore") continue;
+        if (cls.kind === "shotTime") { tags[cls.label] = 1; continue; }
+        tags[cls.name] = 1;
+        if (!knownTags.has(normTag(cls.name)) && unknownColumnDefault === "tag") unconfirmedTagsSet.add(cls.name);
       }
       // Même règle que l'ancien import Excel : une action peut concerner plusieurs joueurs à la
       // fois (porteur de balle + écran sur la même possession) → une entrée par joueur tagué,
@@ -1262,6 +1334,10 @@ function stripJerseyPrefix(name) {
 // tir — attribués uniquement au 1er tir de l'action (voir splitSCInstanceByShooter) : un
 // rebond-putback qui suit n'est pas issu de ce système.
 const SC_WHOLE_POSSESSION_GROUPS = new Set(["Plays", "PnR Ogranisation", "PnR Organisation", "PNR Defense", "PnR Defense"]);
+// Demandé par l'utilisateur : "Offensive Team"/"Defensive Team" ne sont que l'info structurelle
+// utilisée pour déduire Attaque/Défense (voir offLabel dans parseSCTimelineCodingFile) — jamais de
+// vrais tags. Sans ce filtre, le nom de l'équipe lui-même devenait un faux tag "non reconnu".
+const SC_TEAM_META_GROUPS = new Set(["Offensive Team", "Defensive Team"]);
 
 // Demandé par l'utilisateur : différencier le Shooter des AUTRES rôles tagués par SportsCode sur
 // la même action (passeur, rebondeur, intercepteur, contreur) — jusqu'ici, un nom de joueur posé
@@ -1325,6 +1401,10 @@ function extractSCLabelTags(labels, knownPlayers, knownTags, unconfirmedTagsSet,
       flaggedPlayers.push(isPlayerGroup ? stripJerseyPrefix(rawName) : rawName);
       continue;
     }
+    // Demandé par l'utilisateur : toute autre référence "#numéro Nom" (groupe SportsCode non
+    // reconnu comme joueur) est redondante avec les joueurs déjà cochés ailleurs — ignorée
+    // silencieusement plutôt que de devenir un faux tag.
+    if (isJerseyNumberedName(rawName)) continue;
     let tagName = rawName;
     if (group === "Shot") {
       const shot = translateSCShotValue(rawName);
@@ -1333,8 +1413,14 @@ function extractSCLabelTags(labels, knownPlayers, knownTags, unconfirmedTagsSet,
         tagName = `${shot.n}PT${shot.made ? "+" : "-"}`;
       }
     }
-    tags[tagName] = 1;
-    if (!knownTags.has(normTag(tagName)) && unknownColumnDefault === "tag") unconfirmedTagsSet.add(tagName);
+    // Demandé par l'utilisateur : mot à ignorer (Settings) → disparaît complètement (ni tag, ni
+    // "non reconnu") ; nombre dans une tranche de temps de tir configurée → classé dans sa
+    // tranche au lieu de rester un nombre brut "non reconnu".
+    const cls = classifyRawTagName(tagName);
+    if (cls.kind === "ignore") continue;
+    if (cls.kind === "shotTime") { tags[cls.label] = 1; continue; }
+    tags[cls.name] = 1;
+    if (!knownTags.has(normTag(cls.name)) && unknownColumnDefault === "tag") unconfirmedTagsSet.add(cls.name);
   }
   return { tags, flaggedPlayers, ftPoints, roles };
 }
@@ -1453,7 +1539,10 @@ function parseSCTimelineCodingFile(parsedJson, cats, unknownColumnDefault = "pla
 
   const rawPlays = entries.flatMap(({ button, inst }) => {
     const base = { category: "Possession", button: String(button), timestampStart: inst.startTime, timestampEnd: inst.endTime };
-    const shots = splitSCInstanceByShooter(inst.labels || [], knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
+    // Demandé par l'utilisateur : le nom d'équipe (groupe "Offensive Team"/"Defensive Team") ne
+    // doit jamais devenir un tag — c'est une info structurelle, déjà exploitée ci-dessus (offLabel).
+    const relevantLabels = (inst.labels || []).filter(l => !SC_TEAM_META_GROUPS.has(String(l.group || "").trim()));
+    const shots = splitSCInstanceByShooter(relevantLabels, knownPlayers, knownTags, unconfirmedTagsSet, unknownColumnDefault);
     // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "Shooting selection", "Screen defense" et
     // "Spacing" comptaient 2-3x trop d'actions, pas seulement "Plays") : un SEUL tir peut avoir
     // PLUSIEURS joueurs flaggés par SportsCode (le Shooter + un autre nom déjà connu de
@@ -5404,13 +5493,21 @@ function tagBreakdown(source) {
 // date/adversaire sur ces imports. N'a d'effet que là où l'appelant le passe explicitement —
 // aujourd'hui Team > Team Play, la fiche joueur et Scouting > Observation (voir TeamTab /
 // PlayerDetail / ObservationTab / ScoutingStaffPanel).
-function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, enableClipExport = false, clipGrouping, topContent, forPrint = false }) {
+function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true, categories, enableClipExport = false, clipGrouping, topContent, forPrint = false, enableHandFilter = false }) {
   // Demandé par l'utilisateur : un seul toggle Attaque/Défense à l'écran plutôt que les deux
   // blocs empilés d'un coup (mêmes graphiques en double, l'un sous l'autre) — pour garder la
   // cohabitation de tous les blocs lisible. En PDF (forPrint), pas de bouton cliquable
   // possible sur papier : les deux côtés restent affichés l'un après l'autre comme avant.
   const [side, setSide] = useState("off");
   const cats = categories || currentTagCategories();
+  // Demandé par l'utilisateur : filtre par main qui tire (Droite/Gauche/Les deux), important
+  // notamment pour l'analyse individuelle — activé seulement là où ça a du sens (prop dédiée),
+  // jamais en PDF (pas de bouton cliquable possible sur papier).
+  const [handFilter, setHandFilter] = useState("all");
+  const HAND_TAG_FOR = { right: "Right Hand", left: "Left Hand", both: "Both Hands" };
+  const applyHandFilter = (plays) => (!enableHandFilter || handFilter === "all") ? plays : plays.filter(p => tagIsSet(p.tags, HAND_TAG_FOR[handFilter]));
+  const off = useMemo(() => applyHandFilter(offAll), [offAll, handFilter, enableHandFilter]);
+  const def = useMemo(() => applyHandFilter(defAll), [defAll, handFilter, enableHandFilter]);
   const [clipModal, setClipModal] = useState(null); // { name, side: "off"|"def", extraTags? } | null
   // Demandé par l'utilisateur : cliquer sur PPPP ou Open doit d'abord demander QUELS tags de
   // "Results & misc." (paniers marqués, fautes…) ou "Shot selection" (Open/Contested) combiner
@@ -5483,6 +5580,13 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
   const customOff = useMemo(() => customCategoryNames.map(name => ({ name, items: topBucket(off, categoryTags(name, cats), undefined, false) })), [off, customCategoryNames.join(",")]);
   const customDef = useMemo(() => customCategoryNames.map(name => ({ name, items: topBucket(def, categoryTags(name, cats), undefined, false) })), [def, customCategoryNames.join(",")]);
 
+  // Demandé par l'utilisateur : temps de tir (tranches configurables dans Settings), affiché
+  // comme les autres catégories (Donut + Rentabilité) — les valeurs numériques brutes sont déjà
+  // classées dans leur tranche à l'import (voir classifyRawTagName), rien à filtrer ici.
+  const shotTimeLabels = useMemo(() => shotTimeRangeLabels(), []);
+  const offShotTime = useMemo(() => categoryBreakdown(off, shotTimeLabels).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open, tov: g.tov })), [off, shotTimeLabels]);
+  const defShotTime = useMemo(() => categoryBreakdown(def, shotTimeLabels).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open, tov: g.tov })), [def, shotTimeLabels]);
+
   if (!off.length && !def.length) return <EmptyState text="No action coded yet (Import Match tab)." />;
 
   // Construit la liste des cartes unifiées (donut + efficacité) d'un côté donné, dans le même
@@ -5506,6 +5610,7 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
       cards.push({ key: "shooting", accent: next(), donutTitle: "Shooting Selection", donutData: offShooting, donutNote: "Open/Contested tags not present yet.", metricTitle: "Efficiency by playtype", items: offPlaytypesList, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       cards.push({ key: "screendef", accent: next(), donutTitle: "Screen defense faced (opponent coverage)", donutData: offScreenDef.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No screen coverage tag detected.", metricTitle: "Efficiency by coverage faced", items: offScreenDef, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       cards.push({ key: "spacing", accent: next(), donutTitle: "Spacing played on screens", donutData: offSpacing.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No spacing tag detected.", metricTitle: "Efficiency by spacing", items: offSpacing, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
+      cards.push({ key: "shottime", accent: next(), donutTitle: "Shot time", donutData: offShotTime.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No shot clock value detected.", metricTitle: "Efficiency by shot time", items: offShotTime, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       customOff.filter(c => c.items.length).forEach(c => {
         const style = chartStyleFor(c.name);
         cards.push({ key: "custom-off-" + c.name, accent: next(), showDonut: style === "simple" || style === "both", donutTitle: c.name, donutData: c.items.map((it, j) => ({ ...it, color: CHART_COLORS[j % CHART_COLORS.length] })), showMetric: style === "detailed" || style === "both", metricTitle: c.name, items: c.items, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
@@ -5525,6 +5630,7 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
       cards.push({ key: "mistakes", accent: next(), donutTitle: "Defensive mistakes", donutData: defMistakes, donutNote: "No defensive mistake tag detected.", metricTitle: "Plays defended — efficiency", items: defPlaysList, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       cards.push({ key: "screendef", accent: next(), donutTitle: "Screen defense played", donutData: defScreenDef.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No screen coverage tag detected.", metricTitle: "Efficiency by coverage used", items: defScreenDef, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       cards.push({ key: "spacing", accent: next(), donutTitle: "Spacing faced on screens", donutData: defSpacing.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No spacing tag detected.", metricTitle: "Efficiency by spacing faced", items: defSpacing, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
+      cards.push({ key: "shottime", accent: next(), donutTitle: "Shot time", donutData: defShotTime.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No shot clock value detected.", metricTitle: "Efficiency by shot time", items: defShotTime, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       customDef.filter(c => c.items.length).forEach(c => {
         const style = chartStyleFor(c.name);
         cards.push({ key: "custom-def-" + c.name, accent: next(), showDonut: style === "simple" || style === "both", donutTitle: c.name, donutData: c.items.map((it, j) => ({ ...it, color: CHART_COLORS[j % CHART_COLORS.length] })), showMetric: style === "detailed" || style === "both", metricTitle: c.name, items: c.items, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
@@ -5566,6 +5672,13 @@ function OffenseDefenseBreakdown({ off, def, detailTables = true, categories, en
         </>
       ) : (
         <>
+          {enableHandFilter && (
+            <div style={{ display: "flex", gap: 4, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 4, marginBottom: 12, flexWrap: "wrap" }}>
+              {[["all", "All"], ["right", "Right hand"], ["left", "Left hand"], ["both", "Both hands"]].map(([id, label]) => (
+                <button key={id} type="button" onClick={() => setHandFilter(id)} style={{ flex: 1, minWidth: 90, background: handFilter === id ? TEAL : "transparent", color: handFilter === id ? INK : "#AEB5BF", border: "none", borderRadius: 9, padding: 9, cursor: "pointer", fontSize: 12.5, fontWeight: handFilter === id ? 800 : 700, fontFamily: "inherit" }}>{label}</button>
+              ))}
+            </div>
+          )}
           <div style={{ display: "flex", gap: 4, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 4, marginBottom: 20 }}>
             <button type="button" onClick={() => setSide("off")} style={{ flex: 1, background: side === "off" ? AMBER : "transparent", color: side === "off" ? INK : "#AEB5BF", border: "none", borderRadius: 9, padding: 9, cursor: "pointer", fontSize: 13, fontWeight: side === "off" ? 800 : 700, fontFamily: "inherit" }}>Offense</button>
             <button type="button" onClick={() => setSide("def")} style={{ flex: 1, background: side === "def" ? AMBER : "transparent", color: side === "def" ? INK : "#AEB5BF", border: "none", borderRadius: 9, padding: 9, cursor: "pointer", fontSize: 13, fontWeight: side === "def" ? 800 : 700, fontFamily: "inherit" }}>Defense</button>
@@ -7203,6 +7316,8 @@ export default function App() {
     await loadTagCategories();
     await loadObservationTagCategories();
     await loadCategoryChartStyles();
+    await loadIgnoredTags();
+    await loadShotTimeRanges();
     await loadBoxColumnAliases();
     await loadTrainingThemeColors();
     const savedSeason = await storeGet("current_season");
@@ -7711,6 +7826,10 @@ export default function App() {
             <ScreenContestSettings />
             <div style={{ height: 26 }} />
             <BoxColumnAliasesSettings />
+            <div style={{ height: 26 }} />
+            <IgnoredTagsSettings />
+            <div style={{ height: 26 }} />
+            <ShotTimeRangesSettings />
           </div>
         )}
         {tab === "settings" && session.role === "player" && (
@@ -11343,7 +11462,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
               </>
             )}
 
-            <OffenseDefenseBreakdown off={off} def={def} enableClipExport detailTables={false} />
+            <OffenseDefenseBreakdown off={off} def={def} enableClipExport detailTables={false} enableHandFilter />
           </>
         )}
 
@@ -19948,7 +20067,7 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
                 ) : null;
               })()}
               {playerOff.length + playerDef.length > 0
-                ? <OffenseDefenseBreakdown off={playerOff} def={playerDef} categories={categories} enableClipExport clipGrouping={clipGrouping} detailTables={false} />
+                ? <OffenseDefenseBreakdown off={playerOff} def={playerDef} categories={categories} enableClipExport clipGrouping={clipGrouping} detailTables={false} enableHandFilter />
                 : <EmptyState text="No tagged action for this player in the observation yet." />}
             </div>
           </div>
@@ -21815,6 +21934,121 @@ function BoxColumnAliasesSettings() {
         );
       })}
       {status && <div style={{ fontSize: 12.5, color: TEAL }}>{status}</div>}
+    </div>
+  );
+}
+
+// Demandé par l'utilisateur : une liste de mots à ignorer COMPLÈTEMENT à l'import d'un fichier de
+// coding (ex. "Baseline", "Sideline" — sans intérêt pour lui) : une fois ajoutés, ils disparaissent
+// à la fois de l'alerte "non reconnus" et des stats (donut/rentabilité). Liste UNIQUE, partagée par
+// Import Match ET Scouting Observation (demandé explicitement). S'applique aux PROCHAINS imports
+// seulement — les actions déjà importées ne sont pas modifiées rétroactivement.
+function IgnoredTagsSettings() {
+  const [list, setList] = useState(IGNORED_CODING_TAGS || []);
+  const [newTag, setNewTag] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
+
+  async function persist(next) {
+    setBusy(true);
+    await saveIgnoredTags(next);
+    setList(next);
+    setStatus("Saved — applied to future imports (Import Match and Scouting Observation).");
+    setBusy(false);
+  }
+  function addTag() {
+    const val = newTag.trim();
+    if (!val || list.some(t => normTag(t) === normTag(val))) return;
+    setNewTag("");
+    persist([...list, val]);
+  }
+  function removeTag(tag) {
+    persist(list.filter(t => t !== tag));
+  }
+
+  return (
+    <div>
+      <SectionTitle eyebrow="Settings" title="Ignored tags (coding file)" />
+      <p style={{ color: "#8B93A1", fontSize: 13, lineHeight: 1.6, marginBottom: 16 }}>
+        Any word listed here disappears completely from the "not recognized" alert AND from the stats (donut /
+        efficiency) on every future import — for both Import Match and Scouting Observation. Use it for anything
+        your coding software tags that you never want to see or analyze (ex. "Baseline", "Sideline").
+      </p>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18 }}>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
+          {list.length === 0 && <span style={{ fontSize: 12.5, color: "#5C6470" }}>No ignored word yet.</span>}
+          {list.map(tag => (
+            <span key={tag} style={{ display: "flex", alignItems: "center", gap: 6, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 7, padding: "5px 10px", fontSize: 12.5 }}>
+              {tag}
+              <button onClick={() => removeTag(tag)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex", padding: 0 }}><X size={12} /></button>
+            </span>
+          ))}
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <input value={newTag} onChange={e => setNewTag(e.target.value)} onKeyDown={e => { if (e.key === "Enter") addTag(); }}
+            placeholder="Exact tag name to ignore" style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", flex: 1, maxWidth: 280 }} />
+          <button disabled={busy} onClick={addTag} style={{ ...btnSecondary, display: "flex", alignItems: "center", gap: 6 }}><Plus size={13} /> Add</button>
+        </div>
+      </div>
+      {status && <div style={{ fontSize: 12.5, color: TEAL, marginTop: 10 }}>{status}</div>}
+    </div>
+  );
+}
+
+// Demandé par l'utilisateur : tranches de "temps de tir" (chrono d'attaque restant au moment de
+// l'action, 0 à 24s) — modifiables et ajoutables librement. Appliquées aux PROCHAINS imports
+// seulement (.dnk et .SCTimeline), partout où une catégorie dynamique s'affiche (Donut +
+// Rentabilité), exactement comme Spacing/Screen defense.
+function ShotTimeRangesSettings() {
+  const [ranges, setRanges] = useState(currentShotTimeRanges());
+  const [busy, setBusy] = useState(false);
+  const [status, setStatus] = useState("");
+
+  async function persist(next) {
+    setBusy(true);
+    await saveShotTimeRanges(next);
+    setRanges(next);
+    setStatus("Saved — applied to future imports.");
+    setBusy(false);
+  }
+  function updateRange(id, field, value) {
+    const n = parseFloat(value);
+    const next = ranges.map(r => r.id === id ? { ...r, [field]: isNaN(n) ? r[field] : n, label: field === "min" ? `${isNaN(n) ? r.min : n}-${r.max}s` : `${r.min}-${isNaN(n) ? r.max : n}s` } : r);
+    setRanges(next);
+  }
+  function addRange() {
+    const last = ranges[ranges.length - 1];
+    const min = last ? last.max : 0;
+    const max = min + 6;
+    persist([...ranges, { id: uid(), label: `${min}-${max}s`, min, max }]);
+  }
+  function removeRange(id) {
+    persist(ranges.filter(r => r.id !== id));
+  }
+
+  return (
+    <div>
+      <SectionTitle eyebrow="Settings" title="Shot time ranges (0-24s)" />
+      <p style={{ color: "#8B93A1", fontSize: 13, lineHeight: 1.6, marginBottom: 16 }}>
+        Raw shot-clock values found in a coding file (ex. "23.8") are automatically grouped into these ranges instead
+        of showing up as "not recognized" — displayed as a Donut + Efficiency breakdown, just like Plays or Spacing.
+        Edit the ranges or add new ones below.
+      </p>
+      <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 18 }}>
+        {ranges.map(r => (
+          <div key={r.id} style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+            <input type="number" step="0.1" value={r.min} onChange={e => updateRange(r.id, "min", e.target.value)} onBlur={() => persist(ranges)}
+              style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 80 }} />
+            <span style={{ color: "#8B93A1", fontSize: 13 }}>to</span>
+            <input type="number" step="0.1" value={r.max} onChange={e => updateRange(r.id, "max", e.target.value)} onBlur={() => persist(ranges)}
+              style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: 80 }} />
+            <span style={{ color: "#5C6470", fontSize: 12.5 }}>sec — {r.label}</span>
+            <button onClick={() => removeRange(r.id)} style={{ background: "none", border: "none", color: "#5C6470", cursor: "pointer", display: "flex", marginLeft: "auto" }}><Trash2 size={15} /></button>
+          </div>
+        ))}
+        <button disabled={busy} onClick={addRange} style={{ ...btnSecondary, display: "flex", alignItems: "center", gap: 6, marginTop: 6 }}><Plus size={13} /> Add a range</button>
+      </div>
+      {status && <div style={{ fontSize: 12.5, color: TEAL, marginTop: 10 }}>{status}</div>}
     </div>
   );
 }
@@ -23850,15 +24084,15 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
   const [subtab, setSubtab] = useState(defaultTeamSubtab);
   const [exportReport, setExportReport] = useState(null);
 
-  // Colonnes de stats communes à afficher (hors points, déjà en tête) : toutes celles présentes
-  // chez au moins un joueur ayant un box score, triées par fréquence (demandé par l'utilisateur :
-  // ne pas limiter l'affichage).
+  // Colonnes de stats communes à afficher (hors points, déjà en tête) : les 3 plus fréquentes
+  // parmi tous les joueurs ayant un box score (au-delà, le tableau Standings devient illisible —
+  // demandé par l'utilisateur, retour à la limite initiale).
   const otherLabels = useMemo(() => {
     const freq = {};
     Object.values(box.byPlayer).forEach(b => {
       b.statLabels.forEach(l => { if (l !== b.ptsLabel) freq[l] = (freq[l] || 0) + 1; });
     });
-    return Object.entries(freq).sort((a, b) => b[1] - a[1]).map(([l]) => l);
+    return Object.entries(freq).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([l]) => l);
   }, [box.byPlayer]);
 
   const rows = roster.map(p => {
