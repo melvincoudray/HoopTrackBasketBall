@@ -8435,12 +8435,22 @@ function HomeSectionLink({ eyebrow, title, onClick }) {
 // une égalité stricte entre les deux chaînes échouait donc silencieusement. On cherche maintenant la
 // fiche Scouting Report correspondante de façon souple (même normalisation que le reste du site),
 // et on renvoie sa VRAIE clé (celle à utiliser pour l'ouvrir), pas le nom FFBB tel quel.
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur : la fiche "Les Sables d'Olonne" existe bien dans
+// Manage teams, avec logo, mais n'était jamais trouvée) : même écart que pour LiveStats et "Last 5
+// games" (voir lsTeamSide / repStandings) — le nom utilisé dans Manage teams peut être le nom du
+// club plutôt que celui de la ville utilisé par le calendrier FFBB, donc ni l'égalité stricte ni
+// l'inclusion de chaîne complète ne matchaient. On ajoute la même recherche par mot significatif
+// (>= 4 lettres) commun aux deux noms en dernier recours.
 function matchScoutingTeamKey(teams, name) {
   if (!name || !teams) return null;
   if (teams[name]) return name;
   const n = normTag(name);
   const keys = Object.keys(teams);
-  return keys.find(k => normTag(k) === n) || keys.find(k => normTag(k).includes(n) || n.includes(normTag(k))) || null;
+  const exact = keys.find(k => normTag(k) === n) || keys.find(k => normTag(k).includes(n) || n.includes(normTag(k)));
+  if (exact) return exact;
+  const words = s => String(s).normalize("NFD").replace(/[̀-ͯ]/g, "").toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length >= 4);
+  const nWords = words(name);
+  return keys.find(k => words(k).some(w => nWords.includes(w))) || null;
 }
 
 function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, team, goToPlayer, goToPlayers, goToScouting, goToTeam, goToPlanning, goToDraw, goToMontage, visibility }) {
@@ -8806,7 +8816,7 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
             <>
               <select value={nextGame2} onChange={e => saveNextGame2(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", maxWidth: 320, marginTop: 14, marginBottom: nextGame2 ? 10 : 0 }}>
                 <option value="">— 2nd Next Game: select opponent —</option>
-                {upcomingGames[1] && !scouting.teams[upcomingGames[1].opponent] && !Object.keys(scouting.teams).some(k => normTag(k) === normTag(upcomingGames[1].opponent)) && (
+                {upcomingGames[1] && !matchScoutingTeamKey(scouting.teams, upcomingGames[1].opponent) && (
                   <option value={upcomingGames[1].opponent}>{upcomingGames[1].opponent} (FFBB — not yet scouted)</option>
                 )}
                 {Object.keys(scouting.teams).map(n => <option key={n} value={n}>{n}</option>)}
