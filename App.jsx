@@ -1130,6 +1130,11 @@ async function saveCategoryChartStyles(styles) {
 // exploitable. Détecté une seule fois, utilisé à l'import (.dnk et .SCTimeline).
 function isJerseyNumberedName(s) { return /^#\s*\d+\s+\S/.test(String(s).trim()); }
 
+// Demandé par l'utilisateur : "Right Hand"/"Left Hand"/"Both Hands" restent de VRAIS tags (le
+// filtre Main dans OffenseDefenseBreakdown en a besoin), mais ne doivent plus jamais apparaître
+// dans l'alerte "non reconnus" — reconnus automatiquement, sans passer par Settings.
+const AUTO_RECOGNIZED_TAGS = new Set(["Right Hand", "Left Hand", "Both Hands"].map(normTag));
+
 // Liste de mots à ignorer complètement à l'import d'un fichier de coding — demandé par
 // l'utilisateur ("Baseline", "Sideline"…, des tags sans intérêt pour lui) : une fois ajoutés ici,
 // ils disparaissent à la fois de l'alerte "non reconnus" ET des stats (donut/rentabilité),
@@ -1292,7 +1297,7 @@ async function parseDnkCodingFile(arrayBuffer, cats, unknownColumnDefault = "pla
         if (cls.kind === "ignore") continue;
         if (cls.kind === "shotTime") { tags[cls.label] = 1; continue; }
         tags[cls.name] = 1;
-        if (!knownTags.has(normTag(cls.name)) && unknownColumnDefault === "tag") unconfirmedTagsSet.add(cls.name);
+        if (!knownTags.has(normTag(cls.name)) && !AUTO_RECOGNIZED_TAGS.has(normTag(cls.name)) && unknownColumnDefault === "tag") unconfirmedTagsSet.add(cls.name);
       }
       // Même règle que l'ancien import Excel : une action peut concerner plusieurs joueurs à la
       // fois (porteur de balle + écran sur la même possession) → une entrée par joueur tagué,
@@ -1420,7 +1425,7 @@ function extractSCLabelTags(labels, knownPlayers, knownTags, unconfirmedTagsSet,
     if (cls.kind === "ignore") continue;
     if (cls.kind === "shotTime") { tags[cls.label] = 1; continue; }
     tags[cls.name] = 1;
-    if (!knownTags.has(normTag(cls.name)) && unknownColumnDefault === "tag") unconfirmedTagsSet.add(cls.name);
+    if (!knownTags.has(normTag(cls.name)) && !AUTO_RECOGNIZED_TAGS.has(normTag(cls.name)) && unknownColumnDefault === "tag") unconfirmedTagsSet.add(cls.name);
   }
   return { tags, flaggedPlayers, ftPoints, roles };
 }
@@ -5673,9 +5678,14 @@ function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true
       ) : (
         <>
           {enableHandFilter && (
-            <div style={{ display: "flex", gap: 4, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 4, marginBottom: 12, flexWrap: "wrap" }}>
-              {[["all", "All"], ["right", "Right hand"], ["left", "Left hand"], ["both", "Both hands"]].map(([id, label]) => (
-                <button key={id} type="button" onClick={() => setHandFilter(id)} style={{ flex: 1, minWidth: 90, background: handFilter === id ? TEAL : "transparent", color: handFilter === id ? INK : "#AEB5BF", border: "none", borderRadius: 9, padding: 9, cursor: "pointer", fontSize: 12.5, fontWeight: handFilter === id ? 800 : 700, fontFamily: "inherit" }}>{label}</button>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 14, flexWrap: "wrap" }}>
+              <span style={{ fontSize: 10.5, color: "#5C6470", textTransform: "uppercase", letterSpacing: "0.06em" }}>Hand</span>
+              {[["all", "All"], ["right", "Right"], ["left", "Left"], ["both", "Both"]].map(([id, label]) => (
+                <button key={id} type="button" onClick={() => setHandFilter(id)} style={{
+                  background: "none", border: "none", padding: "2px 0", cursor: "pointer", fontFamily: "inherit", fontSize: 12,
+                  fontWeight: handFilter === id ? 700 : 500, color: handFilter === id ? TEAL : "#5C6470",
+                  borderBottom: handFilter === id ? `2px solid ${TEAL}` : "2px solid transparent",
+                }}>{label}</button>
               ))}
             </div>
           )}
