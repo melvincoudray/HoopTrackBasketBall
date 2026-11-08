@@ -1992,11 +1992,14 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
     saveClipOrder(keys);
   }
 
-  // Demandé par l'utilisateur : un bouton pour trier les clips par ordre alphabétique (sur leur
-  // libellé affiché) d'un coup, plutôt qu'un par un avec les flèches.
+  // Demandé par l'utilisateur : un bouton pour trier les clips par ordre alphabétique de leur
+  // note (pas leur libellé) d'un coup, plutôt qu'un par un avec les flèches. Les clips sans note
+  // restent à la fin, dans leur ordre d'avant.
   function sortClipsAlpha() {
-    const sorted = [...displayedClips].sort((a, b) => a.label.localeCompare(b.label));
-    saveClipOrder(sorted.map(c => c.key));
+    const withNote = displayedClips.filter(c => (clipNotes[c.key] || "").trim());
+    const withoutNote = displayedClips.filter(c => !(clipNotes[c.key] || "").trim());
+    withNote.sort((a, b) => clipNotes[a.key].localeCompare(clipNotes[b.key]));
+    saveClipOrder([...withNote, ...withoutNote].map(c => c.key));
   }
   // Identifiant de la génération en cours : une annulation (ou la fermeture de la fenêtre) le
   // change, ce qui permet à la génération interrompue de s'arrêter sans rien afficher.
@@ -2230,7 +2233,7 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
               </div>
               {notesScope && displayedClips.length > 1 && (
                 <button onClick={sortClipsAlpha} style={{ alignSelf: "flex-start", background: "none", border: `1px solid ${LINE}`, borderRadius: 8, color: "#8B93A1", cursor: "pointer", fontSize: 12, padding: "6px 12px", fontFamily: "inherit" }}>
-                  Sort alphabetically
+                  Sort by note (A–Z)
                 </button>
               )}
               {displayedClips.map((c, i) => (
