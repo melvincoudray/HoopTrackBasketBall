@@ -4,7 +4,7 @@ import * as XLSX from "xlsx";
 import initSqlJs from "sql.js";
 import { FFmpeg } from "@ffmpeg/ffmpeg";
 import { toBlobURL } from "@ffmpeg/util";
-import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon, Calendar, Star, Bell, BellOff, Pencil, RefreshCw, Film } from "lucide-react";
+import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, GripVertical, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon, Calendar, Star, Bell, BellOff, Pencil, RefreshCw, Film } from "lucide-react";
 import {
   PieChart, Pie, Cell, ComposedChart, Bar as RBar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
   RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar,
@@ -1893,7 +1893,7 @@ function SecondaryTagPickerModal({ name, side, category, cats, onConfirm, onClos
 // Team et Scouting. Rien n'est envoyé nulle part, et tout disparaît au rechargement de la page.
 const CLIP_VIDEO_CACHE = new Map();
 
-function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, category }) {
+function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, category, notesScope }) {
   const keyOf = grouping?.keyOf || (p => p.matchId);
   const labelOf = grouping?.labelOf || (p => `${p.date} vs ${p.opponent}`);
   const sortKeyOf = grouping?.sortKeyOf || (p => p.date || "");
@@ -1944,6 +1944,66 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
   // se préparent, comme demandé.
   const [clipResults, setClipResults] = useState([]); // [{ url, label }]
   const clipUrlsRef = useRef([]);
+
+  // Demandé par l'utilisateur (clips individuels d'un joueur uniquement — notesScope n'est
+  // fourni que par le bouton "Clips" d'une fiche joueur) : pouvoir noter chaque clip et changer
+  // leur ordre d'affichage (flèches ou glisser-déposer), mémorisé pour les retrouver à la
+  // prochaine ouverture. Mémorisé par joueur (notesScope), pas par clip généré : les clips sont
+  // ré-encodés à chaque ouverture (rien n'est stocké côté site), mais leur identité (clipKey, basée
+  // sur le match + le timing du tag) reste stable, donc notes et ordre survivent à la régénération.
+  const [clipOrder, setClipOrder] = useState([]); // [clipKey, ...] ordre voulu
+  const [clipNotes, setClipNotes] = useState({}); // clipKey -> texte
+  const [dragKey, setDragKey] = useState(null);
+  useEffect(() => {
+    if (!notesScope) return;
+    (async () => {
+      setClipOrder((await storeGet(`clip_order::${notesScope}`)) || []);
+      setClipNotes((await storeGet(`clip_notes::${notesScope}`)) || {});
+    })();
+  }, [notesScope]);
+
+  function saveClipOrder(order) {
+    setClipOrder(order);
+    if (notesScope) storeSet(`clip_order::${notesScope}`, order);
+  }
+  function saveClipNote(key, text) {
+    setClipNotes(prev => {
+      const next = { ...prev, [key]: text };
+      if (notesScope) storeSet(`clip_notes::${notesScope}`, next);
+      return next;
+    });
+  }
+
+  // Liste affichée : dans l'ordre mémorisé (clipOrder) quand il y en a — les clips pas encore
+  // classés (nouveaux, ou pas de notesScope) restent dans leur ordre de génération, à la suite.
+  const displayedClips = useMemo(() => {
+    if (!notesScope || clipOrder.length === 0) return clipResults;
+    const byKey = new Map(clipResults.map(c => [c.key, c]));
+    const ordered = clipOrder.map(k => byKey.get(k)).filter(Boolean);
+    const seen = new Set(ordered.map(c => c.key));
+    return [...ordered, ...clipResults.filter(c => !seen.has(c.key))];
+  }, [clipResults, clipOrder, notesScope]);
+
+  function moveClip(key, dir) {
+    const keys = displayedClips.map(c => c.key);
+    const i = keys.indexOf(key);
+    const j = i + dir;
+    if (i < 0 || j < 0 || j >= keys.length) return;
+    [keys[i], keys[j]] = [keys[j], keys[i]];
+    saveClipOrder(keys);
+  }
+
+  function dropClip(targetKey) {
+    if (!dragKey || dragKey === targetKey) return;
+    const keys = displayedClips.map(c => c.key);
+    const from = keys.indexOf(dragKey);
+    const to = keys.indexOf(targetKey);
+    if (from < 0 || to < 0) return;
+    keys.splice(from, 1);
+    keys.splice(to, 0, dragKey);
+    saveClipOrder(keys);
+    setDragKey(null);
+  }
   // Identifiant de la génération en cours : une annulation (ou la fermeture de la fenêtre) le
   // change, ce qui permet à la génération interrompue de s'arrêter sans rien afficher.
   const runIdRef = useRef(0);
@@ -2006,7 +2066,8 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
             const url = URL.createObjectURL(blob);
             clipUrlsRef.current.push(url);
             const label = `${noun} ${n} — ${g.label} · clip ${ci + 1}/${g.clips.length}`;
-            setClipResults(prev => [...prev, { url, label, item: { label: `${playName} — ${sideLabel} · ${g.label}`, sourceKey: cacheKeyOf(g.key), sourceName: file.name, sourceLabel: `${noun} ${g.label}`, start, end, category } }]);
+            const clipKey = `${g.key}::${start}::${end}`;
+            setClipResults(prev => [...prev, { key: clipKey, url, label, item: { label: `${playName} — ${sideLabel} · ${g.label}`, sourceKey: cacheKeyOf(g.key), sourceName: file.name, sourceLabel: `${noun} ${g.label}`, start, end, category } }]);
             try { await ffmpeg.deleteFile(outName); } catch (e) {}
             clipIdx++;
           }
@@ -2173,10 +2234,29 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
               <div style={{ fontSize: 11.5, color: "#5C6470", lineHeight: 1.5 }}>
                 Viewing mode only — each clip lives in your browser and is never uploaded or stored on the site. Use "Save" on a clip only if you want to keep a copy on your device.
               </div>
-              {clipResults.map((c, i) => (
-                <div key={i} style={{ display: "flex", flexDirection: "column", gap: 6, padding: 12, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10 }}>
-                  <div style={{ fontSize: 12, color: "#8B93A1" }}>{c.label}</div>
-                  <video controls autoPlay={i === clipResults.length - 1 && !busy} src={c.url} style={{ width: "100%", borderRadius: 8, background: "#000" }} />
+              {displayedClips.map((c, i) => (
+                <div key={c.key || i} draggable={!!notesScope} onDragStart={() => setDragKey(c.key)} onDragOver={e => notesScope && e.preventDefault()} onDrop={() => dropClip(c.key)}
+                  style={{ display: "flex", flexDirection: "column", gap: 6, padding: 12, background: PANEL2, border: `1px solid ${dragKey === c.key ? AMBER : LINE}`, borderRadius: 10 }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                    {notesScope && <GripVertical size={14} color="#5C6470" style={{ cursor: "grab", flexShrink: 0 }} />}
+                    <div style={{ fontSize: 12, color: "#8B93A1", flex: 1 }}>{c.label}</div>
+                    {notesScope && (
+                      <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
+                        <button onClick={() => moveClip(c.key, -1)} disabled={i === 0} title="Move up" style={{ background: "none", border: "none", color: i === 0 ? "#3A4150" : "#8B93A1", cursor: i === 0 ? "default" : "pointer", display: "flex", padding: 2 }}><ChevronUp size={15} /></button>
+                        <button onClick={() => moveClip(c.key, 1)} disabled={i === displayedClips.length - 1} title="Move down" style={{ background: "none", border: "none", color: i === displayedClips.length - 1 ? "#3A4150" : "#8B93A1", cursor: i === displayedClips.length - 1 ? "default" : "pointer", display: "flex", padding: 2 }}><ChevronDown size={15} /></button>
+                      </div>
+                    )}
+                  </div>
+                  <video controls autoPlay={i === displayedClips.length - 1 && !busy} src={c.url} style={{ width: "100%", borderRadius: 8, background: "#000" }} />
+                  {notesScope && (
+                    <textarea
+                      value={clipNotes[c.key] || ""}
+                      onChange={e => saveClipNote(c.key, e.target.value)}
+                      placeholder="Note on this clip…"
+                      rows={2}
+                      style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", width: "100%", boxSizing: "border-box", resize: "vertical" }}
+                    />
+                  )}
                   <a href={c.url} download={`${playName.replace(/\s+/g, "_")}_${sideLabel}_clip${i + 1}.mp4`} style={{ ...btnPrimary, textAlign: "center", textDecoration: "none", display: "block", boxSizing: "border-box" }}>Save this clip to my device</a>
                   {c.item && <AddToMontageButton item={c.item} />}
                 </div>
@@ -7195,6 +7275,9 @@ export default function App() {
   const { config: visibility } = useVisibilityConfig(team?.id);
   const [seasonFilter, setSeasonFilter] = useState("all"); // "all" ou une saison précise
   const [initializing, setInitializing] = useState(true);
+  // Demandé par l'utilisateur : remonté ici (plutôt que dans HomeTab) pour que la cloche de
+  // notifications dans TopBar soit visible partout dans l'app, pas seulement sur l'écran Home.
+  const push = usePushNotifications(team?.id, session?.name);
 
   useEffect(() => {
     (async () => {
@@ -7565,6 +7648,7 @@ export default function App() {
           setSelectedPlayer(null); setSelectedMatchKeys(null); setLoading(true);
         }}
         isCoach={session.role === "coach"}
+        push={push}
       />
       <div className="screen-only" style={{ maxWidth: 1180, margin: "0 auto", padding: "28px 20px 96px" }}>
         {tab === "home" && (
@@ -8519,7 +8603,18 @@ const btnSecondary = { padding: "11px 14px", background: "transparent", border: 
 // Top bar
 // ---------------------------------------------------------------------------
 
-function TopBar({ session, onSwitchAccount, onSwitchTeam, team, isCoach }) {
+function TopBar({ session, onSwitchAccount, onSwitchTeam, team, isCoach, push }) {
+  // Demandé par l'utilisateur : plus de barre/bandeau à l'écran Home pour activer les
+  // notifications — juste une cloche ici, tout en haut, visible sur tous les écrans. Barrée
+  // (BellOff) tant qu'elles ne sont pas activées, pleine (Bell, en teal) une fois activées. Un
+  // clic sur la cloche barrée lance l'activation ; une fois activée, il n'y a plus rien à faire
+  // (pas de bouton pour les désactiver depuis ici — pas demandé).
+  const pushOn = push?.subscribed;
+  const pushBlocked = push?.permission === "denied";
+  const pushTitle = !push?.supported ? null
+    : pushOn ? "Notifications enabled"
+    : pushBlocked ? "Notifications blocked in the browser — check your site settings"
+    : push?.error || "Click to enable notifications";
   return (
     <div style={{ borderBottom: `1px solid ${LINE}`, background: "#0B0D11" }}>
       <div style={{ maxWidth: 1180, margin: "0 auto", padding: "14px 20px", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 12 }}>
@@ -8530,6 +8625,16 @@ function TopBar({ session, onSwitchAccount, onSwitchTeam, team, isCoach }) {
           <div style={{ fontFamily: "ui-monospace, monospace", color: AMBER, fontWeight: 700, fontSize: 12, letterSpacing: "0.06em", textAlign: "left" }}>{team.name}</div>
         </button>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          {push?.supported && (
+            <button
+              onClick={pushOn || pushBlocked ? undefined : push.enable}
+              disabled={push.busy || pushOn || pushBlocked}
+              title={pushTitle}
+              style={{ background: "none", border: "none", color: pushOn ? TEAL : "#5C6470", cursor: pushOn || pushBlocked ? "default" : "pointer", display: "flex", padding: 0 }}
+            >
+              {pushOn ? <Bell size={16} /> : <BellOff size={16} />}
+            </button>
+          )}
           <div style={{ fontSize: 12.5, color: "#8B93A1", display: "flex", alignItems: "center", gap: 6 }}>
             <ShieldCheck size={13} color={isCoach ? TEAL : "#8B93A1"} />
             {session.name} <span style={{ color: "#4A5361" }}>· {isCoach ? "Staff" : "Player"}</span>
@@ -8588,7 +8693,6 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   const box = useBoxScore(playerName, matchFilter);
   const advanced = useTeamAdvancedStats(matchFilter);
   const objectives = useObjectives(playerName || "");
-  const push = usePushNotifications(team?.id, session?.name);
   // Historique des modifications — demandé par l'utilisateur, visible par tout le monde (voir
   // logActivity/useActivityLog plus haut).
   const activity = useActivityLog();
@@ -8718,7 +8822,6 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   async function saveNextGame2(name) {
     setNextGame2(name);
     await storeSet("next_game_2_team", name);
-    await storeSet("next_game_2_auto_opponent", ""); // choix manuel : ne plus le considérer comme auto
   }
   useEffect(() => {
     if (!isCoach || !roster.length) return;
@@ -8731,21 +8834,27 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
         if (!alive || !res.ok) return;
         const games = data.games || [];
         setUpcomingGames(games);
+        // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "Next Game" ne se mettait JAMAIS à jour
+        // tout seul, toujours à régler à la main) : comparer à "next_game_auto_opponent" bloquait
+        // l'auto-détection pour toujours dès que le champ contenait autre chose que la toute
+        // dernière valeur auto-écrite — en particulier la 1ère fois, puisqu'un adversaire déjà
+        // réglé à la main (avant même l'existence de l'auto-détection) ne correspondait à aucun
+        // "autoOpp" encore jamais écrit. On considère maintenant que la valeur stockée n'a plus
+        // besoin d'être respectée dès qu'elle ne correspond plus à AUCUN match réellement à venir
+        // (match déjà joué depuis, ou adversaire retiré du calendrier) — un choix manuel parmi les
+        // matchs à venir reste, lui, toujours respecté tant que ce match n'est pas encore passé.
+        const upcomingOpponents = games.map(g => g.opponent);
         if (games.length) {
-          const autoOpp = (await storeGet("next_game_auto_opponent")) || "";
           const current = (await storeGet("next_game_team")) || "";
-          if (!current || current === autoOpp) {
+          if (!current || !upcomingOpponents.includes(current)) {
             await storeSet("next_game_team", games[0].opponent);
-            await storeSet("next_game_auto_opponent", games[0].opponent);
             if (alive) setNextGame(games[0].opponent);
           }
         }
         if (games.length > 1) {
-          const autoOpp2 = (await storeGet("next_game_2_auto_opponent")) || "";
           const current2 = (await storeGet("next_game_2_team")) || "";
-          if (!current2 || current2 === autoOpp2) {
+          if (!current2 || !upcomingOpponents.includes(current2)) {
             await storeSet("next_game_2_team", games[1].opponent);
-            await storeSet("next_game_2_auto_opponent", games[1].opponent);
             if (alive) setNextGame2(games[1].opponent);
           }
         }
@@ -8901,18 +9010,6 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
           </div>
         </div>
       </div>
-
-      {/* Demandé par l'utilisateur : possibilité d'activer les notifications push, pour
-          recevoir sur l'appareil (même app fermée) : nouveau match importé, nouvelle
-          ressource, message d'accueil, et rappel 2h avant un événement du planning. Visible
-          pour tout le monde (coach et joueurs), pas seulement le coach. */}
-      {push.supported && !push.subscribed && push.permission !== "denied" && (
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: "12px 16px", marginBottom: 26 }}>
-          <div style={{ fontSize: 12.5, color: "#8B93A1" }}>Get notified on this device for new matches, resources, coach messages, and event reminders.</div>
-          <button disabled={push.busy} onClick={push.enable} style={{ ...btnPrimary, width: "auto", padding: "8px 16px", fontSize: 12.5, flexShrink: 0 }}>{push.busy ? "…" : "Enable notifications"}</button>
-        </div>
-      )}
-      {push.error && <div style={{ color: RED, fontSize: 12, marginBottom: 16 }}>{push.error}</div>}
 
       {(isCoach || (nextGame && (visibility || DEFAULT_VISIBILITY).tabs.scouting)) && (
         <div style={{ marginBottom: 26 }}>
@@ -11061,16 +11158,17 @@ function PositionComparisonTable({ position, roster, byPlayer, playerFirst }) {
   // Union des colonnes réellement présentes chez au moins un des joueurs du poste, dans
   // l'ordre de priorité défini pour ce poste (Pts, Assists, Ballons perdus, % LF, % 3Pts…).
   const allLabelsAtPosition = Array.from(new Set(peers.flatMap(p => (byPlayer[p.name]?.statLabels) || [])));
-  // BUG RÉEL CORRIGÉ : pour les pourcentages de tir (twoPct/tpmPct/ftPct), utiliser la colonne
-  // BRUTE du fichier ("3PTS%", "3PT %"…) plutôt que la version normalisée ("% 3pts") pose
-  // problème dès que deux fichiers importés n'utilisent pas exactement le même intitulé de
-  // colonne — un seul des deux matchs était alors pris en compte dans la moyenne (constaté :
-  // Nathan Mettler affiché à 50% au lieu de 25% sur ses deux matchs). "% 2pts"/"% 3pts"/"% LF"
-  // sont TOUJOURS le même nom quel que soit le fichier d'origine, donc on les priorise ici.
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : % LF / % 3pts jamais détectés ici alors
+  // qu'affichés plus haut dans les blocs Box Score) : un box score FFBB n'a jamais de colonne
+  // de pourcentage toute faite (seulement les réussis/tentés) — le pourcentage est donc TOUJOURS
+  // sous le nom "% 2pts (calculated)" / "% 3pts (calculated)" / "% LF (calculated)" (voir
+  // derivedMatchStats), jamais le nom brut "% 2pts"/"% 3pts"/"% LF" testé ici jusqu'à présent.
   const NORMALIZED_PCT_LABEL = { twoPct: "% 2pts", tpmPct: "% 3pts", ftPct: "% LF" };
   const columns = keys.map(key => {
-    if (NORMALIZED_PCT_LABEL[key] && allLabelsAtPosition.includes(NORMALIZED_PCT_LABEL[key])) {
-      return { key, label: NORMALIZED_PCT_LABEL[key], fallbackLabel: STAT_KEY_LABEL_FR[key] || key };
+    const base = NORMALIZED_PCT_LABEL[key];
+    if (base) {
+      const label = allLabelsAtPosition.includes(base) ? base : (allLabelsAtPosition.includes(base + " (calculated)") ? base + " (calculated)" : null);
+      if (label) return { key, label, fallbackLabel: STAT_KEY_LABEL_FR[key] || key };
     }
     return { key, label: findStatCol(allLabelsAtPosition, STAT_PATTERNS[key] || [], key), fallbackLabel: STAT_KEY_LABEL_FR[key] || key };
   });
@@ -11299,11 +11397,12 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
   // Demandé par l'utilisateur : un bouton "Clips" (cercle simple, pas un donut/stat) sur la
   // fiche joueur, pour retrouver vite les actions taguées spécifiquement pour lui dans le
   // fichier de codage (bouton "Prénom Nom Clip" côté .dnk — même convention que les tags
-  // joueur habituels, juste avec le suffixe " Clip"). Recherché sur TOUTES les actions, pas
-  // seulement celles déjà attribuées à ce joueur : ce tag peut viser une action où il n'est pas
-  // le porteur de balle (ex. une rotation défensive à lui montrer).
-  const clipTagName = `${playerName} Clip`;
-  const clipPlays = useMemo(() => allPlays.filter(p => tagIsSet(p.tags, clipTagName)), [allPlays, clipTagName]);
+  // joueur habituels, avec le suffixe " Clip" OU " Clips" selon le tag créé — les deux
+  // orthographes sont acceptées). Recherché sur TOUTES les actions, pas seulement celles déjà
+  // attribuées à ce joueur : ce tag peut viser une action où il n'est pas le porteur de balle
+  // (ex. une rotation défensive à lui montrer).
+  const clipTagNames = [`${playerName} Clip`, `${playerName} Clips`];
+  const clipPlays = useMemo(() => allPlays.filter(p => clipTagNames.some(n => tagIsSet(p.tags, n))), [allPlays, playerName]);
   const [showClipsModal, setShowClipsModal] = useState(false);
 
   return (
@@ -11495,6 +11594,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
           plays={clipPlays}
           onClose={() => setShowClipsModal(false)}
           category="player"
+          notesScope={playerName}
         />
       )}
     </div>
