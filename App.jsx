@@ -4,7 +4,7 @@ import * as XLSX from "xlsx";
 import initSqlJs from "sql.js";
 import { FFmpeg } from "@ffmpeg/ffmpeg";
 import { toBlobURL } from "@ffmpeg/util";
-import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, GripVertical, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon, Calendar, Star, Bell, BellOff, Pencil, RefreshCw, Film } from "lucide-react";
+import { Upload, Users, LayoutGrid, LogOut, Trash2, ChevronLeft, ChevronRight, ChevronUp, ChevronDown, ShieldCheck, Plus, X, AlertTriangle, TrendingUp, TrendingDown, Minus, BarChart3, ClipboardList, Download, Camera, Search, Home, Video, Link as LinkIcon, Calendar, Star, Bell, BellOff, Pencil, RefreshCw, Film } from "lucide-react";
 import {
   PieChart, Pie, Cell, ComposedChart, Bar as RBar, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer, Legend,
   RadarChart, PolarGrid, PolarAngleAxis, PolarRadiusAxis, Radar,
@@ -1953,7 +1953,6 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
   // sur le match + le timing du tag) reste stable, donc notes et ordre survivent à la régénération.
   const [clipOrder, setClipOrder] = useState([]); // [clipKey, ...] ordre voulu
   const [clipNotes, setClipNotes] = useState({}); // clipKey -> texte
-  const [dragKey, setDragKey] = useState(null);
   useEffect(() => {
     if (!notesScope) return;
     (async () => {
@@ -1993,16 +1992,11 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
     saveClipOrder(keys);
   }
 
-  function dropClip(targetKey) {
-    if (!dragKey || dragKey === targetKey) return;
-    const keys = displayedClips.map(c => c.key);
-    const from = keys.indexOf(dragKey);
-    const to = keys.indexOf(targetKey);
-    if (from < 0 || to < 0) return;
-    keys.splice(from, 1);
-    keys.splice(to, 0, dragKey);
-    saveClipOrder(keys);
-    setDragKey(null);
+  // Demandé par l'utilisateur : un bouton pour trier les clips par ordre alphabétique (sur leur
+  // libellé affiché) d'un coup, plutôt qu'un par un avec les flèches.
+  function sortClipsAlpha() {
+    const sorted = [...displayedClips].sort((a, b) => a.label.localeCompare(b.label));
+    saveClipOrder(sorted.map(c => c.key));
   }
   // Identifiant de la génération en cours : une annulation (ou la fermeture de la fenêtre) le
   // change, ce qui permet à la génération interrompue de s'arrêter sans rien afficher.
@@ -2234,11 +2228,15 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
               <div style={{ fontSize: 11.5, color: "#5C6470", lineHeight: 1.5 }}>
                 Viewing mode only — each clip lives in your browser and is never uploaded or stored on the site. Use "Save" on a clip only if you want to keep a copy on your device.
               </div>
+              {notesScope && displayedClips.length > 1 && (
+                <button onClick={sortClipsAlpha} style={{ alignSelf: "flex-start", background: "none", border: `1px solid ${LINE}`, borderRadius: 8, color: "#8B93A1", cursor: "pointer", fontSize: 12, padding: "6px 12px", fontFamily: "inherit" }}>
+                  Sort alphabetically
+                </button>
+              )}
               {displayedClips.map((c, i) => (
-                <div key={c.key || i} draggable={!!notesScope} onDragStart={() => setDragKey(c.key)} onDragOver={e => notesScope && e.preventDefault()} onDrop={() => dropClip(c.key)}
-                  style={{ display: "flex", flexDirection: "column", gap: 6, padding: 12, background: PANEL2, border: `1px solid ${dragKey === c.key ? AMBER : LINE}`, borderRadius: 10 }}>
+                <div key={c.key || i}
+                  style={{ display: "flex", flexDirection: "column", gap: 6, padding: 12, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                    {notesScope && <GripVertical size={14} color="#5C6470" style={{ cursor: "grab", flexShrink: 0 }} />}
                     <div style={{ fontSize: 12, color: "#8B93A1", flex: 1 }}>{c.label}</div>
                     {notesScope && (
                       <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
