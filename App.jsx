@@ -1953,11 +1953,18 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
   // sur le match + le timing du tag) reste stable, donc notes et ordre survivent à la régénération.
   const [clipOrder, setClipOrder] = useState([]); // [clipKey, ...] ordre voulu
   const [clipNotes, setClipNotes] = useState({}); // clipKey -> texte
+  // Demandé par l'utilisateur : pouvoir aussi découper chaque clip (raccourcir son début et/ou
+  // sa fin), et que ce découpage soit mémorisé — réappliqué automatiquement à chaque réouverture
+  // (ré-exporté depuis la vidéo source avec les nouvelles bornes), sans avoir à recliquer "Cut".
+  const [clipTrims, setClipTrims] = useState({}); // clipKey -> { start, end } (secondes coupées à chaque bord, par rapport au tag d'origine)
+  const [trimDraft, setTrimDraft] = useState({}); // clipKey -> { start, end } valeurs en cours d'édition, avant clic sur "Cut"
+  const [cuttingKey, setCuttingKey] = useState(null);
   useEffect(() => {
     if (!notesScope) return;
     (async () => {
       setClipOrder((await storeGet(`clip_order::${notesScope}`)) || []);
       setClipNotes((await storeGet(`clip_notes::${notesScope}`)) || {});
+      setClipTrims((await storeGet(`clip_trim::${notesScope}`)) || {});
     })();
   }, [notesScope]);
 
@@ -1971,6 +1978,45 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
       if (notesScope) storeSet(`clip_notes::${notesScope}`, next);
       return next;
     });
+  }
+  function saveClipTrim(key, trim) {
+    setClipTrims(prev => {
+      const next = { ...prev, [key]: trim };
+      if (notesScope) storeSet(`clip_trim::${notesScope}`, next);
+      return next;
+    });
+  }
+
+  async function cutClip(c) {
+    const draft = trimDraft[c.key] || clipTrims[c.key] || { start: 0, end: 0 };
+    const trimStart = Math.max(0, parseFloat(draft.start) || 0);
+    const trimEnd = Math.max(0, parseFloat(draft.end) || 0);
+    const newStart = c.origStart + trimStart;
+    const newEnd = c.origEnd - trimEnd;
+    const newDur = newEnd - newStart;
+    if (newDur <= 0.1) { setError("Trim too large — nothing would remain of this clip."); return; }
+    const file = fileOf(c.groupKey);
+    if (!file) { setError("Re-add this match's video above before cutting this clip."); return; }
+    setCuttingKey(c.key); setError("");
+    try {
+      const ffmpeg = await getFfmpeg();
+      const videoMount = await mountVideoForFfmpeg(ffmpeg, file, "cut");
+      const outName = "cut_tmp.mp4";
+      await ffmpeg.exec(["-ss", String(newStart), "-i", videoMount.path, "-t", String(newDur), "-c", "copy", "-avoid_negative_ts", "make_zero", outName]);
+      const data = await ffmpeg.readFile(outName);
+      const blob = new Blob([data.buffer], { type: "video/mp4" });
+      const newUrl = URL.createObjectURL(blob);
+      try { await ffmpeg.deleteFile(outName); } catch (e) {}
+      await unmountVideoForFfmpeg(ffmpeg, videoMount.dir);
+      URL.revokeObjectURL(c.url);
+      clipUrlsRef.current = clipUrlsRef.current.map(u => (u === c.url ? newUrl : u));
+      setClipResults(prev => prev.map(x => (x.key === c.key ? { ...x, url: newUrl, item: { ...x.item, start: newStart, end: newEnd } } : x)));
+      saveClipTrim(c.key, { start: trimStart, end: trimEnd });
+    } catch (e) {
+      setError("Could not cut this clip: " + (e?.message || e));
+    } finally {
+      setCuttingKey(null);
+    }
   }
 
   // Liste affichée : dans l'ordre mémorisé (clipOrder) quand il y en a — les clips pas encore
@@ -2054,17 +2100,22 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
           const videoMount = await mountVideoForFfmpeg(ffmpeg, file, gi);
           for (let ci = 0; ci < g.clips.length; ci++) {
             const { start, end } = g.clips[ci];
-            const dur = Math.max(0.1, end - start);
+            const clipKey = `${g.key}::${start}::${end}`;
+            // Découpage mémorisé (bouton "Cut", voir plus haut) réappliqué automatiquement ici,
+            // pour que le clip ressorte déjà raccourci à chaque réouverture sans action manuelle.
+            const trim = (notesScope && clipTrims[clipKey]) || { start: 0, end: 0 };
+            const effStart = start + (parseFloat(trim.start) || 0);
+            const effEnd = end - (parseFloat(trim.end) || 0);
+            const dur = Math.max(0.1, effEnd - effStart);
             const outName = `clip_${clipIdx}.mp4`;
             setProgress(`Cutting clip ${clipIdx + 1}/${selectedClips} (${noun} ${n})…`);
-            await ffmpeg.exec(["-ss", String(start), "-i", videoMount.path, "-t", String(dur), "-c", "copy", "-avoid_negative_ts", "make_zero", outName]);
+            await ffmpeg.exec(["-ss", String(effStart), "-i", videoMount.path, "-t", String(dur), "-c", "copy", "-avoid_negative_ts", "make_zero", outName]);
             const data = await ffmpeg.readFile(outName);
             const blob = new Blob([data.buffer], { type: "video/mp4" });
             const url = URL.createObjectURL(blob);
             clipUrlsRef.current.push(url);
             const label = `${noun} ${n} — ${g.label} · clip ${ci + 1}/${g.clips.length}`;
-            const clipKey = `${g.key}::${start}::${end}`;
-            setClipResults(prev => [...prev, { key: clipKey, url, label, item: { label: `${playName} — ${sideLabel} · ${g.label}`, sourceKey: cacheKeyOf(g.key), sourceName: file.name, sourceLabel: `${noun} ${g.label}`, start, end, category } }]);
+            setClipResults(prev => [...prev, { key: clipKey, url, label, groupKey: g.key, origStart: start, origEnd: end, item: { label: `${playName} — ${sideLabel} · ${g.label}`, sourceKey: cacheKeyOf(g.key), sourceName: file.name, sourceLabel: `${noun} ${g.label}`, start: effStart, end: effEnd, category } }]);
             try { await ffmpeg.deleteFile(outName); } catch (e) {}
             clipIdx++;
           }
@@ -2249,6 +2300,25 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
                     )}
                   </div>
                   <video controls autoPlay={i === displayedClips.length - 1 && !busy} src={c.url} style={{ width: "100%", borderRadius: 8, background: "#000" }} />
+                  {notesScope && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <label style={{ fontSize: 11, color: "#5C6470", display: "flex", alignItems: "center", gap: 4 }}>
+                        Trim start (s)
+                        <input type="number" min="0" step="0.1" value={trimDraft[c.key]?.start ?? clipTrims[c.key]?.start ?? 0}
+                          onChange={e => setTrimDraft(prev => ({ ...prev, [c.key]: { start: e.target.value, end: prev[c.key]?.end ?? clipTrims[c.key]?.end ?? 0 } }))}
+                          style={{ ...inputStyle, letterSpacing: "normal", width: 56, padding: "4px 6px", fontSize: 12 }} />
+                      </label>
+                      <label style={{ fontSize: 11, color: "#5C6470", display: "flex", alignItems: "center", gap: 4 }}>
+                        Trim end (s)
+                        <input type="number" min="0" step="0.1" value={trimDraft[c.key]?.end ?? clipTrims[c.key]?.end ?? 0}
+                          onChange={e => setTrimDraft(prev => ({ ...prev, [c.key]: { start: prev[c.key]?.start ?? clipTrims[c.key]?.start ?? 0, end: e.target.value } }))}
+                          style={{ ...inputStyle, letterSpacing: "normal", width: 56, padding: "4px 6px", fontSize: 12 }} />
+                      </label>
+                      <button onClick={() => cutClip(c)} disabled={cuttingKey === c.key} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: TEAL, cursor: cuttingKey === c.key ? "default" : "pointer", fontSize: 12, padding: "4px 10px", fontFamily: "inherit" }}>
+                        {cuttingKey === c.key ? "Cutting…" : "Cut"}
+                      </button>
+                    </div>
+                  )}
                   {notesScope && (
                     <textarea
                       value={clipNotes[c.key] || ""}
