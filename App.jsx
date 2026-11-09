@@ -2002,7 +2002,9 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
       const ffmpeg = await getFfmpeg();
       const videoMount = await mountVideoForFfmpeg(ffmpeg, file, "cut");
       const outName = "cut_tmp.mp4";
-      await ffmpeg.exec(["-ss", String(newStart), "-i", videoMount.path, "-t", String(newDur), "-c", "copy", "-avoid_negative_ts", "make_zero", outName]);
+      // Même correctif que ci-dessus : ré-encoder pour couper exactement au bon endroit, "-c copy"
+      // ne pouvant se caler que sur les images-clés (durée imprévisible sinon).
+      await ffmpeg.exec(["-ss", String(newStart), "-i", videoMount.path, "-t", String(newDur), "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", "-avoid_negative_ts", "make_zero", outName]);
       const data = await ffmpeg.readFile(outName);
       const blob = new Blob([data.buffer], { type: "video/mp4" });
       const newUrl = URL.createObjectURL(blob);
@@ -2104,12 +2106,22 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
             // Découpage mémorisé (bouton "Cut", voir plus haut) réappliqué automatiquement ici,
             // pour que le clip ressorte déjà raccourci à chaque réouverture sans action manuelle.
             const trim = (notesScope && clipTrims[clipKey]) || { start: 0, end: 0 };
+            const hasTrim = (parseFloat(trim.start) || 0) > 0 || (parseFloat(trim.end) || 0) > 0;
             const effStart = start + (parseFloat(trim.start) || 0);
             const effEnd = end - (parseFloat(trim.end) || 0);
             const dur = Math.max(0.1, effEnd - effStart);
             const outName = `clip_${clipIdx}.mp4`;
             setProgress(`Cutting clip ${clipIdx + 1}/${selectedClips} (${noun} ${n})…`);
-            await ffmpeg.exec(["-ss", String(effStart), "-i", videoMount.path, "-t", String(dur), "-c", "copy", "-avoid_negative_ts", "make_zero", outName]);
+            // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : un découpage à 6s ne changeait rien,
+            // à 7s donnait un clip de 2s au lieu de 5s) : "-c copy" ne peut couper qu'aux images-
+            // clés — avec "-ss" avant "-i", le point de départ réel saute à l'image-clé la plus
+            // proche, pas celle demandée, d'où des durées imprévisibles. Dès qu'un découpage est
+            // mémorisé pour ce clip, on ré-encode (comme pour "Precise cut" ailleurs) pour couper
+            // exactement au bon endroit ; sans découpage, on garde "-c copy" (rapide).
+            const cutArgs = hasTrim
+              ? ["-ss", String(effStart), "-i", videoMount.path, "-t", String(dur), "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", "-avoid_negative_ts", "make_zero", outName]
+              : ["-ss", String(effStart), "-i", videoMount.path, "-t", String(dur), "-c", "copy", "-avoid_negative_ts", "make_zero", outName];
+            await ffmpeg.exec(cutArgs);
             const data = await ffmpeg.readFile(outName);
             const blob = new Blob([data.buffer], { type: "video/mp4" });
             const url = URL.createObjectURL(blob);
