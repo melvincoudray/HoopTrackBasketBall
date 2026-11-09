@@ -1959,6 +1959,14 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
   const [clipTrims, setClipTrims] = useState({}); // clipKey -> { start, end } (secondes coupées à chaque bord, par rapport au tag d'origine)
   const [trimDraft, setTrimDraft] = useState({}); // clipKey -> { start, end } valeurs en cours d'édition, avant clic sur "Cut"
   const [cuttingKey, setCuttingKey] = useState(null);
+  // Demandé par l'utilisateur : la génération de base des clips individuels (sans découpage
+  // manuel) est rapide ("-c copy") mais grossière — elle cale le début/la fin sur l'image-clé la
+  // plus proche, donc les bornes réelles peuvent déjà être décalées d'environ 1s avant même tout
+  // découpage manuel. Pour les clips individuels uniquement (notesScope), on laisse le choix
+  // entre cette génération rapide (approximative) et une génération précise (ré-encodée, plus
+  // lente mais avec les vraies bornes du tag) — "fast" reste le réglage par défaut pour ne rien
+  // changer au comportement existant ailleurs dans l'app.
+  const [clipsPrecision, setClipsPrecision] = useState("fast"); // "fast" | "precise"
   useEffect(() => {
     if (!notesScope) return;
     (async () => {
@@ -2019,6 +2027,60 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
     } finally {
       setCuttingKey(null);
     }
+  }
+
+  // Demandé par l'utilisateur : pouvoir télécharger en un seul fichier TOUS les clips individuels
+  // affichés (dans l'ordre choisi, avec les découpages déjà appliqués), avec la note de chaque
+  // clip incrustée en noir en haut à gauche pendant sa durée. Repart toujours de la vidéo source
+  // du match (pas des petits clips déjà exportés) pour une image nette, et uniformise la
+  // résolution (comme le montage existant pour des vidéos de matchs différents) afin que
+  // l'assemblage final fonctionne même si les vidéos sources n'ont pas toutes la même taille.
+  async function downloadFullVideo() {
+    if (!displayedClips.length || busy) return;
+    setBusy(true); setError(""); setResultUrl(null);
+    try {
+      const ffmpeg = await getFfmpeg();
+      setProgress("Loading the overlay font…");
+      const fontResp = await fetch("https://cdn.jsdelivr.net/npm/roboto-fontface@0.10.0/fonts/roboto/Roboto-Regular.ttf");
+      if (!fontResp.ok) throw new Error("Could not load the font needed for the note overlay.");
+      await ffmpeg.writeFile("overlay_font.ttf", new Uint8Array(await fontResp.arrayBuffer()));
+
+      const concatLines = [];
+      for (let i = 0; i < displayedClips.length; i++) {
+        const c = displayedClips[i];
+        setProgress(`Preparing clip ${i + 1}/${displayedClips.length}…`);
+        const file = fileOf(c.groupKey);
+        if (!file) throw new Error(`Re-add the video for "${c.label}" above before downloading the full video.`);
+        const videoMount = await mountVideoForFfmpeg(ffmpeg, file, "full" + i);
+        const dur = Math.max(0.1, c.item.end - c.item.start);
+        const outName = `full_${i}.mp4`;
+        const note = (clipNotes[c.key] || "").trim();
+        // Échappement requis par le filtre "drawtext" de ffmpeg (texte entre guillemets simples).
+        const escaped = note.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
+        const vf = "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30"
+          + (note ? `,drawtext=fontfile=overlay_font.ttf:text='${escaped}':x=24:y=24:fontsize=28:fontcolor=black:box=1:boxcolor=white@0.6:boxborderw=8` : "");
+        await ffmpeg.exec(["-ss", String(c.item.start), "-i", videoMount.path, "-t", String(dur), "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", "-ar", "44100", "-ac", "2", outName]);
+        await unmountVideoForFfmpeg(ffmpeg, videoMount.dir);
+        concatLines.push(`file '${outName}'`);
+      }
+      setProgress("Assembling the full video…");
+      await ffmpeg.writeFile("full_concat.txt", concatLines.join("\n"));
+      try { await ffmpeg.deleteFile("full_output.mp4"); } catch (e) {}
+      await ffmpeg.exec(["-f", "concat", "-safe", "0", "-i", "full_concat.txt", "-c", "copy", "full_output.mp4"]);
+      const data = await ffmpeg.readFile("full_output.mp4");
+      const blob = new Blob([data.buffer], { type: "video/mp4" });
+      const url = URL.createObjectURL(blob);
+      resultUrlRef.current = url;
+      setResultUrl(url);
+      setProgress("");
+      for (let i = 0; i < displayedClips.length; i++) { try { await ffmpeg.deleteFile(`full_${i}.mp4`); } catch (e) {} }
+      try { await ffmpeg.deleteFile("full_concat.txt"); } catch (e) {}
+      try { await ffmpeg.deleteFile("full_output.mp4"); } catch (e) {}
+    } catch (err) {
+      setError(err.message || "Error while preparing the full video.");
+      setProgress("");
+    }
+    setBusy(false);
   }
 
   // Liste affichée : dans l'ordre mémorisé (clipOrder) quand il y en a — les clips pas encore
@@ -2106,7 +2168,8 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
             // Découpage mémorisé (bouton "Cut", voir plus haut) réappliqué automatiquement ici,
             // pour que le clip ressorte déjà raccourci à chaque réouverture sans action manuelle.
             const trim = (notesScope && clipTrims[clipKey]) || { start: 0, end: 0 };
-            const hasTrim = (parseFloat(trim.start) || 0) > 0 || (parseFloat(trim.end) || 0) > 0;
+            const basePrecise = notesScope && clipsPrecision === "precise";
+            const hasTrim = basePrecise || (parseFloat(trim.start) || 0) > 0 || (parseFloat(trim.end) || 0) > 0;
             const effStart = start + (parseFloat(trim.start) || 0);
             const effEnd = end - (parseFloat(trim.end) || 0);
             const dur = Math.max(0.1, effEnd - effStart);
@@ -2288,16 +2351,49 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
           </button>
         )}
 
+        {notesScope && cutMode === "clips" && (
+          <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
+            <label style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4, padding: 10, background: PANEL2, border: `1px solid ${clipsPrecision === "fast" ? AMBER : LINE}`, borderRadius: 8, cursor: busy ? "default" : "pointer" }}>
+              <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: PAPER, fontWeight: 600 }}>
+                <input type="radio" name="clipsPrecision" disabled={busy} checked={clipsPrecision === "fast"} onChange={() => setClipsPrecision("fast")} />
+                Fast
+              </span>
+              <span style={{ fontSize: 11, color: "#8B93A1", lineHeight: 1.4 }}>Quick, but each clip's start/end can be off by about a second.</span>
+            </label>
+            <label style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4, padding: 10, background: PANEL2, border: `1px solid ${clipsPrecision === "precise" ? AMBER : LINE}`, borderRadius: 8, cursor: busy ? "default" : "pointer" }}>
+              <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: PAPER, fontWeight: 600 }}>
+                <input type="radio" name="clipsPrecision" disabled={busy} checked={clipsPrecision === "precise"} onChange={() => setClipsPrecision("precise")} />
+                Precise
+              </span>
+              <span style={{ fontSize: 11, color: "#8B93A1", lineHeight: 1.4 }}>Exact start/end, slower to generate.</span>
+            </label>
+          </div>
+        )}
+
         {cutMode === "clips" ? (
           (busy || clipResults.length > 0) ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               <div style={{ fontSize: 11.5, color: "#5C6470", lineHeight: 1.5 }}>
                 Viewing mode only — each clip lives in your browser and is never uploaded or stored on the site. Use "Save" on a clip only if you want to keep a copy on your device.
               </div>
-              {notesScope && displayedClips.length > 1 && (
-                <button onClick={sortClipsAlpha} style={{ alignSelf: "flex-start", background: "none", border: `1px solid ${LINE}`, borderRadius: 8, color: "#8B93A1", cursor: "pointer", fontSize: 12, padding: "6px 12px", fontFamily: "inherit" }}>
-                  Sort by note (A–Z)
-                </button>
+              {notesScope && (
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+                  {displayedClips.length > 1 && (
+                    <button onClick={sortClipsAlpha} disabled={busy} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 8, color: "#8B93A1", cursor: busy ? "default" : "pointer", fontSize: 12, padding: "6px 12px", fontFamily: "inherit" }}>
+                      Sort by note (A–Z)
+                    </button>
+                  )}
+                  <button onClick={downloadFullVideo} disabled={busy} style={{ background: "none", border: `1px solid ${TEAL}`, borderRadius: 8, color: TEAL, cursor: busy ? "default" : "pointer", fontSize: 12, padding: "6px 12px", fontFamily: "inherit" }}>
+                    Download the full video (with notes)
+                  </button>
+                </div>
+              )}
+              {notesScope && resultUrl && (
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, padding: 12, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10 }}>
+                  <div style={{ fontSize: 12, color: "#8B93A1" }}>Full video — all clips above, in order, with their notes shown on screen.</div>
+                  <video controls autoPlay src={resultUrl} style={{ width: "100%", borderRadius: 8, background: "#000" }} />
+                  <a href={resultUrl} download={`${playName.replace(/\s+/g, "_")}_full.mp4`} style={{ ...btnPrimary, textAlign: "center", textDecoration: "none", display: "block", boxSizing: "border-box" }}>Save the full video to my device</a>
+                </div>
               )}
               {displayedClips.map((c, i) => (
                 <div key={c.key || i}
