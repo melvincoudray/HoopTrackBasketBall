@@ -1902,7 +1902,56 @@ function SecondaryTagPickerModal({ name, side, category, cats, onConfirm, onClos
 // Team et Scouting. Rien n'est envoyé nulle part, et tout disparaît au rechargement de la page.
 const CLIP_VIDEO_CACHE = new Map();
 
-function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, category, notesScope }) {
+// Demandé par l'utilisateur : en ouvrant les clips d'un Play précis (Team > Team Play ou
+// Scouting > Observation), voir tout de suite son contexte — ses 2 Playtypes, 2 PnR
+// Organisation et 2 défenses d'écran les plus fréquents, avec leur rentabilité (PPP), leur
+// % Open et leur % TOV — sans avoir à ressortir chercher ces chiffres ailleurs sur le site.
+// "sections" ne contient que les catégories qui ont au moins un item (topBucket) — une
+// catégorie absente du fichier (ex. pas de "PnR Organisation" codé) disparaît silencieusement
+// plutôt que d'afficher un bloc vide.
+function PlayContextPanel({ sections }) {
+  if (!sections || !sections.length) return null;
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: 14, marginBottom: 16, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10 }}>
+      <div style={{ fontSize: 11, textTransform: "uppercase", letterSpacing: "0.08em", color: "#8B93A1" }}>Play context — most common on this play</div>
+      {sections.map(s => (
+        <div key={s.key}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: PAPER, marginBottom: 6 }}>{s.title}</div>
+          <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+            {s.items.map((it, i) => (
+              <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12, padding: "4px 0" }}>
+                <div style={{ minWidth: 0, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: PAPER, fontWeight: 600 }}>{it.name}</div>
+                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <div style={{ width: 44 }}><Bar pct={it.freq} /></div>
+                  <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 11, color: "#8B93A1" }}>{it.freq.toFixed(0)}%</span>
+                </div>
+                <div style={{ flex: 1 }} />
+                <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 11.5, color: AMBER, fontWeight: 700 }} title="Points per possession">PPP {it.pppp !== null && it.pppp !== undefined ? it.pppp.toFixed(2) : "–"}</span>
+                <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 11.5, color: it.open !== null && it.open !== undefined ? TEAL : "#5C6470" }} title="% Open">Open {it.open !== null && it.open !== undefined ? it.open.toFixed(0) + "%" : "–"}</span>
+                <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 11.5, color: it.tov !== null && it.tov !== undefined && it.tov > 0 ? RED : "#5C6470" }} title="% Turnover">TOV {it.tov !== null && it.tov !== undefined ? it.tov.toFixed(0) + "%" : "–"}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, category, notesScope, playContextCats }) {
+  // Voir PlayContextPanel ci-dessus : calculé seulement quand l'appelant fournit playContextCats
+  // (uniquement les clics sur un Play, voir OffenseDefenseBreakdown) — jamais ailleurs (clips
+  // individuels d'un joueur, Screen Contest…), ces appels ne passant pas cette prop.
+  const playContext = useMemo(() => {
+    if (!playContextCats) return null;
+    const sections = [
+      { key: "playtypes", title: "Playtypes", items: topBucket(plays, PLAYTYPES_LIST(playContextCats), 2, false) },
+      { key: "pnr", title: "PnR Organisation", items: topBucket(plays, PNR_ORG_LIST(playContextCats), 2, false) },
+      { key: "screendef", title: "Screen defense", items: topBucket(plays, SCREEN_DEFENSE_LIST(playContextCats), 2, false) },
+    ].filter(s => s.items.length);
+    return sections.length ? sections : null;
+  }, [plays, playContextCats]);
+
   const keyOf = grouping?.keyOf || (p => p.matchId);
   const labelOf = grouping?.labelOf || (p => `${p.date} vs ${p.opponent}`);
   const sortKeyOf = grouping?.sortKeyOf || (p => p.date || "");
@@ -2286,6 +2335,8 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
           {totalClips} clip{totalClips !== 1 ? "s" : ""} found across {readyGroups.length} {pluralizeNoun(noun, readyGroups.length).toLowerCase()} ({scopeNote})
           Insert the videos you have — you don't need all of them: only the ones you add are cut. Videos you add are remembered until you close or reload the site, so you won't have to add them again. Nothing is uploaded, everything is cut directly in your browser, purely for viewing.
         </p>
+
+        <PlayContextPanel sections={playContext} />
 
         <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
           <label style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4, padding: 10, background: PANEL2, border: `1px solid ${cutMode === "precise" ? AMBER : LINE}`, borderRadius: 8, cursor: busy ? "default" : "pointer" }}>
@@ -4876,6 +4927,21 @@ function SCREEN_DEFENSE_LIST(cats) { return categoryTags("Screen defense", cats)
 // Spacing joué au moment d'un écran (nombre de joueurs "in front"/en retrait) — catégorie
 // distincte de la couverture défensive elle-même.
 function SPACING_LIST(cats) { return categoryTags("Spacing", cats); }
+// "PnR Organisation" n'est PAS une catégorie intégrée (voir DEFAULT_TAG_CATEGORIES) : c'est une
+// catégorie personnalisée que le coach crée lui-même dans Settings pour ranger les valeurs du
+// groupe SportsCode "PnR Ogranisation"/"PnR Organisation" (les deux orthographes existent selon
+// le fichier .SCTimeline — voir SC_WHOLE_POSSESSION_GROUPS). On la retrouve donc par un nom de
+// catégorie tolérant (accents/espaces/casse/faute d'orthographe ignorés) plutôt qu'un nom figé,
+// pour ne rien casser si le coach l'a appelée différemment — ou pas encore créée (liste vide
+// dans ce cas, le panneau de contexte "Play context" l'omet alors silencieusement).
+function PNR_ORG_LIST(cats) {
+  const all = cats || currentTagCategories();
+  const key = Object.keys(all).find(name => {
+    const n = normTag(name);
+    return n.includes("pnr") && (n.includes("organisation") || n.includes("ogranisation") || n.includes("organization"));
+  });
+  return key ? all[key] : [];
+}
 
 // Couleur fixe par type de couverture d'écran, demandée par l'utilisateur pour repérer le type
 // d'un coup d'œil dans l'onglet Scouting Report Stats (site ET export PDF). BUG RÉEL CORRIGÉ
@@ -5869,6 +5935,14 @@ function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true
     const metricColor = isOff ? AMBER : TEAL;
     const sideKey = isOff ? "off" : "def";
     const clip = isOff ? clipOff : clipDef;
+    // Demandé par l'utilisateur : en cliquant sur un Play précis (ex. "Horns"), la fenêtre de
+    // clips doit en plus montrer le contexte de ce Play — ses Playtypes/PnR Organisation/
+    // défenses d'écran les plus fréquents, avec leur rentabilité — jamais sur les autres cartes
+    // (Playtypes, Screen defense…), où ce contexte n'aurait pas de sens (on serait déjà filtré
+    // sur un seul Playtype/une seule couverture). playCtx marque donc UNIQUEMENT les clics
+    // venant de la carte "plays" ci-dessous ; clipModal transporte ce marqueur jusqu'à
+    // ClipExportModal, qui calcule ce contexte seulement quand il est présent.
+    const clipPlay = enableClipExport ? (name) => setClipModal({ name, side: sideKey, playCtx: true }) : undefined;
     const onItemClick = enableClipExport ? (name, within) => setClipModal({ name, side: sideKey, within }) : undefined;
     const onPpppClick = isOff ? ppppClickOff : ppppClickDef;
     const onOpenClick = isOff ? openClickOff : openClickDef;
@@ -5877,7 +5951,7 @@ function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true
     const next = () => CHART_COLORS[i++ % CHART_COLORS.length];
     const cards = [];
     if (isOff) {
-      cards.push({ key: "plays", accent: next(), donutTitle: "Plays (game entries)", donutData: offPlaysDonut.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), metricTitle: "Efficiency by play", items: offPlaysList, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
+      cards.push({ key: "plays", accent: next(), donutTitle: "Plays (game entries)", donutData: offPlaysDonut.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), metricTitle: "Efficiency by play", items: offPlaysList, metricColor, onItemClick: clipPlay, onPpppClick, onOpenClick, onTovClick });
       cards.push({ key: "shooting", accent: next(), donutTitle: "Shooting Selection", donutData: offShooting, donutNote: "Open/Contested tags not present yet.", metricTitle: "Efficiency by playtype", items: offPlaytypesList, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       cards.push({ key: "screendef", accent: next(), donutTitle: "Screen defense faced (opponent coverage)", donutData: offScreenDef.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No screen coverage tag detected.", metricTitle: "Efficiency by coverage faced", items: offScreenDef, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       cards.push({ key: "spacing", accent: next(), donutTitle: "Spacing played on screens", donutData: offSpacing.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No spacing tag detected.", metricTitle: "Efficiency by spacing", items: offSpacing, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
@@ -5898,7 +5972,7 @@ function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true
       });
     } else {
       cards.push({ key: "shooting", accent: next(), donutTitle: "Shooting Selection (defense)", donutData: defShooting, donutNote: "Open/Contested tags not present yet.", metricTitle: "Playtypes defended — efficiency", items: defPlaytypesList, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
-      cards.push({ key: "mistakes", accent: next(), donutTitle: "Defensive mistakes", donutData: defMistakes, donutNote: "No defensive mistake tag detected.", metricTitle: "Plays defended — efficiency", items: defPlaysList, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
+      cards.push({ key: "mistakes", accent: next(), donutTitle: "Defensive mistakes", donutData: defMistakes, donutNote: "No defensive mistake tag detected.", metricTitle: "Plays defended — efficiency", items: defPlaysList, metricColor, onItemClick: clipPlay, onPpppClick, onOpenClick, onTovClick });
       cards.push({ key: "screendef", accent: next(), donutTitle: "Screen defense played", donutData: defScreenDef.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No screen coverage tag detected.", metricTitle: "Efficiency by coverage used", items: defScreenDef, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       cards.push({ key: "spacing", accent: next(), donutTitle: "Spacing faced on screens", donutData: defSpacing.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No spacing tag detected.", metricTitle: "Efficiency by spacing faced", items: defSpacing, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       cards.push({ key: "shottime", accent: next(), donutTitle: "Shot time", donutData: defShotTime.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No shot clock value detected.", metricTitle: "Efficiency by shot time", items: defShotTime, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
@@ -5996,6 +6070,7 @@ function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true
           onClose={() => setClipModal(null)}
           grouping={clipGrouping}
           category={clipModal.side === "off" ? "offense" : "defense"}
+          playContextCats={clipModal.playCtx ? cats : undefined}
         />
       )}
     </>
@@ -8977,6 +9052,10 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   async function saveNextGame(name) {
     setNextGame(name);
     await storeSet("next_game_team", name);
+    // Choix fait à la main par le coach : on le marque comme tel pour que l'auto-détection
+    // ci-dessous sache qu'elle ne doit PAS le remplacer tant que cet adversaire reste à venir
+    // (voir le vrai bug corrigé plus bas, qui explique pourquoi ce marqueur est nécessaire).
+    await storeSet("next_game_source", "manual");
   }
 
   // Détection automatique du prochain match — demandé par l'utilisateur : utilise le calendrier
@@ -9008,6 +9087,7 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   async function saveNextGame2(name) {
     setNextGame2(name);
     await storeSet("next_game_2_team", name);
+    await storeSet("next_game_2_source", "manual");
   }
   useEffect(() => {
     if (!isCoach || !roster.length) return;
@@ -9020,27 +9100,36 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
         if (!alive || !res.ok) return;
         const games = data.games || [];
         setUpcomingGames(games);
-        // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "Next Game" ne se mettait JAMAIS à jour
-        // tout seul, toujours à régler à la main) : comparer à "next_game_auto_opponent" bloquait
-        // l'auto-détection pour toujours dès que le champ contenait autre chose que la toute
-        // dernière valeur auto-écrite — en particulier la 1ère fois, puisqu'un adversaire déjà
-        // réglé à la main (avant même l'existence de l'auto-détection) ne correspondait à aucun
-        // "autoOpp" encore jamais écrit. On considère maintenant que la valeur stockée n'a plus
-        // besoin d'être respectée dès qu'elle ne correspond plus à AUCUN match réellement à venir
-        // (match déjà joué depuis, ou adversaire retiré du calendrier) — un choix manuel parmi les
-        // matchs à venir reste, lui, toujours respecté tant que ce match n'est pas encore passé.
+        // BUG RÉEL CORRIGÉ (signalé par l'utilisateur le 09/11/2026 : "Le 1er Next Game n'est pas
+        // automatisé avec le site de la ffbb") : cette équipe joue chaque adversaire deux fois
+        // (aller/retour), donc un adversaire reste dans "upcomingOpponents" même une fois le 1er
+        // des deux matchs joué (il reste le match retour, plus tard dans la saison). L'ancienne
+        // vérification ("l'adversaire stocké est-il encore présent QUELQUE PART dans les matchs à
+        // venir ?") restait donc vraie indéfiniment dès le 1er auto-réglage, et le "Next Game"
+        // auto ne bougeait plus jamais tout seul — alors qu'il fallait comparer à l'adversaire du
+        // tout PROCHAIN match (games[0]), pas juste vérifier sa présence dans la liste. On
+        // distingue maintenant une valeur auto-détectée (toujours resynchronisée sur le vrai
+        // prochain match) d'un choix fait à la main par le coach via le menu (marqué
+        // "next_game_source"="manual" dans saveNextGame/saveNextGame2 ci-dessus), qui lui reste
+        // respecté tant que cet adversaire n'a pas encore joué son dernier match à venir.
         const upcomingOpponents = games.map(g => g.opponent);
         if (games.length) {
           const current = (await storeGet("next_game_team")) || "";
-          if (!current || !upcomingOpponents.includes(current)) {
+          const source = (await storeGet("next_game_source")) || "auto";
+          const stale = !current || (source === "manual" ? !upcomingOpponents.includes(current) : current !== games[0].opponent);
+          if (stale) {
             await storeSet("next_game_team", games[0].opponent);
+            await storeSet("next_game_source", "auto");
             if (alive) setNextGame(games[0].opponent);
           }
         }
         if (games.length > 1) {
           const current2 = (await storeGet("next_game_2_team")) || "";
-          if (!current2 || !upcomingOpponents.includes(current2)) {
+          const source2 = (await storeGet("next_game_2_source")) || "auto";
+          const stale2 = !current2 || (source2 === "manual" ? !upcomingOpponents.includes(current2) : current2 !== games[1].opponent);
+          if (stale2) {
             await storeSet("next_game_2_team", games[1].opponent);
+            await storeSet("next_game_2_source", "auto");
             if (alive) setNextGame2(games[1].opponent);
           }
         }
