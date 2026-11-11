@@ -9039,12 +9039,20 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
     if (!isCoach) return;
     let alive = true;
     (async () => {
-      const seen = new Set();
+      const seen = new Map(); // signature -> { date, thematique } d'une séance distincte
       for (const p of roster) {
         const entries = (await storeGet("training:" + p.name)) || [];
-        entries.forEach(e => seen.add([e.date, e.thematique, e.theme, e.duree].join("|")));
+        entries.forEach(e => {
+          const sig = [e.date, e.thematique, e.theme, e.duree].join("|");
+          if (!seen.has(sig)) seen.set(sig, { date: e.date, thematique: e.thematique });
+        });
       }
-      if (alive) setTrainingsTotal(seen.size);
+      // Demandé par l'utilisateur (11/11) : "le nombre de séances", donc Coll Off + Coll Def le
+      // même jour doivent être rassemblés en 1 seule séance — on réutilise ici EXACTEMENT la même
+      // règle que badgeSessionCount (déjà établie pour "Sessions completed" et les badges), au
+      // lieu de simplement compter les signatures distinctes ci-dessus (qui ne faisait que
+      // dédupliquer entre joueurs, sans fusionner Coll Off/Coll Def du même jour).
+      if (alive) setTrainingsTotal(badgeSessionCount(Array.from(seen.values())));
     })();
     return () => { alive = false; };
   }, [isCoach, roster]);
