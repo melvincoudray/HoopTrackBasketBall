@@ -2011,26 +2011,20 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
   // sur le match + le timing du tag) reste stable, donc notes et ordre survivent à la régénération.
   const [clipOrder, setClipOrder] = useState([]); // [clipKey, ...] ordre voulu
   const [clipNotes, setClipNotes] = useState({}); // clipKey -> texte
-  // Demandé par l'utilisateur : pouvoir aussi découper chaque clip (raccourcir son début et/ou
-  // sa fin), et que ce découpage soit mémorisé — réappliqué automatiquement à chaque réouverture
-  // (ré-exporté depuis la vidéo source avec les nouvelles bornes), sans avoir à recliquer "Cut".
-  const [clipTrims, setClipTrims] = useState({}); // clipKey -> { start, end } (secondes coupées à chaque bord, par rapport au tag d'origine)
-  const [trimDraft, setTrimDraft] = useState({}); // clipKey -> { start, end } valeurs en cours d'édition, avant clic sur "Cut"
-  const [cuttingKey, setCuttingKey] = useState(null);
-  // Demandé par l'utilisateur : la génération de base des clips individuels (sans découpage
-  // manuel) est rapide ("-c copy") mais grossière — elle cale le début/la fin sur l'image-clé la
-  // plus proche, donc les bornes réelles peuvent déjà être décalées d'environ 1s avant même tout
-  // découpage manuel. Pour les clips individuels uniquement (notesScope), on laisse le choix
-  // entre cette génération rapide (approximative) et une génération précise (ré-encodée, plus
-  // lente mais avec les vraies bornes du tag) — "fast" reste le réglage par défaut pour ne rien
-  // changer au comportement existant ailleurs dans l'app.
-  const [clipsPrecision, setClipsPrecision] = useState("fast"); // "fast" | "precise"
+  // Demandé par l'utilisateur (11/11) : retour en arrière sur le découpage manuel (Trim
+  // start/end + bouton "Cut") — l'utilisateur préfère récupérer directement le clip entier plutôt
+  // que de devoir le raccourcir à la main. Notes, ordre et tri alphabétique par note restent,
+  // c'est uniquement le découpage qui disparaît (plus de clipTrims/trimDraft/cuttingKey/cutClip,
+  // ni de lecture de "clip_trim::" ci-dessous).
+  // Le choix Fast/Precise pour les clips individuels (retiré le 11/11 : les vidéos mettaient trop
+  // de temps à se charger en mode "Precise", qui ré-encode) a été enlevé — les clips individuels
+  // utilisent maintenant toujours la découpe rapide "-c copy", exactement comme pour tous les
+  // autres types de clips sur le site (plays, playtypes, etc.).
   useEffect(() => {
     if (!notesScope) return;
     (async () => {
       setClipOrder((await storeGet(`clip_order::${notesScope}`)) || []);
       setClipNotes((await storeGet(`clip_notes::${notesScope}`)) || {});
-      setClipTrims((await storeGet(`clip_trim::${notesScope}`)) || {});
     })();
   }, [notesScope]);
 
@@ -2044,47 +2038,6 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
       if (notesScope) storeSet(`clip_notes::${notesScope}`, next);
       return next;
     });
-  }
-  function saveClipTrim(key, trim) {
-    setClipTrims(prev => {
-      const next = { ...prev, [key]: trim };
-      if (notesScope) storeSet(`clip_trim::${notesScope}`, next);
-      return next;
-    });
-  }
-
-  async function cutClip(c) {
-    const draft = trimDraft[c.key] || clipTrims[c.key] || { start: 0, end: 0 };
-    const trimStart = Math.max(0, parseFloat(draft.start) || 0);
-    const trimEnd = Math.max(0, parseFloat(draft.end) || 0);
-    const newStart = c.origStart + trimStart;
-    const newEnd = c.origEnd - trimEnd;
-    const newDur = newEnd - newStart;
-    if (newDur <= 0.1) { setError("Trim too large — nothing would remain of this clip."); return; }
-    const file = fileOf(c.groupKey);
-    if (!file) { setError("Re-add this match's video above before cutting this clip."); return; }
-    setCuttingKey(c.key); setError("");
-    try {
-      const ffmpeg = await getFfmpeg();
-      const videoMount = await mountVideoForFfmpeg(ffmpeg, file, "cut");
-      const outName = "cut_tmp.mp4";
-      // Même correctif que ci-dessus : ré-encoder pour couper exactement au bon endroit, "-c copy"
-      // ne pouvant se caler que sur les images-clés (durée imprévisible sinon).
-      await ffmpeg.exec(["-ss", String(newStart), "-i", videoMount.path, "-t", String(newDur), "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", "-avoid_negative_ts", "make_zero", outName]);
-      const data = await ffmpeg.readFile(outName);
-      const blob = new Blob([data.buffer], { type: "video/mp4" });
-      const newUrl = URL.createObjectURL(blob);
-      try { await ffmpeg.deleteFile(outName); } catch (e) {}
-      await unmountVideoForFfmpeg(ffmpeg, videoMount.dir);
-      URL.revokeObjectURL(c.url);
-      clipUrlsRef.current = clipUrlsRef.current.map(u => (u === c.url ? newUrl : u));
-      setClipResults(prev => prev.map(x => (x.key === c.key ? { ...x, url: newUrl, item: { ...x.item, start: newStart, end: newEnd } } : x)));
-      saveClipTrim(c.key, { start: trimStart, end: trimEnd });
-    } catch (e) {
-      setError("Could not cut this clip: " + (e?.message || e));
-    } finally {
-      setCuttingKey(null);
-    }
   }
 
   // Demandé par l'utilisateur : pouvoir télécharger en un seul fichier TOUS les clips individuels
@@ -2221,32 +2174,19 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
           for (let ci = 0; ci < g.clips.length; ci++) {
             const { start, end } = g.clips[ci];
             const clipKey = `${g.key}::${start}::${end}`;
-            // Découpage mémorisé (bouton "Cut", voir plus haut) réappliqué automatiquement ici,
-            // pour que le clip ressorte déjà raccourci à chaque réouverture sans action manuelle.
-            const trim = (notesScope && clipTrims[clipKey]) || { start: 0, end: 0 };
-            const basePrecise = notesScope && clipsPrecision === "precise";
-            const hasTrim = basePrecise || (parseFloat(trim.start) || 0) > 0 || (parseFloat(trim.end) || 0) > 0;
-            const effStart = start + (parseFloat(trim.start) || 0);
-            const effEnd = end - (parseFloat(trim.end) || 0);
-            const dur = Math.max(0.1, effEnd - effStart);
+            // Plus de choix Fast/Precise ici (retiré le 11/11, voir plus haut) : toujours
+            // "-c copy" (rapide), comme partout ailleurs dans l'app.
+            const dur = Math.max(0.1, end - start);
             const outName = `clip_${clipIdx}.mp4`;
             setProgress(`Cutting clip ${clipIdx + 1}/${selectedClips} (${noun} ${n})…`);
-            // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : un découpage à 6s ne changeait rien,
-            // à 7s donnait un clip de 2s au lieu de 5s) : "-c copy" ne peut couper qu'aux images-
-            // clés — avec "-ss" avant "-i", le point de départ réel saute à l'image-clé la plus
-            // proche, pas celle demandée, d'où des durées imprévisibles. Dès qu'un découpage est
-            // mémorisé pour ce clip, on ré-encode (comme pour "Precise cut" ailleurs) pour couper
-            // exactement au bon endroit ; sans découpage, on garde "-c copy" (rapide).
-            const cutArgs = hasTrim
-              ? ["-ss", String(effStart), "-i", videoMount.path, "-t", String(dur), "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", "-avoid_negative_ts", "make_zero", outName]
-              : ["-ss", String(effStart), "-i", videoMount.path, "-t", String(dur), "-c", "copy", "-avoid_negative_ts", "make_zero", outName];
+            const cutArgs = ["-ss", String(start), "-i", videoMount.path, "-t", String(dur), "-c", "copy", "-avoid_negative_ts", "make_zero", outName];
             await ffmpeg.exec(cutArgs);
             const data = await ffmpeg.readFile(outName);
             const blob = new Blob([data.buffer], { type: "video/mp4" });
             const url = URL.createObjectURL(blob);
             clipUrlsRef.current.push(url);
             const label = `${noun} ${n} — ${g.label} · clip ${ci + 1}/${g.clips.length}`;
-            setClipResults(prev => [...prev, { key: clipKey, url, label, groupKey: g.key, origStart: start, origEnd: end, item: { label: `${playName} — ${sideLabel} · ${g.label}`, sourceKey: cacheKeyOf(g.key), sourceName: file.name, sourceLabel: `${noun} ${g.label}`, start: effStart, end: effEnd, category } }]);
+            setClipResults(prev => [...prev, { key: clipKey, url, label, groupKey: g.key, origStart: start, origEnd: end, item: { label: `${playName} — ${sideLabel} · ${g.label}`, sourceKey: cacheKeyOf(g.key), sourceName: file.name, sourceLabel: `${noun} ${g.label}`, start, end, category } }]);
             try { await ffmpeg.deleteFile(outName); } catch (e) {}
             clipIdx++;
           }
@@ -2409,25 +2349,6 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
           </button>
         )}
 
-        {notesScope && cutMode === "clips" && (
-          <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
-            <label style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4, padding: 10, background: PANEL2, border: `1px solid ${clipsPrecision === "fast" ? AMBER : LINE}`, borderRadius: 8, cursor: busy ? "default" : "pointer" }}>
-              <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: PAPER, fontWeight: 600 }}>
-                <input type="radio" name="clipsPrecision" disabled={busy} checked={clipsPrecision === "fast"} onChange={() => setClipsPrecision("fast")} />
-                Fast
-              </span>
-              <span style={{ fontSize: 11, color: "#8B93A1", lineHeight: 1.4 }}>Quick, but each clip's start/end can be off by about a second.</span>
-            </label>
-            <label style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4, padding: 10, background: PANEL2, border: `1px solid ${clipsPrecision === "precise" ? AMBER : LINE}`, borderRadius: 8, cursor: busy ? "default" : "pointer" }}>
-              <span style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: PAPER, fontWeight: 600 }}>
-                <input type="radio" name="clipsPrecision" disabled={busy} checked={clipsPrecision === "precise"} onChange={() => setClipsPrecision("precise")} />
-                Precise
-              </span>
-              <span style={{ fontSize: 11, color: "#8B93A1", lineHeight: 1.4 }}>Exact start/end, slower to generate.</span>
-            </label>
-          </div>
-        )}
-
         {cutMode === "clips" ? (
           (busy || clipResults.length > 0) ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
@@ -2466,25 +2387,6 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
                     )}
                   </div>
                   <video controls autoPlay={i === displayedClips.length - 1 && !busy} src={c.url} style={{ width: "100%", borderRadius: 8, background: "#000" }} />
-                  {notesScope && (
-                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                      <label style={{ fontSize: 11, color: "#5C6470", display: "flex", alignItems: "center", gap: 4 }}>
-                        Trim start (s)
-                        <input type="number" min="0" step="0.1" value={trimDraft[c.key]?.start ?? clipTrims[c.key]?.start ?? 0}
-                          onChange={e => setTrimDraft(prev => ({ ...prev, [c.key]: { start: e.target.value, end: prev[c.key]?.end ?? clipTrims[c.key]?.end ?? 0 } }))}
-                          style={{ ...inputStyle, letterSpacing: "normal", width: 56, padding: "4px 6px", fontSize: 12 }} />
-                      </label>
-                      <label style={{ fontSize: 11, color: "#5C6470", display: "flex", alignItems: "center", gap: 4 }}>
-                        Trim end (s)
-                        <input type="number" min="0" step="0.1" value={trimDraft[c.key]?.end ?? clipTrims[c.key]?.end ?? 0}
-                          onChange={e => setTrimDraft(prev => ({ ...prev, [c.key]: { start: prev[c.key]?.start ?? clipTrims[c.key]?.start ?? 0, end: e.target.value } }))}
-                          style={{ ...inputStyle, letterSpacing: "normal", width: 56, padding: "4px 6px", fontSize: 12 }} />
-                      </label>
-                      <button onClick={() => cutClip(c)} disabled={cuttingKey === c.key} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 6, color: TEAL, cursor: cuttingKey === c.key ? "default" : "pointer", fontSize: 12, padding: "4px 10px", fontFamily: "inherit" }}>
-                        {cuttingKey === c.key ? "Cutting…" : "Cut"}
-                      </button>
-                    </div>
-                  )}
                   {notesScope && (
                     <textarea
                       value={clipNotes[c.key] || ""}
@@ -8970,6 +8872,18 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
   const [wStatus, setWStatus] = useState("");
   const scouting = useScoutingTeams();
   const [nextGame, setNextGame] = useState("");
+  // Logo du "Next Game" quand l'adversaire auto-détecté n'a pas encore de fiche Scouting Report
+  // (cas très courant juste après que l'auto-détection FFBB l'ait réglé) — même mécanisme que
+  // "2nd Next Game" (nextGame2Logo) : on va chercher le logo directement sur la FFBB.
+  const [nextGameLogo, setNextGameLogo] = useState(null);
+  useEffect(() => {
+    let alive = true;
+    if (!nextGame) { setNextGameLogo(null); return; }
+    const key = matchScoutingTeamKey(scouting.teams, nextGame);
+    if (key && scouting.teams[key]?.logo) { setNextGameLogo(null); return; }
+    ffbbLogoFor(nextGame).then(png => { if (alive) setNextGameLogo(png); });
+    return () => { alive = false; };
+  }, [nextGame, scouting.teams]);
   const [role, setRole] = useState(null);
   const [resources, setResources] = useState([]);
   const [todayEvents, setTodayEvents] = useState([]);
@@ -9298,23 +9212,37 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
         <div style={{ marginBottom: 26 }}>
           <div style={{ fontSize: 12.5, fontWeight: 700, color: "#8B93A1", textTransform: "uppercase", marginBottom: 8 }}>Next game</div>
           {isCoach && (
+            // BUG RÉEL CORRIGÉ (signalé 4 fois par l'utilisateur : "Next Game" reste vide, seul
+            // "2nd Next Game" se remplit) : l'auto-détection FFBB (voir plus bas) réglait bien
+            // "nextGame" sur le vrai prochain adversaire, mais ce menu ne listait QUE les équipes
+            // déjà scoutées (Object.keys(scouting.teams)) — si cet adversaire n'avait pas encore
+            // de fiche Scouting Report (cas très courant juste après la détection), aucune
+            // <option> ne correspondait à la valeur, et le navigateur affichait le menu comme
+            // vide. On ajoute donc la même option de secours que "2nd Next Game" ci-dessous.
             <select value={nextGame} onChange={e => saveNextGame(e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", maxWidth: 320, marginBottom: nextGame ? 10 : 0 }}>
               <option value="">— Select the scouted opponent —</option>
+              {upcomingGames[0] && !matchScoutingTeamKey(scouting.teams, upcomingGames[0].opponent) && (
+                <option value={upcomingGames[0].opponent}>{upcomingGames[0].opponent} (FFBB — not yet scouted)</option>
+              )}
               {Object.keys(scouting.teams).map(n => <option key={n} value={n}>{n}</option>)}
             </select>
           )}
-          {nextGame && scouting.teams[nextGame] && (
-            <button onClick={() => goToScouting("rapport", nextGame)} style={{ display: "flex", alignItems: "center", gap: 14, width: "100%", maxWidth: 320, padding: "14px 16px", background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 10, color: PAPER, cursor: "pointer", textAlign: "left", fontFamily: "inherit" }}>
-              <div style={{ width: 44, height: 44, borderRadius: 8, background: PANEL2, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
-                {scouting.teams[nextGame].logo ? <img src={scouting.teams[nextGame].logo} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }} /> : <span style={{ fontSize: 18, fontWeight: 800, color: AMBER }}>{nextGame[0]}</span>}
-              </div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 10.5, color: AMBER, fontWeight: 700, letterSpacing: "0.08em" }}>NEXT GAME</div>
-                <div style={{ fontWeight: 700, fontSize: 15 }}>{nextGame}</div>
-              </div>
-              <ChevronRight size={16} color="#5C6470" />
-            </button>
-          )}
+          {nextGame && (() => {
+            const key = matchScoutingTeamKey(scouting.teams, nextGame) || nextGame;
+            const logo = scouting.teams[key]?.logo || nextGameLogo;
+            return (
+              <button onClick={() => goToScouting("rapport", key)} style={{ display: "flex", alignItems: "center", gap: 14, width: "100%", maxWidth: 320, padding: "14px 16px", background: PANEL, border: `1px solid ${AMBER}`, borderRadius: 10, color: PAPER, cursor: "pointer", textAlign: "left", fontFamily: "inherit" }}>
+                <div style={{ width: 44, height: 44, borderRadius: 8, background: PANEL2, display: "flex", alignItems: "center", justifyContent: "center", overflow: "hidden", flexShrink: 0 }}>
+                  {logo ? <img src={logo} alt="" style={{ width: "100%", height: "100%", objectFit: "contain" }} /> : <span style={{ fontSize: 18, fontWeight: 800, color: AMBER }}>{nextGame[0]}</span>}
+                </div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontSize: 10.5, color: AMBER, fontWeight: 700, letterSpacing: "0.08em" }}>NEXT GAME</div>
+                  <div style={{ fontWeight: 700, fontSize: 15 }}>{nextGame}</div>
+                </div>
+                <ChevronRight size={16} color="#5C6470" />
+              </button>
+            );
+          })()}
           {/* "2nd Next Game" — demandé par l'utilisateur : raccourci coach uniquement vers
               l'adversaire suivant. Auto-détecté comme "Next game" ci-dessus (même logique, sans
               écraser un choix fait à la main), MAIS aussi réglable manuellement via ce menu —
