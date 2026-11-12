@@ -1948,6 +1948,9 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
       { key: "playtypes", title: "Playtypes", items: topBucket(plays, PLAYTYPES_LIST(playContextCats), 2, false) },
       { key: "pnr", title: "PnR Organisation", items: topBucket(plays, PNR_ORG_LIST(playContextCats), 2, false) },
       { key: "screendef", title: "Screen defense", items: topBucket(plays, SCREEN_DEFENSE_LIST(playContextCats), 2, false) },
+      // Demandé par l'utilisateur : la Spacing (quel type d'écran ils jouent le plus) manquait à
+      // ce contexte, alors que les 3 autres catégories y sont déjà — même logique, top 2.
+      { key: "spacing", title: "Spacing", items: topBucket(plays, SPACING_LIST(playContextCats), 2, false) },
     ].filter(s => s.items.length);
     return sections.length ? sections : null;
   }, [plays, playContextCats]);
@@ -17156,9 +17159,15 @@ function ScoutingStaffPanel({ teamName, isCoach }) {
 
 // Onglet "Stats" du Scouting Report : forces (rang 1 à 5 de la ligue) et faiblesses (rang 20 à 26) statistiques d'une équipe.
 // Rang calculé parmi toutes les équipes de Scouting ; une stat "moins = mieux" (balles perdues, points encaissés…) est classée à l'envers.
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "% Assists" clairement top/bottom 5 sur "General
+// stats", mais absent de "Strengths and weaknesses") : cette liste ne reprenait qu'une partie des
+// stats affichées avec un badge de rang sur "General stats" (REP_GROUPS) — toute stat manquante
+// ici ne pouvait donc JAMAIS apparaître en force/faiblesse, même avec un rang 1 ou dernier.
+// Complétée avec toutes les stats de REP_GROUPS qui manquaient encore.
 const SCOUT_SW_KEYS = ["pts", "ptse", "pctv", "pct2", "pct3", "pctlf", "efg", "ts", "ftafga", "ro", "rd", "rt", "pctro", "pctrd", "pd", "bp", "pctbp", "padbp", "ct", "int", "fte",
   "ortg", "drtg", "nrtg", "dPct2", "dPct3", "dEfg", "dPctbp", "dFtafga", "oPctro", "oRo", "oRt", "oBp", "poss",
-  "t2", "t3", "pct3poss", "fbPts", "fbPtsPct", "scPts", "scPtsPct", "toPts", "toPtsPct", "benchPts", "benchPtsPct", "paintPts", "paintPtsPct"];
+  "t2", "t3", "pct3poss", "fbPts", "fbPtsPct", "scPts", "scPtsPct", "toPts", "toPtsPct", "benchPts", "benchPtsPct", "paintPts", "paintPtsPct",
+  "pctpad", "pct3tst", "blk100", "stl100", "oLft", "oR2", "oT2", "oR3", "oT3", "oPd", "oIn", "oCt", "oFte", "fo"];
 function ScoutingStatsPanel({ teamName, teams }) {
   const t = teams[teamName];
   // Rang de poule (en plus du rang "parmi les équipes chargées dans Scouting" déjà calculé) :
@@ -17917,6 +17926,27 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
   };
   const fmtDate = new Date().toLocaleDateString("en-GB", { day: "2-digit", month: "short", year: "numeric" });
 
+  // Enchaînement des sections (demandé par l'utilisateur : "plein d'espace à aller chercher",
+  // "moins de 20 pages") : chaque section démarrait TOUJOURS une page neuve, même quand la
+  // précédente ne remplissait la page qu'à moitié. sectionStart() reprend maintenant à la SUITE de
+  // la section précédente sur la même page s'il reste assez de place pour un titre + quelques
+  // lignes (minRoom), et ne démarre une page neuve que sinon — même logique déjà appliquée à
+  // "Screen coverage match-up". currentY retient où s'arrête la dernière section dessinée.
+  let currentY = H;
+  const sectionStart = (title, sub, minRoom = 170) => {
+    if (currentY > H - minRoom) {
+      newPage(title, sub);
+      currentY = 92;
+    } else {
+      currentY += 22;
+      rect(M, currentY - 10, W - 2 * M, 0.75, REP.BG);
+      text(title.toUpperCase(), M, currentY + 6, { size: 11, bold: true });
+      if (sub) text(sub, M, currentY + 17, { size: 7, color: REP.MUTE, maxW: W - 2 * M });
+      currentY += 28;
+    }
+    return currentY;
+  };
+
   // 1 — couverture — demandé : SEULEMENT le logo de l'adversaire en grand (pas le nôtre sur
   // cette page), avec "Pre-game report" et la date en bas. Les formes décoratives et le bandeau
   // poule sont gardés (c'est ce qui rend la page "plus jolie"), seul le duo de logos "VS" est retiré.
@@ -17940,26 +17970,28 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
   pageNo = 1;
 
   // 2 — contexte du match
-  newPage("Match context", "Standing and form computed from the FFBB box scores synchronised in HoopTrack");
+  let y2 = sectionStart("Match context", "Standing and form computed from the FFBB box scores synchronised in HoopTrack");
   const st = D.st, recentGames = D.recentGames;
   if (!st.length) {
-    text("No league games synchronised yet — use Manage teams › Sync FFBB to load them.", M, 100, { size: 10, color: REP.MUTE });
+    text("No league games synchronised yet — use Manage teams › Sync FFBB to load them.", M, y2 + 8, { size: 10, color: REP.MUTE });
+    y2 += 24;
   } else {
-    text(D.pouleName ? `${D.pouleName.toUpperCase()} STANDINGS` : "NM1 STANDINGS", M, 92, { size: 8, bold: true, color: REP.OR });
+    text(D.pouleName ? `${D.pouleName.toUpperCase()} STANDINGS` : "NM1 STANDINGS", M, y2, { size: 8, bold: true, color: REP.OR });
     const rh = Math.min(17, 330 / st.length);
     st.forEach((r, i) => {
-      const y = 100 + i * rh, isOpp = normTag(r.name) === normTag(teamName), isUs = normTag(r.name) === normTag(ourName);
+      const y = y2 + 8 + i * rh, isOpp = normTag(r.name) === normTag(teamName), isUs = normTag(r.name) === normTag(ourName);
       if (isOpp || isUs) rect(M, y, W - 2 * M, rh - 1, isUs ? REP.LGRN : REP.LOR, 3);
       text(r.pos ?? (i + 1), M + 8, y + rh * 0.68, { size: 8, color: REP.MUTE });
       text(r.name, M + 40, y + rh * 0.68, { size: 8.5, bold: isOpp || isUs, maxW: 300 });
       text(`${r.w} - ${r.l}`, W - M - 90, y + rh * 0.68, { size: 8.5, align: "right" });
       text(r.w * 2 + r.l, W - M - 10, y + rh * 0.68, { size: 8.5, bold: true, align: "right" });
     });
-    text("W - L", W - M - 90, 92, { size: 7.5, color: REP.MUTE, align: "right" }); text("Pts", W - M - 10, 92, { size: 7.5, color: REP.MUTE, align: "right" });
-    const y0 = 100 + st.length * rh + 28;
+    text("W - L", W - M - 90, y2, { size: 7.5, color: REP.MUTE, align: "right" }); text("Pts", W - M - 10, y2, { size: 7.5, color: REP.MUTE, align: "right" });
+    const y0 = y2 + 8 + st.length * rh + 28;
     text("LAST 5 GAMES", M, y0, { size: 8, bold: true, color: REP.OR });
     if (!recentGames || !recentGames.length) text("No recent games synchronised for this team.", M, y0 + 16, { size: 9, color: REP.MUTE });
-    (recentGames || []).slice(-5).reverse().forEach((g, i) => {
+    const last5 = (recentGames || []).slice(-5).reverse();
+    last5.forEach((g, i) => {
       const y = y0 + 10 + i * 40, win = g.pf > g.pa;
       rect(M, y, W - 2 * M, 34, win ? REP.LGRN : REP.LRED, 6);
       rect(M, y, 34, 34, win ? REP.GRN : REP.RED, 6);
@@ -17969,21 +18001,32 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
       text(`${g.home ? "Home" : "Away"}${g.date ? " · " + g.date : ""}`, M + 72, y + 27, { size: 7.5, color: REP.MUTE });
       text(`${g.pf} - ${g.pa}`, W - M - 12, y + 22, { size: 14, bold: true, color: win ? REP.GRN : REP.RED, align: "right" });
     });
+    y2 = y0 + 10 + Math.max(1, last5.length) * 40 + 16;
   }
+  currentY = y2;
 
   // 3 — stats générales (rang sur la ligue)
-  newPage("General stats", `Left badge = division rank (among ${total} teams loaded in Scouting) · right badge = poule rank (${pouleName || "their poule"}) · green = top 5, red = bottom 5`);
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : "on a du mal à voir la dernière ligne") : les 2
+  // colonnes empilaient leurs groupes SANS jamais vérifier si ça débordait de la page — avec
+  // beaucoup de stats valides (ex. "OPPONENT STATS", 17 lignes), la fin de la colonne pouvait
+  // dépasser le bas de la page et devenir illisible (collée au pied de page, voire hors page).
+  // Chaque groupe vérifie maintenant la place restante AVANT de se dessiner : s'il ne tient pas
+  // dans la colonne la plus courte, on repart sur une page neuve avec les 2 colonnes réinitialisées.
+  const gsTitle = "General stats", gsSub = `Left badge = division rank (among ${total} teams loaded in Scouting) · right badge = poule rank (${pouleName || "their poule"}) · green = top 5, red = bottom 5`;
+  let yGS = sectionStart(gsTitle, gsSub);
   const col = r => (r && r.rank <= 5 ? [REP.GRN, REP.WHITE] : r && r.rank > r.total - 5 ? [REP.RED, REP.WHITE] : [REP.GREY, REP.WHITE]);
   const colW = (W - 2 * M - 24) / 2;
-  let ys = [92, 92];
-  const slots = [[0, 0], [1, 0], [0, 1], [1, 1], [0, 2], [1, 2]];
-  REP_GROUPS.forEach(([title, keys], gi) => {
-    const c = gi % 2, x = M + c * (colW + 24);
-    let y = Math.max(ys[c], c === 0 ? ys[0] : ys[1]);
+  let ys = [yGS, yGS];
+  REP_GROUPS.forEach(([title, keys]) => {
+    const validKeys = keys.filter(k => { const sc = SCOUT_STAT_SCHEMA.find(s => s.key === k); const v = t.stats[k]; return sc && v !== undefined && v !== null && !isNaN(v); });
+    if (!validKeys.length) return;
+    const need = 8 + validKeys.length * 19 + 14;
+    const c = ys[0] <= ys[1] ? 0 : 1, x = M + c * (colW + 24);
+    if (ys[c] + need > H - 40) { newPage("General stats (cont.)", gsSub); ys = [92, 92]; }
+    let y = ys[c];
     text(title, x, y, { size: 8, bold: true, color: REP.OR }); y += 8;
-    keys.forEach(k => {
+    validKeys.forEach(k => {
       const sc = SCOUT_STAT_SCHEMA.find(s => s.key === k); const v = t.stats[k];
-      if (!sc || v === undefined || v === null || isNaN(v)) return;
       const r = rankOf(k, teamName); const [bg, fg] = col(r);
       const rp = pouleRankOf(k, teamName); const [bgp, fgp] = col(rp);
       rect(x, y, colW, 16, REP.BG, 3);
@@ -17996,9 +18039,11 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
     });
     ys[c] = y + 14;
   });
+  currentY = Math.max(ys[0], ys[1]);
 
   // 4 — forces / faiblesses (stats + playtypes)
-  newPage("Strengths and weaknesses", "Strengths = rank 1-5 or top 3 playtypes · weaknesses = bottom 5 or 3 worst playtypes (among observed teams)");
+  let ySW0 = sectionStart("Strengths and weaknesses", "Strengths = rank 1-5 or top 3 playtypes · weaknesses = bottom 5 or 3 worst playtypes (among observed teams)");
+  const swColEnds = [];
   const rows = SCOUT_SW_KEYS.map(k => {
     const sc = SCOUT_STAT_SCHEMA.find(s => s.key === k); const v = t.stats[k]; const r = rankOf(k, teamName);
     return sc && r && v !== undefined && v !== null && !isNaN(v) ? { k, sc, v, r } : null;
@@ -18007,7 +18052,7 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
   const weak = rows.filter(x => x.r.rank > x.r.total - 5).sort((a, b) => b.r.rank - a.r.rank);
   const swo = ptSW("off"), swd = ptSW("def");
   [[strong, "STRENGTHS", REP.GRN, REP.LGRN, swo.strong, swd.strong], [weak, "WEAKNESSES", REP.RED, REP.LRED, swo.weak, swd.weak]].forEach(([list, ttl, c1, c2, po, pd], ci) => {
-    const x = M + ci * (colW + 24); let y = 96;
+    const x = M + ci * (colW + 24); let y = ySW0;
     text(ttl, x, y, { size: 10, bold: true, color: c1 }); y += 8;
     text("STATISTICS", x, y + 9, { size: 7, bold: true, color: REP.MUTE }); y += 14;
     if (!list.length) { text("None", x + 4, y + 8, { size: 8.5, color: REP.MUTE }); y += 20; }
@@ -18018,7 +18063,7 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
       text(`${it.r.rank}/${it.r.total}`, x + colW - 8, y + 12, { size: 8, bold: true, color: c1, align: "right" });
       y += 21;
     });
-    y = Math.max(y, 96 + 8 + 14 + 12 * 21) + 6;
+    y = Math.max(y, ySW0 + 8 + 14 + 12 * 21) + 6;
     [["OFFENSIVE PLAYTYPES", po], ["DEFENSIVE PLAYTYPES", pd]].forEach(([lab, ls]) => {
       text(lab, x, y + 9, { size: 7, bold: true, color: REP.MUTE }); y += 14;
       if (!ls.length) { text(ptMine ? "None" : "No observation data for this team", x + 4, y + 8, { size: 8.5, color: REP.MUTE }); y += 20; }
@@ -18031,50 +18076,62 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
       });
       y += 4;
     });
+    swColEnds.push(y);
   });
+  currentY = Math.max(...swColEnds);
 
   // 5 — playtypes offensifs / défensifs
-  newPage("Offensive and defensive playtypes", "Frequency and efficiency (PPP) · rank among observed teams · green = strength, red = weakness");
+  let yPT = sectionStart("Offensive and defensive playtypes", "Frequency and efficiency (PPP) · rank among observed teams · green = strength, red = weakness");
   if (!ptMine) {
-    text("No Scouting Observation file for this team yet (Scouting › Observation).", M, 100, { size: 10, color: REP.MUTE });
+    text("No Scouting Observation file for this team yet (Scouting › Observation).", M, yPT + 8, { size: 10, color: REP.MUTE });
+    yPT += 24;
   } else {
-    let y = 92;
     [["off", "OFFENSIVE PLAYTYPES — what they run most"], ["def", "DEFENSIVE PLAYTYPES — what they defend most"]].forEach(([side, ttl]) => {
-      text(ttl, M, y, { size: 8, bold: true, color: REP.OR }); y += 8;
+      text(ttl, M, yPT, { size: 8, bold: true, color: REP.OR }); yPT += 8;
       const hdr = [["Playtype", M + 6, "left"], ["Frequency", M + 150, "left"], ["Poss.", M + 330, "right"], ["PPP", M + 380, "right"], ["Rank", M + 430, "right"], ["Reading", W - M - 8, "right"]];
-      hdr.forEach(([h, x, al]) => text(h, x, y + 8, { size: 7, color: REP.MUTE, align: al })); y += 12;
+      hdr.forEach(([h, x, al]) => text(h, x, yPT + 8, { size: 7, color: REP.MUTE, align: al })); yPT += 12;
       const sw = ptSW(side); const sset = new Set(sw.strong.map(x => x.label)), wset = new Set(sw.weak.map(x => x.label));
       const list = ptList(side).sort((a, b) => b.freq - a.freq);
       const maxF = Math.max(1, ...list.map(x => x.freq));
       list.forEach(it => {
+        if (yPT + 19 > H - 40) { newPage("Offensive and defensive playtypes (cont.)", "Frequency and efficiency (PPP) · rank among observed teams · green = strength, red = weakness"); yPT = 92; }
         const isS = sset.has(it.label), isW = wset.has(it.label);
-        rect(M, y, W - 2 * M, 17, isS ? REP.LGRN : isW ? REP.LRED : REP.BG, 3);
-        text(it.label, M + 6, y + 12, { size: 8.5, maxW: 138 });
-        rect(M + 150, y + 4, Math.max(2, 140 * it.freq / maxF), 9, REP.OR, 2);
-        text(`${it.freq.toFixed(0)}%`, M + 150 + Math.max(2, 140 * it.freq / maxF) + 4, y + 12, { size: 7.5, color: REP.MUTE });
-        text(it.n, M + 330, y + 12, { size: 8.5, align: "right" });
-        text(it.ppp.toFixed(2), M + 380, y + 12, { size: 8.5, bold: true, align: "right" });
-        text(`${it.rank}/${it.total}`, M + 430, y + 12, { size: 8.5, align: "right" });
-        text(isS ? "Strength" : isW ? "Weakness" : "Neutral", W - M - 8, y + 12, { size: 8, bold: isS || isW, color: isS ? REP.GRN : isW ? REP.RED : REP.MUTE, align: "right" });
-        y += 19;
+        rect(M, yPT, W - 2 * M, 17, isS ? REP.LGRN : isW ? REP.LRED : REP.BG, 3);
+        text(it.label, M + 6, yPT + 12, { size: 8.5, maxW: 138 });
+        rect(M + 150, yPT + 4, Math.max(2, 140 * it.freq / maxF), 9, REP.OR, 2);
+        text(`${it.freq.toFixed(0)}%`, M + 150 + Math.max(2, 140 * it.freq / maxF) + 4, yPT + 12, { size: 7.5, color: REP.MUTE });
+        text(it.n, M + 330, yPT + 12, { size: 8.5, align: "right" });
+        text(it.ppp.toFixed(2), M + 380, yPT + 12, { size: 8.5, bold: true, align: "right" });
+        text(`${it.rank}/${it.total}`, M + 430, yPT + 12, { size: 8.5, align: "right" });
+        text(isS ? "Strength" : isW ? "Weakness" : "Neutral", W - M - 8, yPT + 12, { size: 8, bold: isS || isW, color: isS ? REP.GRN : isW ? REP.RED : REP.MUTE, align: "right" });
+        yPT += 19;
       });
-      y += 18;
+      yPT += 18;
     });
   }
+  currentY = yPT;
 
   // 6 — comparaison avec notre équipe
-  newPage("Stats comparison", `Green/red fill = better of the two teams · D = ${teamName}'s rank among ${total} teams loaded in Scouting · P = their rank in ${pouleName || "their poule"} · green = top 5, red = bottom 5`);
+  const scSub6 = `Green/red fill = better of the two teams · D = ${teamName}'s rank among ${total} teams loaded in Scouting · P = their rank in ${pouleName || "their poule"} · green = top 5, red = bottom 5`;
+  let y6 = sectionStart("Stats comparison", scSub6);
   if (!ourStats || !Object.keys(ourStats).length) {
-    text("Our team stats are not available yet (import box scores first).", M, 100, { size: 10, color: REP.MUTE });
+    text("Our team stats are not available yet (import box scores first).", M, y6 + 8, { size: 10, color: REP.MUTE });
+    y6 += 24;
   } else {
-    logo(ourLogoClean, ourName, M + 190, 92, 11); logo(teamLogoClean, teamName, M + 290, 92, 11);
-    text("D", W - M - 52, 88, { size: 6.5, bold: true, color: REP.MUTE, align: "center" });
-    text("P", W - M - 16, 88, { size: 6.5, bold: true, color: REP.MUTE, align: "center" });
+    // BUG RÉEL CORRIGÉ (même famille que "General stats" : signalé par l'utilisateur, "on a du mal
+    // à voir la dernière ligne") : cette liste empilait TOUS les groupes à la suite, dans une seule
+    // colonne, sans jamais vérifier si ça débordait de la page — avec beaucoup de stats en commun
+    // entre les 2 équipes, la fin de la liste dépassait le bas de la page. Chaque groupe vérifie
+    // maintenant la place restante avant de se dessiner.
+    const drawHeader = (yy) => { logo(ourLogoClean, ourName, M + 190, yy, 11); logo(teamLogoClean, teamName, M + 290, yy, 11); text("D", W - M - 52, yy - 4, { size: 6.5, bold: true, color: REP.MUTE, align: "center" }); text("P", W - M - 16, yy - 4, { size: 6.5, bold: true, color: REP.MUTE, align: "center" }); };
+    drawHeader(y6 + 20);
     const rcol = r => (r && r.rank <= 5 ? [REP.GRN, REP.WHITE] : r && r.rank > r.total - 5 ? [REP.RED, REP.WHITE] : [REP.GREY, REP.WHITE]);
-    let y = 112;
+    let y = y6 + 40;
     REP_GROUPS.forEach(([title, keys]) => {
       const list = keys.filter(k => ourStats[k] !== undefined && t.stats[k] !== undefined);
       if (!list.length) return;
+      const need = 12 + list.length * 17 + 6;
+      if (y + need > H - 40) { newPage("Stats comparison (cont.)", scSub6); y = 112; drawHeader(92); }
       text(title, M, y + 8, { size: 8, bold: true, color: REP.OR }); y += 12;
       list.forEach(k => {
         const sc = SCOUT_STAT_SCHEMA.find(s => s.key === k); const a = ourStats[k], b = t.stats[k];
@@ -18095,38 +18152,47 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
       });
       y += 6;
     });
+    y6 = y;
   }
+  currentY = y6;
   // 7 — comparaison des playtypes (notre attaque vs leur défense, leur attaque vs notre défense)
-  newPage("Playtype comparison", "Average of both PPP: > 1.05 exploit · < 0.90 danger · in between neutral");
+  const ptCmpSub = "Average of both PPP: > 1.05 exploit · < 0.90 danger · in between neutral";
+  let yPC = sectionStart("Playtype comparison", ptCmpSub);
   if (!PT.own || !ptMine) {
-    text(!PT.own ? "Our own coded games are needed for this page (Team › coding file)." : "No Scouting Observation file for this team yet.", M, 100, { size: 10, color: REP.MUTE });
+    text(!PT.own ? "Our own coded games are needed for this page (Team › coding file)." : "No Scouting Observation file for this team yet.", M, yPC + 8, { size: 10, color: REP.MUTE });
+    yPC += 24;
   } else {
-    let y = 92;
     [["OUR OFFENSE VS THEIR DEFENSE", PT.own.off, ptMine.def, false], ["THEIR OFFENSE VS OUR DEFENSE", ptMine.off, PT.own.def, true]].forEach(([ttl, A, B, invert]) => {
-      text(ttl, M, y, { size: 8, bold: true, color: REP.OR }); y += 8;
-      [["Playtype", M + 6, "left"], ["Vol.", M + 170, "right"], ["PPP", M + 215, "right"], ["Vol.", M + 270, "right"], ["PPP", M + 315, "right"], ["Avg", M + 370, "right"]].forEach(([h, x, al]) => text(h, x, y + 8, { size: 7, color: REP.MUTE, align: al }));
-      text("Message", W - M - 8, y + 8, { size: 7, color: REP.MUTE, align: "right" }); y += 12;
+      text(ttl, M, yPC, { size: 8, bold: true, color: REP.OR }); yPC += 8;
+      [["Playtype", M + 6, "left"], ["Vol.", M + 170, "right"], ["PPP", M + 215, "right"], ["Vol.", M + 270, "right"], ["PPP", M + 315, "right"], ["Avg", M + 370, "right"]].forEach(([h, x, al]) => text(h, x, yPC + 8, { size: 7, color: REP.MUTE, align: al }));
+      text("Message", W - M - 8, yPC + 8, { size: 7, color: REP.MUTE, align: "right" }); yPC += 12;
       PT.labels.filter(l => A[l] && B[l]).map(l => ({ l, a: A[l], b: B[l], avg: (A[l].ppp + B[l].ppp) / 2 })).sort((p, q) => q.avg - p.avg).forEach(r => {
+        if (yPC + 19 > H - 40) { newPage("Playtype comparison (cont.)", ptCmpSub); yPC = 92; }
         // "OUR O vs THEIR D" : haute PPP = bon pour nous = EXPLOIT. "THEIR O vs OUR D" : haute PPP = risque
         // pour nous = DANGER (inversé) ; basse PPP = secteur qu'on maîtrise déjà = STRENGTH, pas "exploit".
         const highRisk = r.avg > 1.05, lowRisk = r.avg < 0.9;
         const good = invert ? lowRisk : highRisk, bad = invert ? highRisk : lowRisk;
         const goodLabel = invert ? "STRENGTH" : "EXPLOIT";
-        rect(M, y, W - 2 * M, 17, good ? REP.LGRN : bad ? REP.LRED : REP.BG, 3);
-        text(r.l, M + 6, y + 12, { size: 8.5, maxW: 150 });
-        text(r.a.n, M + 170, y + 12, { size: 8, align: "right" }); text(r.a.ppp.toFixed(2), M + 215, y + 12, { size: 8.5, bold: true, align: "right" });
-        text(r.b.n, M + 270, y + 12, { size: 8, align: "right" }); text(r.b.ppp.toFixed(2), M + 315, y + 12, { size: 8.5, bold: true, align: "right" });
-        text(r.avg.toFixed(2), M + 370, y + 12, { size: 8.5, bold: true, color: good ? REP.GRN : bad ? REP.RED : REP.INK, align: "right" });
-        if (good || bad) { rect(W - M - 70, y + 3, 62, 11, good ? REP.GRN : REP.RED, 3); text(good ? goodLabel : "DANGER", W - M - 39, y + 11.5, { size: 7, bold: true, color: REP.WHITE, align: "center" }); }
-        y += 19;
+        rect(M, yPC, W - 2 * M, 17, good ? REP.LGRN : bad ? REP.LRED : REP.BG, 3);
+        text(r.l, M + 6, yPC + 12, { size: 8.5, maxW: 150 });
+        text(r.a.n, M + 170, yPC + 12, { size: 8, align: "right" }); text(r.a.ppp.toFixed(2), M + 215, yPC + 12, { size: 8.5, bold: true, align: "right" });
+        text(r.b.n, M + 270, yPC + 12, { size: 8, align: "right" }); text(r.b.ppp.toFixed(2), M + 315, yPC + 12, { size: 8.5, bold: true, align: "right" });
+        text(r.avg.toFixed(2), M + 370, yPC + 12, { size: 8.5, bold: true, color: good ? REP.GRN : bad ? REP.RED : REP.INK, align: "right" });
+        if (good || bad) { rect(W - M - 70, yPC + 3, 62, 11, good ? REP.GRN : REP.RED, 3); text(good ? goodLabel : "DANGER", W - M - 39, yPC + 11.5, { size: 7, bold: true, color: REP.WHITE, align: "center" }); }
+        yPC += 19;
       });
-      y += 18;
+      yPC += 18;
     });
   }
+  currentY = yPC;
   // 8-10 — LiveStats : temps forts/faibles, impact terrain/banc, 5 majeurs
+  // Mise en page à coordonnées fixes (graphique en barres) : garde sa page dédiée (newPage direct,
+  // pas d'enchaînement PAR-DESSUS une section précédente), mais la section suivante peut toujours
+  // s'enchaîner à SA suite si la fin de page le permet (currentY mis à jour plus bas).
   newPage("Hot and cold stretches", LS ? `Average margin of ${teamName} per 2-minute block over ${LS.games} LiveStats games · regulation time` : "LiveStats data");
   if (!LS) {
     text("LiveStats unavailable: " + lsErr, M, 100, { size: 10, color: REP.MUTE, maxW: W - 2 * M });
+    currentY = 130;
   } else {
     const cx = M + 24, cw = W - 2 * M - 24, cy = 260, ch = 120, bw = cw / 20;
     const maxAbs = Math.max(2, ...LS.tempo.map(v => Math.abs(v)));
@@ -18145,43 +18211,45 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
     text("WORST BLOCK", M + 10, 455, { size: 7, bold: true, color: REP.RED }); text(`${worst * 2}-${worst * 2 + 2}' · ${LS.tempo[worst].toFixed(1)} pts`, M + 10, 475, { size: 12, bold: true, color: REP.RED });
     const bx = M + (W - 2 * M + 12) / 2;
     text("BEST BLOCK", bx + 10, 455, { size: 7, bold: true, color: REP.GRN }); text(`${best * 2}-${best * 2 + 2}' · +${LS.tempo[best].toFixed(1)} pts`, bx + 10, 475, { size: 12, bold: true, color: REP.GRN });
+    currentY = 486;
   }
 
   // 12bis — répartition des défenses d'écrans (Scouting Observation) : en général, et par
   // spacing d'écran — demandé par l'utilisateur, juste après "Hot and cold stretches".
   {
     const sub = "Screen coverage used on defense · frequency, efficiency (PPP), contest rate, TOV% · From Scouting Observation";
-    newPage("Screen defense distribution", sub);
+    let y = sectionStart("Screen defense distribution", sub);
     if (!screenDefOverall.length && !screenDefBySpacing.length) {
-      text("No screen defense tag coded for this team in Scouting Observation yet.", M, 100, { size: 10, color: REP.MUTE, maxW: W - 2 * M });
+      text("No screen defense tag coded for this team in Scouting Observation yet.", M, y + 8, { size: 10, color: REP.MUTE, maxW: W - 2 * M });
+      y += 24;
     } else {
       const hdr2 = [["Coverage", M + 6, "left"], ["Freq", M + 250, "right"], ["PPP", M + 330, "right"], ["Contest %", M + 420, "right"], ["TOV %", W - M - 6, "right"]];
       const drawScreenDefTable = (y0, title, rows) => {
-        let y = y0;
-        text(title, M, y, { size: 8, bold: true, color: REP.OR }); y += 10;
-        hdr2.forEach(([h, x, al]) => text(h, x, y, { size: 7, color: REP.MUTE, align: al })); y += 6;
+        let yy = y0;
+        text(title, M, yy, { size: 8, bold: true, color: REP.OR }); yy += 10;
+        hdr2.forEach(([h, x, al]) => text(h, x, yy, { size: 7, color: REP.MUTE, align: al })); yy += 6;
         rows.forEach(r => {
-          rect(M, y, W - 2 * M, 17, REP.BG, 3);
+          rect(M, yy, W - 2 * M, 17, REP.BG, 3);
           const contest = r.open === null || r.open === undefined ? null : 100 - r.open;
           // Pastille de couleur par type de couverture (demandé par l'utilisateur : jaune = Step,
           // vert = Show, rouge = Switch), même logique que sur le site (screenCoverageColor).
-          fc(screenCoverageColorPdf(r.name)); doc.circle(M + 10, y + 9, 2.5, "F");
+          fc(screenCoverageColorPdf(r.name)); doc.circle(M + 10, yy + 9, 2.5, "F");
           const vals = [r.name, r.freq.toFixed(0) + "%", r.pppp.toFixed(2), contest === null ? "–" : contest.toFixed(0) + "%", r.tov === null || r.tov === undefined ? "–" : r.tov.toFixed(0) + "%"];
-          vals.forEach((v, j) => text(v, j === 0 ? hdr2[j][1] + 10 : hdr2[j][1], y + 12, { size: 8, bold: j === 0, align: hdr2[j][2], maxW: j === 0 ? 220 : undefined }));
-          y += 20;
+          vals.forEach((v, j) => text(v, j === 0 ? hdr2[j][1] + 10 : hdr2[j][1], yy + 12, { size: 8, bold: j === 0, align: hdr2[j][2], maxW: j === 0 ? 220 : undefined }));
+          yy += 20;
         });
-        return y + 10;
+        return yy + 10;
       };
       const blocks = [];
       if (screenDefOverall.length) blocks.push({ title: "OVERALL", rows: screenDefOverall });
       screenDefBySpacing.forEach(s => { if (s.breakdown.length) blocks.push({ title: `SPACING — ${s.spacing.toUpperCase()} (${s.total} actions)`, rows: s.breakdown }); });
-      let y = 92;
       blocks.forEach(b => {
         const need = 16 + b.rows.length * 20 + 10;
         if (y > 92 && y + need > H - 40) { newPage("Screen defense distribution (cont.)", sub); y = 92; }
         y = drawScreenDefTable(y, b.title, b.rows);
       });
     }
+    currentY = y;
   }
 
   // 12ter — comparatif de couverture d'écran (demandé par l'utilisateur, juste après la
@@ -18192,11 +18260,11 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
   if (screenCompare) {
     const subSc = "Average PPP of both sides · > 1.05 = exploit · < 0.90 = danger · coverage colors: the Yellow, Green and Red tags keep their own color";
     const hasRows = screenCompare.labels.some(l => (screenCompare.ownOff[l] && screenCompare.theirDef[l]) || (screenCompare.theirOff[l] && screenCompare.ownDef[l]));
-    newPage("Screen coverage match-up", subSc);
+    let y = sectionStart("Screen coverage match-up", subSc);
     if (!hasRows) {
-      text("Not enough data yet (need both our own coded games and this team's Scouting Observation file).", M, 100, { size: 10, color: REP.MUTE, maxW: W - 2 * M });
+      text("Not enough data yet (need both our own coded games and this team's Scouting Observation file).", M, y + 8, { size: 10, color: REP.MUTE, maxW: W - 2 * M });
+      y += 24;
     } else {
-      let y = 92;
       [["OUR SCREEN OFFENSE VS THEIR SCREEN DEFENSE", screenCompare.ownOff, screenCompare.theirDef, false], ["THEIR SCREEN OFFENSE VS OUR SCREEN DEFENSE", screenCompare.theirOff, screenCompare.ownDef, true]].forEach(([ttl, A, B, invert]) => {
         const rowsSc = screenCompare.labels.filter(l => A[l] && B[l]).map(l => ({ l, a: A[l], b: B[l], avg: (A[l].ppp + B[l].ppp) / 2 })).sort((p, q) => q.avg - p.avg);
         if (!rowsSc.length) return;
@@ -18220,18 +18288,21 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
         y += 18;
       });
     }
+    currentY = y;
   }
 
-  newPage("Player impact: on court vs bench", "Team stats with the player on court vs on the bench · per 100 possessions · green = better side");
+  let yPI = sectionStart("Player impact: on court vs bench", "Team stats with the player on court vs on the bench · per 100 possessions · green = better side");
   if (!LS) {
-    text("LiveStats unavailable: " + lsErr, M, 100, { size: 10, color: REP.MUTE, maxW: W - 2 * M });
+    text("LiveStats unavailable: " + lsErr, M, yPI + 8, { size: 10, color: REP.MUTE, maxW: W - 2 * M });
+    currentY = yPI + 24;
   } else {
     const cols = [["ORTG", "ortg", 1, 0], ["DRTG", "drtg", 0, 0], ["OREB%", "ro", 1, 1], ["TO%", "to", 0, 1], ["AST%", "ast", 1, 1]];
     const x0 = M + 118, cwid = (W - M - x0) / cols.length;
-    cols.forEach(([h], i) => { text(h, x0 + i * cwid + cwid / 2, 92, { size: 8, bold: true, align: "center" }); text("on", x0 + i * cwid + cwid * 0.28, 102, { size: 6.5, color: REP.MUTE, align: "center" }); text("bench", x0 + i * cwid + cwid * 0.72, 102, { size: 6.5, color: REP.MUTE, align: "center" }); });
-    text("Player", M + 6, 102, { size: 7, color: REP.MUTE }); text("Min", M + 100, 102, { size: 7, color: REP.MUTE, align: "right" });
-    LS.impact.filter(p => p.min >= 10).slice(0, 14).forEach((p, r) => {
-      const y = 108 + r * 26;
+    cols.forEach(([h], i) => { text(h, x0 + i * cwid + cwid / 2, yPI, { size: 8, bold: true, align: "center" }); text("on", x0 + i * cwid + cwid * 0.28, yPI + 10, { size: 6.5, color: REP.MUTE, align: "center" }); text("bench", x0 + i * cwid + cwid * 0.72, yPI + 10, { size: 6.5, color: REP.MUTE, align: "center" }); });
+    text("Player", M + 6, yPI + 10, { size: 7, color: REP.MUTE }); text("Min", M + 100, yPI + 10, { size: 7, color: REP.MUTE, align: "right" });
+    const piList = LS.impact.filter(p => p.min >= 10).slice(0, 14);
+    piList.forEach((p, r) => {
+      const y = yPI + 16 + r * 26;
       rect(M, y, W - 2 * M, 23, REP.BG, 4);
       text(p.name, M + 6, y + 15, { size: 8.5, bold: true, maxW: 86 }); text(p.min.toFixed(0), M + 100, y + 15, { size: 8, align: "right", color: REP.MUTE });
       cols.forEach(([, k, hi], i) => {
@@ -18244,15 +18315,18 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
         });
       });
     });
+    currentY = yPI + 16 + Math.max(1, piList.length) * 26 + 10;
   }
 
-  newPage("Lineups", "5-man lineups from LiveStats (minutes, points for/against, net points per 10 minutes) · at least 5 minutes played together");
+  let yLU = sectionStart("Lineups", "5-man lineups from LiveStats (minutes, points for/against, net points per 10 minutes) · at least 5 minutes played together");
   if (!LS) {
-    text("LiveStats unavailable: " + lsErr, M, 100, { size: 10, color: REP.MUTE, maxW: W - 2 * M });
+    text("LiveStats unavailable: " + lsErr, M, yLU + 8, { size: 10, color: REP.MUTE, maxW: W - 2 * M });
+    currentY = yLU + 24;
   } else {
     const L5 = LS.lineups.filter(l => l.min >= 5);
-    let y = 92;
+    let y = yLU;
     [["MOST USED", [...L5].sort((a, b) => b.min - a.min).slice(0, 5), REP.GREY], ["MOST EFFICIENT", [...L5].sort((a, b) => b.net10 - a.net10).slice(0, 5), REP.GRN], ["LEAST EFFICIENT", [...L5].sort((a, b) => a.net10 - b.net10).slice(0, 5), REP.RED]].forEach(([ttl, list, c]) => {
+      if (y + 50 > H - 40) { newPage("Lineups (cont.)", "5-man lineups from LiveStats (minutes, points for/against, net points per 10 minutes) · at least 5 minutes played together"); y = 92; }
       text(ttl, M, y, { size: 8, bold: true, color: c }); y += 8;
       if (!list.length) { text("Not enough minutes together yet.", M + 4, y + 12, { size: 8.5, color: REP.MUTE }); y += 24; }
       list.forEach(l => {
@@ -18267,11 +18341,16 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
       y += 10;
     });
     text("Net = point difference per 10 minutes of play together.", M, y, { size: 7, color: REP.MUTE });
+    currentY = y + 12;
   }
   // 11 — rotations (probabilité d'être sur le terrain par tranche de 30 s) + dernier match
+  // Ces deux sections gardent une page dédiée (grille à coordonnées fixes Q1-Q4, trop risqué à
+  // rendre relative dans cette passe), mais renseignent currentY à la fin pour que la section
+  // suivante puisse malgré tout s'enchaîner sur l'espace restant.
   newPage("Rotations", LS ? `Probability of being on court per 30-second block · ${LS.games} LiveStats games · darker = more likely` : "LiveStats data");
   if (!LS) {
     text("LiveStats unavailable: " + lsErr, M, 100, { size: 10, color: REP.MUTE, maxW: W - 2 * M });
+    currentY = 130;
   } else {
     const list = LS.rot.filter(p => p.min >= 10).slice(0, 12);
     // Revenu à la résolution 30 s d'origine (80 cellules), demandé explicitement par l'utilisateur
@@ -18290,12 +18369,14 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
       text(`${(p.min / LS.games).toFixed(0)} min`, W - M + 2, y + 15, { size: 6.5, color: REP.MUTE });
     });
     dc(REP.INK); doc.setLineWidth(0.8); [0, 20, 40, 60, 80].forEach(k => doc.line(x0 + k * cw, 96, x0 + k * cw, 100 + list.length * (rh + 3)));
+    currentY = 100 + Math.max(1, list.length) * (rh + 3) + 10;
   }
 
   const lg = LS && LS.last;
   newPage(lg ? `Last game: ${lg.opp} (${lg.scoreFor}-${lg.scoreAgainst})` : "Last game", "5 rows = the 5 players on court at the same time · each block = one stint, with the team's +/- during it · green positive, red negative");
   if (!lg) {
     text("LiveStats unavailable: " + lsErr, M, 100, { size: 10, color: REP.MUTE, maxW: W - 2 * M });
+    currentY = 130;
   } else {
     const x0 = M + 4, gw = W - 2 * M - 8, rh = 78, tEnd = lg.endT;
     for (let r = 0; r < 5; r++) text(`Row ${r + 1}`, x0, 98 + r * (rh + 6) - 2, { size: 6.5, color: REP.MUTE });
@@ -18313,6 +18394,7 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
     dc(REP.INK); doc.setLineWidth(0.8); [600, 1200, 1800].forEach(tt => doc.line(x0 + gw * tt / tEnd, 94, x0 + gw * tt / tEnd, 100 + 5 * (rh + 6)));
     ["Q1", "Q2", "Q3", "Q4"].forEach((q, i) => text(q, x0 + gw * (i * 600 + 300) / tEnd, 92, { size: 7, bold: true, align: "center", color: REP.MUTE }));
     text("A player entering takes the row of the player he replaces.", M, 100 + 5 * (rh + 6) + 14, { size: 7, color: REP.MUTE });
+    currentY = 100 + 5 * (rh + 6) + 24;
   }
 
   // 12-13 — fatigue individuelle (durée continue sur le terrain, tranches de 30 s)
@@ -18320,9 +18402,10 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
   // Un repère toutes les 4 tranches (= 2 min), sinon illisible avec 24 points.
   const buckLab = Array.from({ length: FAT_BUCKET_N }, (_, j) => (j % 4 === 0 ? String(Math.round(j * FAT_BUCKET_SEC / 60)) : ""));
   const fatPhotoFor = name => ((FF || []).find(({ fp }) => repNameMatch(fp.name, name)) || {}).fp?.photo || null;
-  for (let pg = 0; pg < (LS ? Math.max(1, Math.ceil(fatPlayers.length / 5)) : 1); pg++) {
-    newPage(`Fatigue player by player (${pg + 1}/${Math.max(1, Math.ceil(fatPlayers.length / 5))})`, "By continuous minutes on court (30-second blocks, reset at half-time) · smoothed (3-block average) · hollow dot = under 3 min observed");
-    if (!LS) { text("LiveStats unavailable: " + lsErr, M, 100, { size: 10, color: REP.MUTE, maxW: W - 2 * M }); continue; }
+  const fatPages = LS ? Math.max(1, Math.ceil(fatPlayers.length / 5)) : 1;
+  for (let pg = 0; pg < fatPages; pg++) {
+    newPage(`Fatigue player by player (${pg + 1}/${fatPages})`, "By continuous minutes on court (30-second blocks, reset at half-time) · smoothed (3-block average) · hollow dot = under 3 min observed");
+    if (!LS) { text("LiveStats unavailable: " + lsErr, M, 100, { size: 10, color: REP.MUTE, maxW: W - 2 * M }); currentY = 130; continue; }
     const mets = [["FG %", "fg", REP.OR], ["REB %", "reb", REP.GRN], ["TOV %", "tov", REP.RED], ["AST %", "ast", REP.GREY]];
     const cwid = (W - 2 * M - 85) / 4;
     mets.forEach(([h], i) => text(h, M + 85 + i * cwid + cwid / 2, 90, { size: 8, bold: true, align: "center" }));
@@ -18353,29 +18436,37 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
         buckLab.forEach((b, j) => { if (b) text(b, px(j), cy + chh + 9, { size: 5.5, align: "center", color: REP.MUTE }); });
       });
     });
+    // Page à coordonnées fixes (5 rangées de 140pt) : currentY reflète la fin de la DERNIÈRE page
+    // de cette boucle, pour permettre à la section suivante de s'enchaîner si la dernière page
+    // n'avait pas 5 joueurs.
+    const rowsOnLastPage = Math.max(1, fatPlayers.slice(pg * 5, pg * 5 + 5).length);
+    currentY = 98 + rowsOnLastPage * 140;
   }
 
   // 14 — tirs contestés / non contestés (Scouting Observation : tag Open)
-  newPage("Contested and uncontested shooting", "From Scouting Observation: shots tagged Open versus all other shots (contested or turnover-prone)");
+  let ySh0 = sectionStart("Contested and uncontested shooting", "From Scouting Observation: shots tagged Open versus all other shots (contested or turnover-prone)", 220);
   const { myShots, isOpen, isMade, is3, grp, CS } = D;
   if (!myShots.length) {
-    text("No coded shots for this team in Scouting Observation yet.", M, 100, { size: 10, color: REP.MUTE });
+    text("No coded shots for this team in Scouting Observation yet.", M, ySh0 + 8, { size: 10, color: REP.MUTE });
+    currentY = ySh0 + 24;
   } else {
-    text("FIELD GOAL % — OPEN VS CONTESTED", M, 92, { size: 8, bold: true, color: REP.OR });
+    const shBase = ySh0;
+    text("FIELD GOAL % — OPEN VS CONTESTED", M, shBase, { size: 8, bold: true, color: REP.OR });
     [["2 pts", CS.two], ["3 pts", CS.three], ["Total", CS.all]].forEach(([lab, g], i) => {
       const x = M + i * ((W - 2 * M) / 3), bw = 60;
-      rect(x, 100, (W - 2 * M) / 3 - 10, 120, REP.BG, 6);
-      text(lab, x + 10, 116, { size: 9, bold: true });
+      rect(x, shBase + 8, (W - 2 * M) / 3 - 10, 120, REP.BG, 6);
+      text(lab, x + 10, shBase + 24, { size: 9, bold: true });
       [[g.fgo, REP.GRN, "Open", g.no, 0], [g.fgc, REP.RED, "Contested", g.nc, 1]].forEach(([v, c, l, n, j]) => {
         const bx = x + 14 + j * 80;
-        if (v !== null) { rect(bx, 205 - v * 0.7, 56, v * 0.7, c, 2); text(v.toFixed(0) + "%", bx + 28, 200 - v * 0.7, { size: 8, bold: true, align: "center" }); }
-        text(`${l} (${n})`, bx + 28, 216, { size: 6.5, align: "center", color: REP.MUTE });
+        if (v !== null) { rect(bx, shBase + 113 - v * 0.7, 56, v * 0.7, c, 2); text(v.toFixed(0) + "%", bx + 28, shBase + 108 - v * 0.7, { size: 8, bold: true, align: "center" }); }
+        text(`${l} (${n})`, bx + 28, shBase + 124, { size: 6.5, align: "center", color: REP.MUTE });
       });
     });
-    let y = 250;
+    let y = shBase + 158;
     text("BY PLAYTYPE", M, y, { size: 8, bold: true, color: REP.OR }); y += 8;
     [["Playtype", M + 6, "left"], ["Shots", M + 170, "right"], ["% contested", M + 240, "right"], ["Open FG%", M + 320, "right"], ["Contested FG%", M + 400, "right"], ["Gap", W - M - 8, "right"]].forEach(([h, x, al]) => text(h, x, y + 8, { size: 7, color: REP.MUTE, align: al })); y += 12;
     PT.labels.map(l => ({ l, arr: myShots.filter(p => tagIsSet(p.tags, l)) })).filter(x => x.arr.length >= 4).sort((a, b) => b.arr.length - a.arr.length).slice(0, 12).forEach(({ l, arr }) => {
+      if (y + 19 > H - 40) { newPage("Contested and uncontested shooting (cont.)", "From Scouting Observation: shots tagged Open versus all other shots (contested or turnover-prone)"); y = 92; }
       const g = grp(arr); const gap = g.fgo !== null && g.fgc !== null ? g.fgo - g.fgc : null;
       rect(M, y, W - 2 * M, 17, REP.BG, 3);
       text(l, M + 6, y + 12, { size: 8.5, maxW: 150 }); text(g.n, M + 170, y + 12, { size: 8.5, align: "right" });
@@ -18385,23 +18476,25 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
       text(gap === null ? "–" : (gap > 0 ? "-" : "+") + Math.abs(gap).toFixed(0) + " pts", W - M - 8, y + 12, { size: 8.5, bold: true, align: "right" });
       y += 19;
     });
+    currentY = y;
   }
 
   // 15-16 — joueurs (FFBB) : stats individuelles + points générés, puis fiches scoring
-  newPage("Individual stats and points created", "Regular season averages from the FFBB (Sync roster) · points created = points + points off assists (LiveStats)");
+  let yFF0 = sectionStart("Individual stats and points created", "Regular season averages from the FFBB (Sync roster) · points created = points + points off assists (LiveStats)", 260);
   if (!FF.length) {
-    text("No FFBB player stats for this team yet (Scouting Report › Individual › Sync roster).", M, 100, { size: 10, color: REP.MUTE });
+    text("No FFBB player stats for this team yet (Scouting Report › Individual › Sync roster).", M, yFF0 + 8, { size: 10, color: REP.MUTE });
+    currentY = yFF0 + 24;
   } else {
     const hdr = [["Player", M + 6, "left"], ["GP", M + 150, "right"], ["MIN", M + 190, "right"], ["PTS", M + 228, "right"], ["REB", M + 266, "right"], ["AST", M + 304, "right"], ["STL", M + 342, "right"], ["TO", M + 378, "right"], ["FG%", M + 418, "right"], ["3P%", M + 458, "right"], ["FT%", M + 496, "right"]];
-    hdr.forEach(([h, x, al]) => text(h, x, 92, { size: 7, color: REP.MUTE, align: al }));
+    hdr.forEach(([h, x, al]) => text(h, x, yFF0, { size: 7, color: REP.MUTE, align: al }));
     const pc = (m, a) => (a > 0 ? (100 * m / a).toFixed(0) + "%" : "–");
     FF.slice(0, 12).forEach(({ fp, st: s }, i) => {
-      const y = 98 + i * 19;
+      const y = yFF0 + 6 + i * 19;
       rect(M, y, W - 2 * M, 17, REP.BG, 3);
       const vals = [fp.name, s.mj ?? "–", (s.min ?? 0).toFixed(1), (s.pts ?? 0).toFixed(1), (s.reb ?? 0).toFixed(1), (s.ast ?? 0).toFixed(1), (s.stl ?? 0).toFixed(1), (s.tov ?? 0).toFixed(1), pc(s.r2 + s.r3, s.t2 + s.t3), pc(s.r3, s.t3), pc(s.lfr, s.lft)];
       vals.forEach((v, j) => text(v, hdr[j][1], y + 12, { size: 8, bold: j === 0 || j === 3, align: hdr[j][2], maxW: j === 0 ? 140 : undefined }));
     });
-    let y = 98 + Math.min(12, FF.length) * 19 + 26;
+    let y = yFF0 + 6 + Math.min(12, FF.length) * 19 + 26;
     text("POINTS CREATED PER GAME", M, y, { size: 8, bold: true, color: REP.OR }); y += 8;
     const cr = FF.slice(0, 10).map(({ fp, st: s }) => {
       const li = LS ? LS.impact.find(i => repNameMatch(fp.name, i.name)) : null;
@@ -18416,6 +18509,7 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
     });
     rect(M + 110, y + cr.length * 19 + 6, 8, 8, REP.OR, 1); text("Points", M + 122, y + cr.length * 19 + 13, { size: 7 });
     rect(M + 170, y + cr.length * 19 + 6, 8, 8, REP.GREY, 1); text("Points off assists (LiveStats; ≈ 2 × AST if player not found)", M + 182, y + cr.length * 19 + 13, { size: 7 });
+    currentY = y + cr.length * 19 + 20;
   }
 
   {
@@ -18426,9 +18520,10 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
     const myPlaysAll = (PT.myPlays || []).filter(isOffense);
     const sortedPT = ptList("off"), topS = new Set(sortedPT.slice(0, 3).map(x => x.label)), botS = new Set(sortedPT.slice(-3).map(x => x.label));
     const cw2 = (W - 2 * M - 14) / 2, ch2 = 270; // agrandi : la carte de tir (chartW ~ cw2*0.52) prend plus de place que les 230pt d'origine
-    for (let pg = 0; pg < Math.max(1, Math.ceil(cardPlayers.length / perPage)); pg++) {
+    const scPages = Math.max(1, Math.ceil(cardPlayers.length / perPage));
+    for (let pg = 0; pg < scPages; pg++) {
       newPage(scTitle, scSub);
-      if (!cardPlayers.length) { text("No FFBB player stats for this team yet.", M, 100, { size: 10, color: REP.MUTE }); break; }
+      if (!cardPlayers.length) { text("No FFBB player stats for this team yet.", M, 100, { size: 10, color: REP.MUTE }); currentY = 130; break; }
       const pagePlayers = cardPlayers.slice(pg * perPage, pg * perPage + perPage);
       for (let i = 0; i < pagePlayers.length; i++) {
       const { fp, st: s } = pagePlayers[i];
@@ -18490,6 +18585,9 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
         text(`${l} ${(100 * v / pt).toFixed(0)}%`, lx + 8, y + 245.5, { size: 5.5, color: REP.MUTE });
       });
       }
+      // Grille à coordonnées fixes (2 colonnes x ch2) : currentY = bas de la dernière rangée
+      // utilisée sur cette page, pour permettre l'enchaînement de la section suivante.
+      currentY = 88 + Math.ceil(pagePlayers.length / 2) * (ch2 + 8);
     }
   }
 
@@ -18498,35 +18596,54 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
   // redessinée à la main. scoutShots est capturé en amont (depuis le conteneur hors écran
   // #scouting-print-content), car cette fonction n'a pas accès au DOM/arbre React elle-même.
   if (scoutShots.length) {
-    const perPage = 2, gap = 14;
-    const maxH = (H - 100 - 40 - gap) / perPage;
-    const sw = Math.min(W - 2 * M, maxH / Math.max(...scoutShots.map(s => s.ratio)));
-    for (let pg = 0; pg < Math.ceil(scoutShots.length / perPage); pg++) {
-      newPage(`Individual scouting sheets (${pg + 1}/${Math.ceil(scoutShots.length / perPage)})`, "From Scouting Report › Individual — exact on-screen cards");
-      let y = 92;
-      scoutShots.slice(pg * perPage, pg * perPage + perPage).forEach(sh => {
-        const sh2 = sh.ratio * sw;
-        doc.addImage(sh.img, "JPEG", M + (W - 2 * M - sw) / 2, y, sw, sh2);
-        y += sh2 + gap;
+    // Demandé par l'utilisateur (export 32 pages, trop long) : ces fiches passent d'1 colonne
+    // (2 fiches/page, chacune ne remplissant qu'une fraction de la largeur de page) à une grille
+    // 2x3 (6 fiches/page) — chaque fiche garde SES propres proportions (jamais déformée, juste
+    // réduite pour tenir dans sa case), seule la place qui lui est allouée change. Les fiches sont
+    // plus larges que hautes : la largeur de case (2 colonnes) limite déjà leur taille avant la
+    // hauteur, donc passer de 2 à 3 lignes ne les réduit pas davantage, ça comble juste le vide
+    // sous chaque rangée. Pour 13 joueurs : 7 pages (2/page) -> 3 pages (6/page).
+    const cols4 = 2, rows4 = 3, perPage = cols4 * rows4, gap = 10;
+    const cellW = (W - 2 * M - (cols4 - 1) * gap) / cols4;
+    const cellH = (H - 100 - 30 - (rows4 - 1) * gap) / rows4;
+    const shPages = Math.ceil(scoutShots.length / perPage);
+    for (let pg = 0; pg < shPages; pg++) {
+      newPage(`Individual scouting sheets (${pg + 1}/${shPages})`, "From Scouting Report › Individual — exact on-screen cards");
+      const pageShots = scoutShots.slice(pg * perPage, pg * perPage + perPage);
+      pageShots.forEach((sh, i) => {
+        const col = i % cols4, row = Math.floor(i / cols4);
+        const cx = M + col * (cellW + gap), cy = 92 + row * (cellH + gap);
+        let iw = cellW, ih = iw * sh.ratio;
+        if (ih > cellH) { ih = cellH; iw = ih / sh.ratio; }
+        doc.addImage(sh.img, "JPEG", cx + (cellW - iw) / 2, cy + (cellH - ih) / 2, iw, ih);
       });
+      // Grille à coordonnées fixes (3 rangées) : currentY = bas de la dernière rangée utilisée
+      // sur cette page, pour l'enchaînement de la section suivante.
+      const rowsUsed = Math.max(1, Math.ceil(pageShots.length / cols4));
+      currentY = 92 + (rowsUsed - 1) * (cellH + gap) + cellH;
     }
   }
 
   // 17 — plays les plus fréquents / efficaces, avec leur dessin du Playbook
-  newPage("Most frequent and most efficient plays", "5 most frequent + 5 most efficient · linked to their Playbook diagram (manual link takes priority over name match)");
+  // minRoom élevé (770) : cette section a presque toujours besoin d'une page quasi entière
+  // (jusqu'à 5 cartes de 134pt par colonne), donc l'enchaînement ne se fait que si l'équipe a
+  // peu de plays codés.
+  let yMFE0 = sectionStart("Most frequent and most efficient plays", "5 most frequent + 5 most efficient · linked to their Playbook diagram (manual link takes priority over name match)", 770);
   const { playStats } = D;
   if (!playStats.length) {
-    text("No play coded for this team in Scouting Observation yet.", M, 100, { size: 10, color: REP.MUTE });
+    text("No play coded for this team in Scouting Observation yet.", M, yMFE0 + 8, { size: 10, color: REP.MUTE });
+    currentY = yMFE0 + 24;
   } else {
     const allPlays = await loadPlaybookPlays(teamName);
     const playLinks = await loadScoutingPlayLinks(teamName);
     const cols2 = [["MOST FREQUENT", [...playStats].sort((a, b) => b.n - a.n).slice(0, 5), REP.OR], ["MOST EFFICIENT", [...playStats].filter(x => x.n >= 3).sort((a, b) => b.ppp - a.ppp).slice(0, 5), REP.GRN]];
     const cw3 = (W - 2 * M - 14) / 2;
+    let mfeMaxY = yMFE0 + 8;
     for (let ci = 0; ci < 2; ci++) {
       const [ttl, list, c] = cols2[ci]; const x = M + ci * (cw3 + 14);
-      text(ttl, x, 92, { size: 8, bold: true, color: c });
+      text(ttl, x, yMFE0, { size: 8, bold: true, color: c });
       for (let i = 0; i < list.length; i++) {
-        const it = list[i], y = 100 + i * 134;
+        const it = list[i], y = yMFE0 + 8 + i * 134;
         rect(x, y, cw3, 126, REP.BG, 8);
         text(it.label, x + 10, y + 15, { size: 8.5, bold: true, maxW: cw3 - 20 });
         const pl2 = resolveScoutingPlayDiagram(it.label, allPlays, playLinks);
@@ -18556,12 +18673,14 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
         if (!drawn) { rect(boxX, boxY, boxS, boxS, REP.GREY, 4); text("No diagram linked", x + cw3 / 2, boxY + boxS / 2 + 3, { size: 6.5, color: REP.MUTE, align: "center" }); }
         rect(x + 10, y + 98, 60, 18, c, 4); text(`${it.ppp.toFixed(2)} PPP`, x + 40, y + 110, { size: 8, bold: true, color: REP.WHITE, align: "center" });
         text(`${it.n} possessions · ${it.freq.toFixed(0)}%`, x + 78, y + 110, { size: 7.5, color: REP.MUTE });
+        mfeMaxY = Math.max(mfeMaxY, y + 134);
       }
     }
+    currentY = mfeMaxY;
   }
 
   // 18 — synthèse (clés du match)
-  newPage("Keys to the game", "Auto-generated summary of this report");
+  let yKG0 = sectionStart("Keys to the game", "Auto-generated summary of this report", 400);
   const keys = [];
   if (PT.own && ptMine) {
     const cmp = (A, B) => PT.labels.filter(l => A[l] && B[l]).map(l => ({ l, avg: (A[l].ppp + B[l].ppp) / 2 })).sort((p, q) => q.avg - p.avg);
@@ -18583,17 +18702,20 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
   if (myShots.length && CS.all.fgo !== null && CS.all.fgc !== null) keys.push(["CONTEST", REP.RED, "Contest their shots", `They shoot ${CS.all.fgo.toFixed(0)}% on open shots and ${CS.all.fgc.toFixed(0)}% when contested: force tough shots.`]);
   const sdMe = st.find(r => r.name === teamName);
   const kp = [["STANDING", sdMe ? `${st.indexOf(sdMe) + 1}${[, "st", "nd", "rd"][(st.indexOf(sdMe) + 1) % 10 > 3 || Math.floor((st.indexOf(sdMe) + 1) / 10) === 1 ? 0 : (st.indexOf(sdMe) + 1) % 10] || "th"}` : "–"], ["RECORD", sdMe ? `${sdMe.w} W - ${sdMe.l} L` : "–"], ["NET RATING", t.stats.nrtg != null ? (t.stats.nrtg > 0 ? "+" : "") + t.stats.nrtg.toFixed(1) : "–"], ["PACE", t.stats.poss != null ? t.stats.poss.toFixed(1) : "–"]];
-  kp.forEach(([l, v], i) => { const x = M + i * ((W - 2 * M) / 4); rect(x, 86, (W - 2 * M) / 4 - 8, 52, REP.BG, 8); rect(x, 86, 4, 52, REP.OR, 2); text(l, x + 12, 102, { size: 6.5, bold: true, color: REP.MUTE }); text(v, x + 12, 126, { size: 15, bold: true }); });
-  text("THE KEYS TO THE GAME", M, 168, { size: 9, bold: true, color: REP.OR });
+  // Décalage conservé proportionnel à yKG0 (92 = position "page neuve") pour que tout le bloc
+  // garde ses proportions d'origine, qu'il démarre une page neuve ou s'enchaîne sur la précédente.
+  const kgOff = yKG0 - 92;
+  kp.forEach(([l, v], i) => { const x = M + i * ((W - 2 * M) / 4); rect(x, 86 + kgOff, (W - 2 * M) / 4 - 8, 52, REP.BG, 8); rect(x, 86 + kgOff, 4, 52, REP.OR, 2); text(l, x + 12, 102 + kgOff, { size: 6.5, bold: true, color: REP.MUTE }); text(v, x + 12, 126 + kgOff, { size: 15, bold: true }); });
+  text("THE KEYS TO THE GAME", M, 168 + kgOff, { size: 9, bold: true, color: REP.OR });
   keys.slice(0, 6).forEach(([tag, c, ttl, body], i) => {
-    const y = 178 + i * 76;
+    const y = 178 + kgOff + i * 76;
     rect(M, y, W - 2 * M, 68, REP.BG, 8); rect(M, y, 5, 68, c, 2);
     rect(M + 16, y + 14, 22, 22, c, 11); text(String(i + 1), M + 27, y + 29, { size: 11, bold: true, color: REP.WHITE, align: "center" });
     text(tag, M + 50, y + 18, { size: 6.5, bold: true, color: c });
     text(ttl, M + 50, y + 33, { size: 11, bold: true, maxW: W - 2 * M - 70 });
     text(body, M + 50, y + 49, { size: 8.5, color: REP.MUTE, maxW: W - 2 * M - 70 });
   });
-  if (!keys.length) text("Not enough data yet to generate keys (import observation files and LiveStats games).", M, 190, { size: 10, color: REP.MUTE });
+  if (!keys.length) text("Not enough data yet to generate keys (import observation files and LiveStats games).", M, 190 + kgOff, { size: 10, color: REP.MUTE });
   text("Thank you and good game.", W / 2, H - 52, { size: 11, bold: true, color: REP.OR, align: "center" });
   text(`${ourName} staff · NM1 · HoopTrack · auto-generated from FFBB stats, LiveStats and Scouting Observation`, W / 2, H - 38, { size: 7, color: REP.MUTE, align: "center" });
 
