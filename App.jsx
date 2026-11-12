@@ -5037,7 +5037,10 @@ function shootingSelection(plays, cats) {
 
 // Demandé par l'utilisateur : le site ne tient PAS compte des accents ("Clément" = "Clement"),
 // car un même joueur peut être écrit avec ou sans accent d'un fichier de codage à l'autre.
-function normTag(s) { return String(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[\s\-_]/g, ""); }
+// BUG R\u00c9EL CORRIG\u00c9 (signal\u00e9 par l'utilisateur : "Tarbes/Lourdes" dans le fichier SportsCode vs
+// "Tarbes Lourdes" tap\u00e9 dans l'app \u2014 aucune action reconnue comme notre \u00e9quipe) : le "/" n'\u00e9tait
+// pas retir\u00e9 comme le sont d\u00e9j\u00e0 espaces/tirets/underscores, donc la comparaison tol\u00e9rante \u00e9chouait.
+function normTag(s) { return String(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[\s\-_/]/g, ""); }
 
 function tagIsSet(tags, canonicalLabel) {
   const norm = normTag(canonicalLabel);
@@ -16111,11 +16114,11 @@ function drawClone(o) { return JSON.parse(JSON.stringify(o)); }
 // raccordé en douceur aux lignes de coin.
 function drawCourtSvg(p, margin, full) {
   const l = p.line, CH = full ? 940 : 470;
-  // Plus de cadre épais autour du terrain (demandé par l'utilisateur) : seul le contour fin du
-  // terrain reste, toujours dessiné, que le schéma ait des joueurs hors terrain ou non — ça laisse
-  // plus de place au schéma et aux joueurs placés hors terrain (restent entièrement visibles via
-  // l'agrandissement du viewBox géré ailleurs par drawVB/margin, indépendant de ce contour).
-  const court = `<rect x="1" y="1" width="498" height="${CH - 1}" fill="none" stroke="${l}" stroke-width="2"/>`;
+  // Export : le cadre épais est dessiné DANS le schéma (et non en bordure CSS, qui se rendait de façon
+  // inégale selon les côtés dans le PDF : trait plus épais en haut et à gauche).
+  const x0 = margin ? -DRAW_SIDE : 0, y0 = margin ? -DRAW_TOP : 0, w = margin ? 500 + 2 * DRAW_SIDE : 500, h = margin ? CH + DRAW_TOP + DRAW_BOT : CH, T = 7;
+  const frame = p.big ? `<rect x="${x0 + T / 2}" y="${y0 + T / 2}" width="${w - T}" height="${h - T}" fill="none" stroke="${l}" stroke-width="${T}"/>` : "";
+  const court = (p.big && !margin) ? "" : `<rect x="1" y="1" width="498" height="${CH - 1}" fill="none" stroke="${l}" stroke-width="2"/>`;
   const half =
     `<rect x="168" y="1" width="164" height="192" fill="none" stroke="${l}" stroke-width="1.5"/>` +
     `<path d="M190 193 A60 60 0 0 0 310 193" fill="none" stroke="${l}" stroke-width="1.5"/>` +
@@ -16127,7 +16130,7 @@ function drawCourtSvg(p, margin, full) {
     `<path d="M190 470 A60 60 0 0 1 310 470" fill="none" stroke="${l}" stroke-width="1.5"/>`;
   // terrain entier : 2e moitié = symétrie verticale de la première + ligne médiane
   const second = full ? `<g transform="translate(0 940) scale(1 -1)">${half}</g><line x1="0" y1="470" x2="500" y2="470" stroke="${l}" stroke-width="1.5"/>` : "";
-  return `<rect x="-80" y="-80" width="660" height="${CH + 160}" fill="${p.court}"/>` + court + half + second;
+  return `<rect x="-80" y="-80" width="660" height="${CH + 160}" fill="${p.court}"/>` + court + half + second + frame;
 }
 
 // Géométrie des lignes : suite de points ; chaque point intermédiaire est soit un angle franc, soit
