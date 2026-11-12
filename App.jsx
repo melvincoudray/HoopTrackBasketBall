@@ -5829,7 +5829,13 @@ function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true
   const offShotTime = useMemo(() => categoryBreakdown(off, shotTimeLabels).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open, tov: g.tov })), [off, shotTimeLabels]);
   const defShotTime = useMemo(() => categoryBreakdown(def, shotTimeLabels).sort((a, b) => b.count - a.count).map(g => ({ name: g.label, value: g.count, freq: g.freq, pppp: g.pppp, open: g.open, tov: g.tov })), [def, shotTimeLabels]);
 
-  if (!off.length && !def.length) return <EmptyState text="No action coded yet (Import Match tab)." />;
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : en cliquant "Right"/"Left" dans le filtre Main,
+  // impossible de revenir à "All" sans quitter puis rouvrir la page) : ce garde-fou testait
+  // "off"/"def" DÉJÀ filtrés par la main — dès que le filtre ne trouvait aucune action pour cette
+  // main, TOUT le composant (y compris les boutons du filtre Main lui-même) disparaissait derrière
+  // ce message, sans aucun moyen de recliquer "All". On teste maintenant les données AVANT filtre
+  // (offAll/defAll) : seule une fiche vraiment sans aucune action coded bascule sur ce message.
+  if (!offAll.length && !defAll.length) return <EmptyState text="No action coded yet (Import Match tab)." />;
 
   // Construit la liste des cartes unifiées (donut + efficacité) d'un côté donné, dans le même
   // ordre qu'avant (Plays, Shooting Selection/Playtypes, Screen defense, Spacing, catégories
@@ -5938,8 +5944,18 @@ function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true
             <button type="button" onClick={() => setSide("off")} style={{ flex: 1, background: side === "off" ? AMBER : "transparent", color: side === "off" ? INK : "#AEB5BF", border: "none", borderRadius: 9, padding: 9, cursor: "pointer", fontSize: 13, fontWeight: side === "off" ? 800 : 700, fontFamily: "inherit" }}>Offense</button>
             <button type="button" onClick={() => setSide("def")} style={{ flex: 1, background: side === "def" ? AMBER : "transparent", color: side === "def" ? INK : "#AEB5BF", border: "none", borderRadius: 9, padding: 9, cursor: "pointer", fontSize: 13, fontWeight: side === "def" ? 800 : 700, fontFamily: "inherit" }}>Defense</button>
           </div>
-          <SectionTitle eyebrow="Source: coding file" title={side === "off" ? "Offense — how the ball is played" : "Defense — what we defend against"} />
-          {renderCards(side === "off" ? offCards : defCards)}
+          {/* Une fois le filtre Main appliqué, ce côté peut légitimement n'avoir plus aucune
+              action (ex. un joueur qui ne tire jamais de la main gauche) — on affiche alors ce
+              message à la place des cartes, mais les boutons Hand/Offense/Defense ci-dessus
+              restent toujours visibles pour pouvoir revenir sur "All" sans quitter la page. */}
+          {(side === "off" ? off : def).length === 0 ? (
+            <EmptyState text="No action coded with this hand filter." />
+          ) : (
+            <>
+              <SectionTitle eyebrow="Source: coding file" title={side === "off" ? "Offense — how the ball is played" : "Defense — what we defend against"} />
+              {renderCards(side === "off" ? offCards : defCards)}
+            </>
+          )}
         </>
       )}
 
@@ -20281,8 +20297,16 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
     for (const p of def) if (p.player) set.add(p.player);
     return [...set].sort((a, b) => a.localeCompare(b, "fr"));
   }, [off, def]);
-  const undecidedCount = allTags.filter(t => !(t in tagMap)).length;
-  const confirmedTags = useMemo(() => new Set(allTags.filter(t => tagMap[t] === true)), [allTags, tagMap]);
+  // Demandé par l'utilisateur : ne plus obliger le coach à cocher un par un les joueurs tagués —
+  // un tag qui correspond déjà (par nom/numéro) à une fiche créée dans Scouting Report →
+  // Individual pour CETTE équipe est maintenant reconnu automatiquement comme lui appartenant,
+  // sans aucune action manuelle. La case à cocher reste disponible seulement pour les cas
+  // ambigus que l'automatique ne peut pas trancher (ex. un même numéro de maillot existe des
+  // deux côtés — voir le commentaire sur useObservationPlayerTagMap) : le coach peut toujours
+  // décocher un tag auto-reconnu à tort, ou en cocher un qui n'a trouvé aucune fiche.
+  const autoMatchedTags = useMemo(() => new Set(allTags.filter(t => players.some(p => matchesScoutingPlayer(t, p)))), [allTags, players]);
+  const undecidedCount = allTags.filter(t => !(t in tagMap) && !autoMatchedTags.has(t)).length;
+  const confirmedTags = useMemo(() => new Set(allTags.filter(t => tagMap[t] === true || (tagMap[t] !== false && autoMatchedTags.has(t)))), [allTags, tagMap, autoMatchedTags]);
   const confirmedNorm = useMemo(() => new Set([...confirmedTags].map(normTag)), [confirmedTags]);
   const matched = players.filter(p => p.ffbbStats || scoutingPlayerNameCandidates(p).some(c => confirmedNorm.has(c)));
   // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : écran blanc à l'ouverture de Scouting →
@@ -20324,8 +20348,8 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
         <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 10, padding: 14, marginBottom: 16 }}>
           <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 8 }}>
             <div style={{ fontSize: 12.5, color: "#D8DCE2" }}>
-              Which of these tagged players belong to <b>{teamName}</b> (not the opposing team)?
-              {undecidedCount > 0 && <span style={{ color: AMBER }}> · {undecidedCount} new tag{undecidedCount !== 1 ? "s" : ""} to review</span>}
+              Tagged players matching a Scouting Individual profile for <b>{teamName}</b> are linked automatically.
+              {undecidedCount > 0 && <span style={{ color: AMBER }}> · {undecidedCount} tag{undecidedCount !== 1 ? "s" : ""} need{undecidedCount === 1 ? "s" : ""} review</span>}
             </div>
             <button onClick={() => setShowConfirm(s => !s)} style={{ background: "none", border: "none", color: AMBER, cursor: "pointer", fontSize: 12.5, fontFamily: "inherit" }}>
               {showConfirm ? "Hide" : "Review"}
@@ -20333,13 +20357,18 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
           </div>
           {showConfirm && (
             <div style={{ display: "flex", flexWrap: "wrap", gap: 10, marginTop: 12 }}>
-              {allTags.map(tag => (
-                <label key={tag} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", background: PANEL2, border: `1px solid ${tagMap[tag] === true ? TEAL : LINE}`, borderRadius: 8, fontSize: 12.5, color: "#D8DCE2", cursor: "pointer", fontFamily: "inherit" }}>
-                  <input type="checkbox" checked={tagMap[tag] === true} onChange={e => setTagDecision(tag, e.target.checked)} />
-                  {tag}
-                  {!(tag in tagMap) && <span style={{ fontSize: 10, color: AMBER }}>new</span>}
-                </label>
-              ))}
+              {allTags.map(tag => {
+                const checked = tagMap[tag] === true || (tagMap[tag] !== false && autoMatchedTags.has(tag));
+                return (
+                  <label key={tag} style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", background: PANEL2, border: `1px solid ${checked ? TEAL : LINE}`, borderRadius: 8, fontSize: 12.5, color: "#D8DCE2", cursor: "pointer", fontFamily: "inherit" }}>
+                    <input type="checkbox" checked={checked} onChange={e => setTagDecision(tag, e.target.checked)} />
+                    {tag}
+                    {!(tag in tagMap) && (autoMatchedTags.has(tag)
+                      ? <span style={{ fontSize: 10, color: TEAL }}>auto</span>
+                      : <span style={{ fontSize: 10, color: AMBER }}>new</span>)}
+                  </label>
+                );
+              })}
             </div>
           )}
         </div>
@@ -20604,7 +20633,25 @@ function useAllObservations(matchFilter, side = "off") {
         const plays = observationIncludedPlays(team).filter(keep);
         let tagMap = {};
         try { tagMap = (await storeGet("scouting_observation_player_tags:" + name)) || {}; } catch (e) { /* non bloquant */ }
-        const confirmed = new Set(Object.entries(tagMap).filter(([, v]) => v === true).map(([k]) => k));
+        // Même auto-reconnaissance que dans ObservationPlayerStrip (voir plus haut) : un tag qui
+        // correspond déjà à une fiche Scouting Individual de cette équipe compte comme confirmé
+        // ici aussi, sans revalidation manuelle — pour que les classements (Rankings) restent
+        // cohérents avec ce qui s'affiche dans Observation.
+        let scoutingPlayersForTeam = [];
+        try {
+          const teamNames = (await storeGet("scouting_teams")) || [];
+          const matchKeyName = teamNames.find(n => normTag(n) === normTag(name));
+          if (matchKeyName) {
+            const ids = (await storeGet("scouting_players:" + matchKeyName)) || [];
+            for (const id of ids) {
+              const p = await storeGet("scouting_player:" + matchKeyName + ":" + id);
+              if (p) scoutingPlayersForTeam.push(p);
+            }
+          }
+        } catch (e) { /* non bloquant */ }
+        const allTagNames = new Set();
+        plays.forEach(p => { if (p.player) allTagNames.add(p.player); });
+        const confirmed = new Set([...allTagNames].filter(t => tagMap[t] === true || (tagMap[t] !== false && scoutingPlayersForTeam.some(p => matchesScoutingPlayer(t, p)))));
         out[name] = { plays, confirmed };
       }
       // Notre équipe : mêmes calculs, à partir de NOS matchs codés (filtre de saison / de matchs
@@ -20813,7 +20860,7 @@ function ScoutingRankingsTab({ matchFilter }) {
             </select>
           </div>
           {!anyConfirmed ? (
-            <div style={{ color: "#8B93A1", fontSize: 13, lineHeight: 1.5 }}>No tagged player has been confirmed yet. In Observation, open “Which of these tagged players belong to…” for each team and tick the players.</div>
+            <div style={{ color: "#8B93A1", fontSize: 13, lineHeight: 1.5 }}>No tagged player matches a Scouting Individual profile yet. Create player cards under Scouting Report → Individual for the observed team(s), or open “Review” in Observation to confirm a tag by hand.</div>
           ) : rows.length === 0 ? (
             <div style={{ color: "#8B93A1", fontSize: 13 }}>No player reaches {minPoss} actions on “{curLabel}”.</div>
           ) : (
