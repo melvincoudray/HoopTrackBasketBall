@@ -1124,6 +1124,22 @@ async function saveCategoryChartStyles(styles) {
   await storeSet("category_chart_styles", styles);
 }
 
+// Portée choisie pour chaque catégorie PERSONNALISÉE : sur quelles pages elle doit apparaître
+// dans les blocs Attaque/Défense — "players" (fiches joueurs uniquement), "team" (Team Play/
+// Scouting équipe uniquement) ou "both" (les deux, comportement par défaut, inchangé tant que
+// rien n'est choisi ici). Demandé par l'utilisateur pour une catégorie type "Playbook" qui n'a
+// de sens que sur une des deux pages.
+let CATEGORY_SCOPES = null;
+function currentCategoryScopes() { return CATEGORY_SCOPES || {}; }
+function scopeFor(categoryName) { return currentCategoryScopes()[categoryName] || "both"; }
+async function loadCategoryScopes() {
+  CATEGORY_SCOPES = (await storeGet("category_scopes")) || {};
+}
+async function saveCategoryScopes(scopes) {
+  CATEGORY_SCOPES = scopes;
+  await storeSet("category_scopes", scopes);
+}
+
 // Demandé par l'utilisateur : un tag brut de la forme "#14 Antoine Bibolet-Ruche" (numéro de
 // maillot + nom, posé par un groupe SportsCode non reconnu comme joueur, ex. un rôle sans
 // correspondance) est redondant avec les joueurs déjà cochés ailleurs — jamais un vrai tag
@@ -5649,9 +5665,14 @@ function MetricBarList({ title, items, color = AMBER, onItemClick, onPpppClick, 
 // Selection/Screen defense/Spacing reste lisible, au lieu de deux cartes identiques
 // (DonutCard puis MetricBarList) empilées à chaque fois. Le donut lui-même n'a pas changé
 // ("j'aime bien mon donut") : on réutilise DonutChart/DonutLegend tels quels.
-function UnifiedBreakdownCard({ accent, donutTitle, donutData, donutNote, donutUnit, showDonut = true, metricTitle, items, metricColor, onItemClick, onPpppClick, onOpenClick, onTovClick, showMetric = true }) {
+function UnifiedBreakdownCard({ accent, donutTitle, donutData, donutNote, donutUnit, showDonut = true, metricTitle, items, metricColor, onItemClick, onPpppClick, onOpenClick, onTovClick, showMetric = true, showFreq = false }) {
   const hasItems = showMetric && items && items.length > 0;
-  if (!showDonut && !hasItems) return null;
+  // Demandé par l'utilisateur : une catégorie personnalisée (ex. "Playbook") peut choisir
+  // d'afficher UNIQUEMENT un cercle par tag avec son nombre brut d'actions (pas de %, pas de
+  // PPPP/Open/% TOV) — cliquable comme les autres vues pour ouvrir directement les clips de ce
+  // tag. Choix fait dans Settings (voir TagCategoriesSettings, "Chart shown for this category").
+  const hasFreqItems = showFreq && items && items.length > 0;
+  if (!showDonut && !hasItems && !hasFreqItems) return null;
   return (
     <div style={{ background: PANEL, border: `1px solid ${LINE}`, borderRadius: 14, overflow: "hidden", flex: "1 1 320px" }}>
       <div style={{ height: 4, background: accent }} />
@@ -5671,6 +5692,20 @@ function UnifiedBreakdownCard({ accent, donutTitle, donutData, donutNote, donutU
           <div style={showDonut ? { borderTop: `1px solid ${LINE}`, paddingTop: 12 } : undefined}>
             <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 8 }}>{metricTitle}</div>
             <MetricBarList items={items} color={metricColor} onItemClick={onItemClick} onPpppClick={onPpppClick} onOpenClick={onOpenClick} onTovClick={onTovClick} bare />
+          </div>
+        )}
+        {hasFreqItems && (
+          <div>
+            <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>{metricTitle}</div>
+            <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
+              {items.map((it, i) => (
+                <div key={i} onClick={onItemClick ? () => onItemClick(it.name) : undefined} title={onItemClick ? "View video clips for this tag" : undefined}
+                  style={{ width: 64, height: 64, borderRadius: "50%", background: PANEL2, border: `1px solid ${LINE}`, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", cursor: onItemClick ? "pointer" : "default", textAlign: "center", padding: 4 }}>
+                  <div style={{ fontSize: 16, fontWeight: 700, color: metricColor, lineHeight: 1 }}>{it.value ?? 0}</div>
+                  <div style={{ fontSize: 7.5, color: "#8B93A1", lineHeight: 1.15, marginTop: 3, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{it.name}</div>
+                </div>
+              ))}
+            </div>
           </div>
         )}
       </div>
@@ -5738,7 +5773,12 @@ function tagBreakdown(source) {
 // date/adversaire sur ces imports. N'a d'effet que là où l'appelant le passe explicitement —
 // aujourd'hui Team > Team Play, la fiche joueur et Scouting > Observation (voir TeamTab /
 // PlayerDetail / ObservationTab / ScoutingStaffPanel).
-function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true, categories, enableClipExport = false, clipGrouping, topContent, forPrint = false, enableHandFilter = false }) {
+// context ("players" | "team", optionnel) : permet à une catégorie personnalisée configurée
+// avec une portée précise (voir scopeFor/TagCategoriesSettings) de ne s'afficher que sur la
+// fiche joueur, que sur Team Play/Scouting équipe, ou sur les deux ("both", par défaut — aucun
+// filtrage tant que l'appelant ne fournit pas context, donc aucun changement ailleurs, PDF
+// compris, où context n'est pas passé).
+function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true, categories, enableClipExport = false, clipGrouping, topContent, forPrint = false, enableHandFilter = false, context }) {
   // Demandé par l'utilisateur : un seul toggle Attaque/Défense à l'écran plutôt que les deux
   // blocs empilés d'un coup (mêmes graphiques en double, l'un sous l'autre) — pour garder la
   // cohabitation de tous les blocs lisible. En PDF (forPrint), pas de bouton cliquable
@@ -5871,8 +5911,10 @@ function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true
       cards.push({ key: "spacing", accent: next(), donutTitle: "Spacing played on screens", donutData: offSpacing.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No spacing tag detected.", metricTitle: "Efficiency by spacing", items: offSpacing, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       cards.push({ key: "shottime", accent: next(), donutTitle: "Shot time", donutData: offShotTime.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No shot clock value detected.", metricTitle: "Efficiency by shot time", items: offShotTime, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       customOff.filter(c => c.items.length).forEach(c => {
+        const scope = scopeFor(c.name);
+        if (context && scope !== "both" && scope !== context) return;
         const style = chartStyleFor(c.name);
-        cards.push({ key: "custom-off-" + c.name, accent: next(), showDonut: style === "simple" || style === "both", donutTitle: c.name, donutData: c.items.map((it, j) => ({ ...it, color: CHART_COLORS[j % CHART_COLORS.length] })), showMetric: style === "detailed" || style === "both", metricTitle: c.name, items: c.items, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
+        cards.push({ key: "custom-off-" + c.name, accent: next(), showDonut: style === "simple" || style === "both", donutTitle: c.name, donutData: c.items.map((it, j) => ({ ...it, color: CHART_COLORS[j % CHART_COLORS.length] })), showMetric: style === "detailed" || style === "both", showFreq: style === "freq", metricTitle: c.name, items: c.items, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       });
       offSpacingScreenDef.forEach(s => {
         cards.push({
@@ -5891,8 +5933,10 @@ function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true
       cards.push({ key: "spacing", accent: next(), donutTitle: "Spacing faced on screens", donutData: defSpacing.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No spacing tag detected.", metricTitle: "Efficiency by spacing faced", items: defSpacing, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       cards.push({ key: "shottime", accent: next(), donutTitle: "Shot time", donutData: defShotTime.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No shot clock value detected.", metricTitle: "Efficiency by shot time", items: defShotTime, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       customDef.filter(c => c.items.length).forEach(c => {
+        const scope = scopeFor(c.name);
+        if (context && scope !== "both" && scope !== context) return;
         const style = chartStyleFor(c.name);
-        cards.push({ key: "custom-def-" + c.name, accent: next(), showDonut: style === "simple" || style === "both", donutTitle: c.name, donutData: c.items.map((it, j) => ({ ...it, color: CHART_COLORS[j % CHART_COLORS.length] })), showMetric: style === "detailed" || style === "both", metricTitle: c.name, items: c.items, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
+        cards.push({ key: "custom-def-" + c.name, accent: next(), showDonut: style === "simple" || style === "both", donutTitle: c.name, donutData: c.items.map((it, j) => ({ ...it, color: CHART_COLORS[j % CHART_COLORS.length] })), showMetric: style === "detailed" || style === "both", showFreq: style === "freq", metricTitle: c.name, items: c.items, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       });
       defSpacingScreenDef.forEach(s => {
         cards.push({
@@ -7594,6 +7638,7 @@ export default function App() {
     await loadTagCategories();
     await loadObservationTagCategories();
     await loadCategoryChartStyles();
+    await loadCategoryScopes();
     await loadIgnoredTags();
     await loadShotTimeRanges();
     await loadBoxColumnAliases();
@@ -9467,7 +9512,7 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
               {off.length === 0 && def.length === 0 ? (
                 <EmptyState text="No action coded yet (Import Match tab)." />
               ) : (
-                <OffenseDefenseBreakdown off={off} def={def} detailTables={false} />
+                <OffenseDefenseBreakdown off={off} def={def} detailTables={false} context="players" />
               )}
             </>
           )}
@@ -11804,7 +11849,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
               </>
             )}
 
-            <OffenseDefenseBreakdown off={off} def={def} enableClipExport detailTables={false} enableHandFilter />
+            <OffenseDefenseBreakdown off={off} def={def} enableClipExport detailTables={false} enableHandFilter context="players" />
           </>
         )}
 
@@ -20542,7 +20587,7 @@ function ObservationPlayerStrip({ players, off, def, isCoach, categories, clipGr
                 ) : null;
               })()}
               {playerOff.length + playerDef.length > 0
-                ? <OffenseDefenseBreakdown off={playerOff} def={playerDef} categories={categories} enableClipExport clipGrouping={clipGrouping} detailTables={false} enableHandFilter />
+                ? <OffenseDefenseBreakdown off={playerOff} def={playerDef} categories={categories} enableClipExport clipGrouping={clipGrouping} detailTables={false} enableHandFilter context="players" />
                 : <EmptyState text="No tagged action for this player in the observation yet." />}
             </div>
           </div>
@@ -20712,6 +20757,7 @@ function ObservationTeamPanel({ teamName, team, isCoach, onChangeTeam }) {
           clipGrouping={clipGrouping}
           topContent={<ObservationPlayerStrip players={scoutingPlayers} off={off} def={def} isCoach={isCoach} categories={categories} clipGrouping={clipGrouping} teamName={teamName} />}
           detailTables={false}
+          context="team"
         />
       )}
     </>
@@ -22553,6 +22599,10 @@ function TagCategoriesSettings({ roster, title = "Column categories (coding file
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
   const [chartStyles, setChartStyles] = useState(currentCategoryChartStyles());
+  // Portée (joueurs / team / les deux) choisie pour chaque catégorie personnalisée — demandé
+  // par l'utilisateur pour une catégorie type "Playbook" qui n'a de sens que sur une des deux
+  // pages (voir scopeFor/OffenseDefenseBreakdown).
+  const [scopes, setScopes] = useState(currentCategoryScopes());
   const [confirmRemoveCategory, setConfirmRemoveCategory] = useState(null);
 
   const BUILTIN_CATEGORIES = new Set(["Player", "Playtypes", "Plays", "Shot selection", "Defensive mistakes", "Screen defense", "Spacing", "Shot zone", "Results & misc."]);
@@ -22561,6 +22611,11 @@ function TagCategoriesSettings({ roster, title = "Column categories (coding file
     const next = { ...chartStyles, [catName]: style };
     setChartStyles(next);
     await saveCategoryChartStyles(next);
+  }
+  async function setScope(catName, scope) {
+    const next = { ...scopes, [catName]: scope };
+    setScopes(next);
+    await saveCategoryScopes(next);
   }
 
   async function persist(next) {
@@ -22645,13 +22700,24 @@ function TagCategoriesSettings({ roster, title = "Column categories (coding file
             </div>
           </div>
           {!BUILTIN_CATEGORIES.has(catName) && (
-            <div style={{ marginBottom: 12 }}>
-              <label style={labelStyle}>Chart shown for this category</label>
-              <select value={chartStyles[catName] || "detailed"} onChange={e => setChartStyle(catName, e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit", maxWidth: 340 }}>
-                <option value="detailed">Detailed list — frequency, PPP and % open per tag (like Plays)</option>
-                <option value="simple">Simple comparison — a donut comparing the tags to each other (like Shooting Selection)</option>
-                <option value="both">Both — show the donut and the detailed list together</option>
-              </select>
+            <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 12 }}>
+              <div style={{ flex: "1 1 260px" }}>
+                <label style={labelStyle}>Chart shown for this category</label>
+                <select value={chartStyles[catName] || "detailed"} onChange={e => setChartStyle(catName, e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }}>
+                  <option value="detailed">Detailed list — frequency, PPP and % open per tag (like Plays)</option>
+                  <option value="simple">Simple comparison — a donut comparing the tags to each other (like Shooting Selection)</option>
+                  <option value="both">Both — show the donut and the detailed list together</option>
+                  <option value="freq">Frequency circles — just the count per tag, click to view its clips</option>
+                </select>
+              </div>
+              <div style={{ flex: "1 1 220px" }}>
+                <label style={labelStyle}>Shown on</label>
+                <select value={scopes[catName] || "both"} onChange={e => setScope(catName, e.target.value)} style={{ ...inputStyle, letterSpacing: "normal", fontFamily: "inherit" }}>
+                  <option value="both">Both — player pages and Team Play / Scouting team</option>
+                  <option value="players">Players only</option>
+                  <option value="team">Team Play / Scouting team only</option>
+                </select>
+              </div>
             </div>
           )}
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 12 }}>
@@ -24668,7 +24734,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
         )
       )}
 
-      {subtab === "collectif" && (isCoach || v.teamPlay) && <OffenseDefenseBreakdown off={teamOff} def={teamDef} detailTables={false} enableClipExport />}
+      {subtab === "collectif" && (isCoach || v.teamPlay) && <OffenseDefenseBreakdown off={teamOff} def={teamDef} detailTables={false} enableClipExport context="team" />}
 
       {subtab === "avance" && (isCoach || v.advanced) && (
         <>
