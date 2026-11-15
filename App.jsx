@@ -1202,11 +1202,16 @@ async function saveShotTimeRanges(ranges) {
 // Point d'entrée unique utilisé par les deux formats de fichier de coding (.dnk et .SCTimeline)
 // pour classer un tag brut non reconnu comme joueur : mot à ignorer (Settings) → disparaît
 // complètement ; nombre tombant dans une tranche de temps de tir configurée → classé dans sa
-// tranche ; sinon → tag normal, inchangé.
-function classifyRawTagName(rawName) {
+// tranche (seulement si allowShotTime) ; sinon → tag normal, inchangé.
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur : des plays nommés "0" ou "4" n'apparaissaient
+// jamais côté Team Play) : un tag purement numérique était reclassé en temps de tir dès l'import,
+// quel que soit son sens réel — y compris un nom de play qui est juste un chiffre. Le temps de
+// tir n'a de sens que côté Scouting Observation (voir allowShotTime, == unknownColumnDefault
+// === "tag" chez les deux appelants) ; côté Team Play, un tag numérique reste un tag normal.
+function classifyRawTagName(rawName, allowShotTime = true) {
   const trimmed = String(rawName).trim();
   if (currentIgnoredTagsSet().has(normTag(trimmed))) return { kind: "ignore" };
-  if (/^\d+(\.\d+)?$/.test(trimmed)) {
+  if (allowShotTime && /^\d+(\.\d+)?$/.test(trimmed)) {
     const bucket = bucketForShotTime(parseFloat(trimmed));
     if (bucket) return { kind: "shotTime", label: bucket };
   }
@@ -1309,7 +1314,7 @@ async function parseDnkCodingFile(arrayBuffer, cats, unknownColumnDefault = "pla
         // DNK nomme sa catégorie différemment).
         if (playerCategoryIds.has(info.categoryId) || knownPlayers.has(norm)) { flaggedPlayers.push(info.name); continue; }
         if (isJerseyNumberedName(info.name)) continue; // redondant avec les joueurs déjà cochés ailleurs
-        const cls = classifyRawTagName(info.name);
+        const cls = classifyRawTagName(info.name, unknownColumnDefault === "tag");
         if (cls.kind === "ignore") continue;
         if (cls.kind === "shotTime") { tags[cls.label] = 1; continue; }
         tags[cls.name] = 1;
@@ -1437,7 +1442,7 @@ function extractSCLabelTags(labels, knownPlayers, knownTags, unconfirmedTagsSet,
     // Demandé par l'utilisateur : mot à ignorer (Settings) → disparaît complètement (ni tag, ni
     // "non reconnu") ; nombre dans une tranche de temps de tir configurée → classé dans sa
     // tranche au lieu de rester un nombre brut "non reconnu".
-    const cls = classifyRawTagName(tagName);
+    const cls = classifyRawTagName(tagName, unknownColumnDefault === "tag");
     if (cls.kind === "ignore") continue;
     if (cls.kind === "shotTime") { tags[cls.label] = 1; continue; }
     tags[cls.name] = 1;
