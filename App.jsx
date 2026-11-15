@@ -5782,7 +5782,12 @@ function tagBreakdown(source) {
 // fiche joueur, que sur Team Play/Scouting équipe, ou sur les deux ("both", par défaut — aucun
 // filtrage tant que l'appelant ne fournit pas context, donc aucun changement ailleurs, PDF
 // compris, où context n'est pas passé).
-function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true, categories, enableClipExport = false, clipGrouping, topContent, forPrint = false, enableHandFilter = false, context }) {
+// showShotTime (par défaut true) : demandé par l'utilisateur — le "Shot time" (tranches de temps
+// de possession, Settings → Shot time ranges) n'a de sens que côté Scouting Observation (notion
+// liée au temps de tir adverse analysé) ; côté Team Play ("My team"), ça n'intéresse pas le coach
+// et ne faisait que créer de la confusion (une valeur "0" mal comprise). Masqué uniquement aux
+// endroits Team Play ci-dessous — inchangé partout en Scouting.
+function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true, categories, enableClipExport = false, clipGrouping, topContent, forPrint = false, enableHandFilter = false, context, showShotTime = true }) {
   // Demandé par l'utilisateur : un seul toggle Attaque/Défense à l'écran plutôt que les deux
   // blocs empilés d'un coup (mêmes graphiques en double, l'un sous l'autre) — pour garder la
   // cohabitation de tous les blocs lisible. En PDF (forPrint), pas de bouton cliquable
@@ -5913,7 +5918,7 @@ function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true
       cards.push({ key: "shooting", accent: next(), donutTitle: "Shooting Selection", donutData: offShooting, donutNote: "Open/Contested tags not present yet.", metricTitle: "Efficiency by playtype", items: offPlaytypesList, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       cards.push({ key: "screendef", accent: next(), donutTitle: "Screen defense faced (opponent coverage)", donutData: offScreenDef.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No screen coverage tag detected.", metricTitle: "Efficiency by coverage faced", items: offScreenDef, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       cards.push({ key: "spacing", accent: next(), donutTitle: "Spacing played on screens", donutData: offSpacing.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No spacing tag detected.", metricTitle: "Efficiency by spacing", items: offSpacing, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
-      cards.push({ key: "shottime", accent: next(), donutTitle: "Shot time", donutData: offShotTime.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No shot clock value detected.", metricTitle: "Efficiency by shot time", items: offShotTime, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
+      if (showShotTime) cards.push({ key: "shottime", accent: next(), donutTitle: "Shot time", donutData: offShotTime.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No shot clock value detected.", metricTitle: "Efficiency by shot time", items: offShotTime, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       customOff.filter(c => c.items.length).forEach(c => {
         const scope = scopeFor(c.name);
         if (context && scope !== "both" && scope !== context) return;
@@ -5935,7 +5940,7 @@ function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true
       cards.push({ key: "mistakes", accent: next(), donutTitle: "Defensive mistakes", donutData: defMistakes, donutNote: "No defensive mistake tag detected.", metricTitle: "Plays defended — efficiency", items: defPlaysList, metricColor, onItemClick: clipPlay, onPpppClick, onOpenClick, onTovClick });
       cards.push({ key: "screendef", accent: next(), donutTitle: "Screen defense played", donutData: defScreenDef.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No screen coverage tag detected.", metricTitle: "Efficiency by coverage used", items: defScreenDef, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       cards.push({ key: "spacing", accent: next(), donutTitle: "Spacing faced on screens", donutData: defSpacing.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No spacing tag detected.", metricTitle: "Efficiency by spacing faced", items: defSpacing, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
-      cards.push({ key: "shottime", accent: next(), donutTitle: "Shot time", donutData: defShotTime.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No shot clock value detected.", metricTitle: "Efficiency by shot time", items: defShotTime, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
+      if (showShotTime) cards.push({ key: "shottime", accent: next(), donutTitle: "Shot time", donutData: defShotTime.map((d, j) => ({ ...d, color: CHART_COLORS[j % CHART_COLORS.length] })), donutNote: "No shot clock value detected.", metricTitle: "Efficiency by shot time", items: defShotTime, metricColor, onItemClick: clip, onPpppClick, onOpenClick, onTovClick });
       customDef.filter(c => c.items.length).forEach(c => {
         const scope = scopeFor(c.name);
         if (context && scope !== "both" && scope !== context) return;
@@ -9525,7 +9530,7 @@ function HomeTab({ session, isCoach, playerName, allPlays, roster, matchFilter, 
               {off.length === 0 && def.length === 0 ? (
                 <EmptyState text="No action coded yet (Import Match tab)." />
               ) : (
-                <OffenseDefenseBreakdown off={off} def={def} detailTables={false} context="players" />
+                <OffenseDefenseBreakdown off={off} def={def} detailTables={false} context="players" showShotTime={false} />
               )}
             </>
           )}
@@ -11584,7 +11589,7 @@ function PlayerPrintReport({ playerName, position, off, def, box, allBox, roster
       )}
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Offense / Defense</h2>
-      <OffenseDefenseBreakdown off={off} def={def} forPrint detailTables={false} />
+      <OffenseDefenseBreakdown off={off} def={def} forPrint detailTables={false} showShotTime={false} />
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Objectives</h2>
       {(() => {
@@ -11862,7 +11867,7 @@ function PlayerDetail({ playerName, allPlays, roster, onBack, isCoach, matchFilt
               </>
             )}
 
-            <OffenseDefenseBreakdown off={off} def={def} enableClipExport detailTables={false} enableHandFilter context="players" />
+            <OffenseDefenseBreakdown off={off} def={def} enableClipExport detailTables={false} enableHandFilter context="players" showShotTime={false} />
           </>
         )}
 
@@ -23463,7 +23468,7 @@ function TeamPrintReport({ team, rows, otherLabels, advanced, teamOff, teamDef, 
       )}
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Team Play — Offense / Defense</h2>
-      <OffenseDefenseBreakdown off={teamOff} def={teamDef} forPrint detailTables={false} />
+      <OffenseDefenseBreakdown off={teamOff} def={teamDef} forPrint detailTables={false} showShotTime={false} />
 
       <h2 style={{ fontSize: 16, marginTop: 24, marginBottom: 8 }}>Resources</h2>
       {resources.length === 0 ? <p>No resource shared.</p> : (
@@ -24747,7 +24752,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
         )
       )}
 
-      {subtab === "collectif" && (isCoach || v.teamPlay) && <OffenseDefenseBreakdown off={teamOff} def={teamDef} detailTables={false} enableClipExport context="team" />}
+      {subtab === "collectif" && (isCoach || v.teamPlay) && <OffenseDefenseBreakdown off={teamOff} def={teamDef} detailTables={false} enableClipExport context="team" showShotTime={false} />}
 
       {subtab === "avance" && (isCoach || v.advanced) && (
         <>
