@@ -5059,7 +5059,11 @@ function shootingSelection(plays, cats) {
 // BUG R\u00c9EL CORRIG\u00c9 (signal\u00e9 par l'utilisateur : "Tarbes/Lourdes" dans le fichier SportsCode vs
 // "Tarbes Lourdes" tap\u00e9 dans l'app \u2014 aucune action reconnue comme notre \u00e9quipe) : le "/" n'\u00e9tait
 // pas retir\u00e9 comme le sont d\u00e9j\u00e0 espaces/tirets/underscores, donc la comparaison tol\u00e9rante \u00e9chouait.
-function normTag(s) { return String(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[\s\-_/]/g, ""); }
+// Bug corrig\u00e9 (signal\u00e9 par l'utilisateur, ex. "Les Sables d'Olonne" : logo jamais trouv\u00e9) : une
+// apostrophe droite (') et une apostrophe typographique (\u2019, venant souvent d'un import/Excel) ne
+// sont pas le m\u00eame caract\u00e8re, donc deux noms par ailleurs identiques ne matchaient jamais. On les
+// retire maintenant au m\u00eame titre que les espaces/tirets/underscores/slash.
+function normTag(s) { return String(s).normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().replace(/[\s\-_/'\u2019\u2018`\u00b4]/g, ""); }
 
 function tagIsSet(tags, canonicalLabel) {
   const norm = normTag(canonicalLabel);
@@ -7616,6 +7620,15 @@ export default function App() {
     const current = roster.find(p => p.id === id);
     if (current && updates.name && updates.name !== current.name) {
       await migratePlayerRename(current.name, updates.name);
+      // Bug corrigé : la catégorie de tags "Player" (Réglages) est une liste à part du roster,
+      // jamais touchée par le renommage. L'ancien nom y restait pour toujours, en plus du
+      // nouveau, ce qui pouvait créer un joueur "en double" (reconnu comme un nom valide à part)
+      // dès qu'un futur fichier de coding utilisait encore l'ancien nom. On remplace maintenant
+      // l'ancien nom par le nouveau dans cette liste, comme partout ailleurs.
+      const cats = currentTagCategories();
+      const players = (cats["Player"] || []).map(n => n === current.name ? updates.name : n);
+      if (!players.includes(updates.name)) players.push(updates.name);
+      await saveTagCategories({ ...cats, Player: Array.from(new Set(players)) });
     }
     const newRoster = roster.map(p => p.id === id ? { ...p, ...updates } : p);
     await storeSet("roster", newRoster);
