@@ -211,7 +211,7 @@ async function tryExportPdf(elementId, filename, theme = "light", orientation = 
 
     // Repère chaque élément "à ne pas couper" et chaque élément "nouvelle page forcée" AVANT
     // la capture, en pixels DOM relatifs au haut de l'élément exporté.
-    const elTop = el.getBoundingClientRect().top;
+    const elTop = el.getBoundingClientRect().top, elLeft = el.getBoundingClientRect().left;
     const noSplitEls = Array.from(el.querySelectorAll('[data-no-split="true"]')).map(node => {
       const r = node.getBoundingClientRect();
       return { top: r.top - elTop, bottom: r.bottom - elTop };
@@ -220,6 +220,18 @@ async function tryExportPdf(elementId, filename, theme = "light", orientation = 
       const r = node.getBoundingClientRect();
       return { top: r.top - elTop, bottom: r.bottom - elTop };
     });
+    // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : logo de club illisible/pixelisé sur le PDF
+    // Playbook) : toute la page est capturée en UNE seule image JPEG compressée (scale/qualité
+    // volontairement réduits ci-dessus pour le poids du fichier) — un logo détaillé (dégradés,
+    // petit texte) n'a alors que quelques dizaines de pixels réels et devient de la bouillie,
+    // même si le reste (texte, traits de schéma) reste lisible à cette résolution. On repère donc
+    // chaque image marquée data-sharp-image="true" (le logo du Playbook) AVANT la capture, pour
+    // la replacer ensuite par-dessus l'image compressée, à sa résolution native (PNG, sans perte)
+    // — sans toucher au scale/à la qualité JPEG globale qui reste inchangée pour le reste du document.
+    const sharpImgEls = Array.from(el.querySelectorAll('img[data-sharp-image="true"]')).map(node => {
+      const r = node.getBoundingClientRect();
+      return { top: r.top - elTop, bottom: r.bottom - elTop, left: r.left - elLeft, right: r.right - elLeft, src: node.currentSrc || node.src };
+    }).filter(s => s.src && /^data:image\/(png|jpe?g)/.test(s.src));
 
     const canvas = await html2canvas(el, { backgroundColor: bg, scale, useCORS: true });
     const imgData = canvas.toDataURL("image/jpeg", jpegQuality);
@@ -233,6 +245,7 @@ async function tryExportPdf(elementId, filename, theme = "light", orientation = 
     const domToImgRatio = imgWidth / el.getBoundingClientRect().width;
     const noSplitRanges = noSplitEls.map(r => ({ top: r.top * domToImgRatio, bottom: r.bottom * domToImgRatio }));
     const newPageRanges = newPageEls.map(r => ({ top: r.top * domToImgRatio, bottom: r.bottom * domToImgRatio }));
+    const sharpImgRanges = sharpImgEls.map(r => ({ top: r.top * domToImgRatio, bottom: r.bottom * domToImgRatio, left: r.left * domToImgRatio, right: r.right * domToImgRatio, src: r.src }));
 
     const pdf = new jsPDF({ unit: "pt", format: "a4", orientation, compress: true });
     let pageTop = 0; // position (en pt, dans l'image totale) du haut de la page courante
@@ -265,6 +278,15 @@ async function tryExportPdf(elementId, filename, theme = "light", orientation = 
       if (pageBottom < imgHeight - 0.5) {
         pdf.setFillColor(bg);
         pdf.rect(0, pageBottom - pageTop, pageWidth, pageHeight - (pageBottom - pageTop), "F");
+      }
+      // Redessine par-dessus, en pleine qualité, chaque image marquée "sharp" entièrement visible
+      // sur cette page (une image à cheval sur deux pages resterait en qualité compressée, cas
+      // limite non géré ici — un logo de titre tient toujours sur une seule page).
+      for (const r of sharpImgRanges) {
+        if (r.top >= pageTop - 0.5 && r.bottom <= pageBottom + 0.5) {
+          const fmt = /^data:image\/png/.test(r.src) ? "PNG" : "JPEG";
+          pdf.addImage(r.src, fmt, r.left, r.top - pageTop, r.right - r.left, r.bottom - r.top);
+        }
       }
       pageTop = pageBottom;
       firstPage = false;
@@ -5718,13 +5740,20 @@ function UnifiedBreakdownCard({ accent, donutTitle, donutData, donutNote, donutU
           <div>
             <div style={{ fontSize: 11, color: "#5C6470", textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 10 }}>{metricTitle}</div>
             <div style={{ display: "flex", gap: 10, flexWrap: "wrap" }}>
-              {items.map((it, i) => (
-                <div key={i} onClick={onItemClick ? () => onItemClick(it.name) : undefined} title={onItemClick ? "View video clips for this tag" : undefined}
-                  style={{ width: 64, height: 64, borderRadius: "50%", background: PANEL2, border: `1px solid ${LINE}`, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", cursor: onItemClick ? "pointer" : "default", textAlign: "center", padding: 4 }}>
-                  <div style={{ fontSize: 16, fontWeight: 700, color: metricColor, lineHeight: 1 }}>{it.value ?? 0}</div>
-                  <div style={{ fontSize: 7.5, color: "#8B93A1", lineHeight: 1.15, marginTop: 3, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{it.name}</div>
-                </div>
-              ))}
+              {items.map((it, i) => {
+                // Demandé par l'utilisateur ("HYPER moche") : au lieu d'un simple rond gris plat
+                // sans aucune couleur ni légende, chaque badge reprend désormais une couleur de
+                // la palette du donut (même logique que CHART_COLORS pour les autres graphiques),
+                // en liseré coloré autour du cercle — look cohérent avec les cartes voisines.
+                const badgeColor = CHART_COLORS[i % CHART_COLORS.length];
+                return (
+                  <div key={i} onClick={onItemClick ? () => onItemClick(it.name) : undefined} title={onItemClick ? "View video clips for this tag" : undefined}
+                    style={{ width: 64, height: 64, borderRadius: "50%", background: PANEL2, border: `3px solid ${badgeColor}`, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", cursor: onItemClick ? "pointer" : "default", textAlign: "center", padding: 4 }}>
+                    <div className="keep-color" style={{ fontSize: 16, fontWeight: 700, color: badgeColor, lineHeight: 1 }}>{it.value ?? 0}</div>
+                    <div style={{ fontSize: 7.5, color: "#8B93A1", lineHeight: 1.15, marginTop: 3, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" }}>{it.name}</div>
+                  </div>
+                );
+              })}
             </div>
           </div>
         )}
@@ -16451,7 +16480,7 @@ function drawBuildPages(book, title, colsSetting, logoUrl) {
     <div style={{ position: "absolute", left: 45, bottom: 32, fontSize: 13, letterSpacing: "0.08em", color: "#6B7280", fontFamily: "Arial, Helvetica, sans-serif" }}>Made with <b style={{ color: "#1A1D24" }}>HoopTrack</b></div>
     <div style={{ position: "absolute", right: 45, bottom: 30, fontSize: 22 }}>{n}</div>
   </>);
-  const logo = logoUrl ? <img src={logoUrl} alt="" style={{ width: 84, height: 84, objectFit: "contain" }} /> : <div style={{ width: 84, height: 84 }} />;
+  const logo = logoUrl ? <img src={logoUrl} alt="" data-sharp-image="true" style={{ width: 84, height: 84, objectFit: "contain" }} /> : <div style={{ width: 84, height: 84 }} />;
   const pages = [];
 
   for (let tp = 0; tp < tocPages; tp++) {
