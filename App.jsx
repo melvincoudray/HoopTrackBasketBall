@@ -484,7 +484,15 @@ function teamRankBy(byPlayer, getVal, playerName) {
   return { rank: idx + 1, total: entries.length };
 }
 
-function fileToResizedDataURL(file, maxDim = 320, quality = 0.82) {
+// BUG RÉEL CORRIGÉ (signalé par l'utilisateur : logo de club très dégradé) : format toujours
+// "image/jpeg", qui n'a pas de canal alpha — un logo à fond transparent (SVG/PNG) se retrouvait
+// aplati sur un fond NOIR (le canvas part transparent, et toJPEG convertit ce transparent en
+// noir opaque) au lieu d'un fond blanc ou d'une vraie transparence, provoquant un liseré sombre
+// autour des contours. Ajout d'un paramètre "format" (par défaut JPEG inchangé pour tous les
+// usages existants — photos de joueurs/équipe, capture d'écran de stats, etc., qui n'ont pas de
+// transparence à préserver) pour permettre aux appelants concernés (logos de club, voir plus bas)
+// de demander du PNG, qui garde la transparence et n'introduit aucun artefact de compression.
+function fileToResizedDataURL(file, maxDim = 320, quality = 0.82, format = "image/jpeg") {
   return new Promise((resolve, reject) => {
     const img = new Image();
     const reader = new FileReader();
@@ -499,7 +507,7 @@ function fileToResizedDataURL(file, maxDim = 320, quality = 0.82) {
         canvas.width = width; canvas.height = height;
         const ctx = canvas.getContext("2d");
         ctx.drawImage(img, 0, 0, width, height);
-        resolve(canvas.toDataURL("image/jpeg", quality));
+        resolve(canvas.toDataURL(format, quality));
       };
       img.src = reader.result;
     };
@@ -2836,7 +2844,9 @@ async function logoClean(url) {
   const out = await (async () => {
     try {
       const img = await new Promise((res, rej) => { const im = new Image(); im.onload = () => res(im); im.onerror = rej; im.src = url; });
-      const k = Math.min(1, 500 / Math.max(img.naturalWidth, img.naturalHeight));
+      // Plafond relevé de 500 à 700 (voir fileToResizedDataURL, logos désormais importés jusqu'à
+      // 640px) pour ne pas regommer ce gain de netteté ici.
+      const k = Math.min(1, 700 / Math.max(img.naturalWidth, img.naturalHeight));
       const W = Math.max(1, Math.round(img.naturalWidth * k)), H = Math.max(1, Math.round(img.naturalHeight * k));
       const cv = document.createElement("canvas"); cv.width = W; cv.height = H;
       const g = cv.getContext("2d", { willReadFrequently: true }); g.drawImage(img, 0, 0, W, H);
@@ -8526,7 +8536,7 @@ function AdminPanel({ onClose, teams, onTeamsChange }) {
   async function handleNewLogo(e) {
     const file = e.target.files[0];
     if (!file) return;
-    setNewTeamLogo(await fileToResizedDataURL(file, 300, 0.9));
+    setNewTeamLogo(await fileToResizedDataURL(file, 640, 0.9, "image/png")); // résolution relevée + PNG (voir fileToResizedDataURL) : logo bien plus net, notamment sur le PDF Playbook
   }
 
   async function addTeam() {
@@ -8659,7 +8669,7 @@ function TeamAdminCard({ team, expanded, onToggle, confirmDelete, onAskDelete, o
   async function handleLogoChange(e) {
     const file = e.target.files[0];
     if (!file) return;
-    const dataUrl = await fileToResizedDataURL(file, 300, 0.9);
+    const dataUrl = await fileToResizedDataURL(file, 640, 0.9, "image/png"); // résolution relevée + PNG (voir fileToResizedDataURL) : logo bien plus net, notamment sur le PDF Playbook
     onUpdateLogo(dataUrl);
   }
 
@@ -19794,7 +19804,7 @@ function ScoutingReportTab({ isCoach, teamNames, scoutingTeams, onSaveLogo, init
   async function handleLogoUpload(e) {
     const file = e.target.files[0];
     if (!file || !selectedTeam) return;
-    await onSaveLogo(selectedTeam, await fileToResizedDataURL(file, 200, 0.9));
+    await onSaveLogo(selectedTeam, await fileToResizedDataURL(file, 640, 0.9, "image/png")); // résolution relevée + PNG (voir fileToResizedDataURL) : logo bien plus net, notamment sur le PDF Playbook
   }
   async function handleBgUpload(e) {
     const file = e.target.files[0];
@@ -21451,7 +21461,7 @@ function ScoutingTeamRow({ name, team, onSaveLogo, onDelete, onSaveStats }) {
   async function handleLogo(e) {
     const file = e.target.files[0];
     if (!file) return;
-    onSaveLogo(await fileToResizedDataURL(file, 200, 0.9));
+    onSaveLogo(await fileToResizedDataURL(file, 640, 0.9, "image/png")); // résolution relevée + PNG (voir fileToResizedDataURL) : logo bien plus net, notamment sur le PDF Playbook
   }
 
   // Demandé par l'utilisateur : le fichier "Classic" ne fournit pas les points encaissés par
