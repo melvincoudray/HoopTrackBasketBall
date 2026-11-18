@@ -1960,7 +1960,13 @@ const CLIP_VIDEO_CACHE = new Map();
 // "sections" ne contient que les catégories qui ont au moins un item (topBucket) — une
 // catégorie absente du fichier (ex. pas de "PnR Organisation" codé) disparaît silencieusement
 // plutôt que d'afficher un bloc vide.
-function PlayContextPanel({ sections }) {
+// Demandé par l'utilisateur : chaque ligne (Playtypes/PnR Organisation/Screen defense/Spacing)
+// doit être cliquable pour ouvrir les clips de CE tag précis EN PLUS de tous les filtres déjà
+// actifs sur la fenêtre de clips actuelle (triple filtre, ex. Organisation + Couverture +
+// Playtype) — voir onDrillTag, qui empile le nouveau tag sur les filtres déjà actifs au lieu de
+// les remplacer. Sans onDrillTag (autres appelants de ClipExportModal), le panneau reste comme
+// avant, en lecture seule.
+function PlayContextPanel({ sections, onDrillTag }) {
   if (!sections || !sections.length) return null;
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 12, padding: 14, marginBottom: 16, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10 }}>
@@ -1969,19 +1975,23 @@ function PlayContextPanel({ sections }) {
         <div key={s.key}>
           <div style={{ fontSize: 11, fontWeight: 700, color: PAPER, marginBottom: 6 }}>{s.title}</div>
           <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-            {s.items.map((it, i) => (
-              <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12, padding: "4px 0" }}>
-                <div style={{ minWidth: 0, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: PAPER, fontWeight: 600 }}>{it.name}</div>
-                <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <div style={{ width: 44 }}><Bar pct={it.freq} /></div>
-                  <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 11, color: "#8B93A1" }}>{it.freq.toFixed(0)}%</span>
-                </div>
-                <div style={{ flex: 1 }} />
-                <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 11.5, color: AMBER, fontWeight: 700 }} title="Points per possession">PPP {it.pppp !== null && it.pppp !== undefined ? it.pppp.toFixed(2) : "–"}</span>
-                <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 11.5, color: it.open !== null && it.open !== undefined ? TEAL : "#5C6470" }} title="% Open">Open {it.open !== null && it.open !== undefined ? it.open.toFixed(0) + "%" : "–"}</span>
-                <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 11.5, color: it.tov !== null && it.tov !== undefined && it.tov > 0 ? RED : "#5C6470" }} title="% Turnover">TOV {it.tov !== null && it.tov !== undefined ? it.tov.toFixed(0) + "%" : "–"}</span>
-              </div>
-            ))}
+            {s.items.map((it, i) => {
+              const Row = onDrillTag ? "button" : "div";
+              return (
+                <Row key={i} type={onDrillTag ? "button" : undefined} onClick={onDrillTag ? () => onDrillTag(it.name) : undefined} title={onDrillTag ? "View video clips for this tag, combined with the filters already active" : undefined}
+                  style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", fontSize: 12, padding: "4px 0", width: "100%", background: "none", border: "none", font: "inherit", textAlign: "left", cursor: onDrillTag ? "pointer" : "default" }}>
+                  <div style={{ minWidth: 0, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: PAPER, fontWeight: 600 }}>{it.name}</div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <div style={{ width: 44 }}><Bar pct={it.freq} /></div>
+                    <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 11, color: "#8B93A1" }}>{it.freq.toFixed(0)}%</span>
+                  </div>
+                  <div style={{ flex: 1 }} />
+                  <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 11.5, color: AMBER, fontWeight: 700 }} title="Points per possession">PPP {it.pppp !== null && it.pppp !== undefined ? it.pppp.toFixed(2) : "–"}</span>
+                  <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 11.5, color: it.open !== null && it.open !== undefined ? TEAL : "#5C6470" }} title="% Open">Open {it.open !== null && it.open !== undefined ? it.open.toFixed(0) + "%" : "–"}</span>
+                  <span style={{ fontFamily: "ui-monospace, monospace", fontSize: 11.5, color: it.tov !== null && it.tov !== undefined && it.tov > 0 ? RED : "#5C6470" }} title="% Turnover">TOV {it.tov !== null && it.tov !== undefined ? it.tov.toFixed(0) + "%" : "–"}</span>
+                </Row>
+              );
+            })}
           </div>
         </div>
       ))}
@@ -1989,7 +1999,7 @@ function PlayContextPanel({ sections }) {
   );
 }
 
-function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, category, notesScope, playContextCats }) {
+function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, category, notesScope, playContextCats, onDrillTag }) {
   // Voir PlayContextPanel ci-dessus : calculé seulement quand l'appelant fournit playContextCats
   // (uniquement les clics sur un Play, voir OffenseDefenseBreakdown) — jamais ailleurs (clips
   // individuels d'un joueur, Screen Contest…), ces appels ne passant pas cette prop.
@@ -2330,7 +2340,7 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
           Insert the videos you have — you don't need all of them: only the ones you add are cut. Videos you add are remembered until you close or reload the site, so you won't have to add them again. Nothing is uploaded, everything is cut directly in your browser, purely for viewing.
         </p>
 
-        <PlayContextPanel sections={playContext} />
+        <PlayContextPanel sections={playContext} onDrillTag={onDrillTag} />
 
         <div style={{ display: "flex", gap: 10, marginBottom: 16 }}>
           <label style={{ flex: 1, display: "flex", flexDirection: "column", gap: 4, padding: 10, background: PANEL2, border: `1px solid ${cutMode === "precise" ? AMBER : LINE}`, borderRadius: 8, cursor: busy ? "default" : "pointer" }}>
@@ -5955,12 +5965,12 @@ function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true
     const clip = isOff ? clipOff : clipDef;
     // Demandé par l'utilisateur : en cliquant sur un Play précis (ex. "Horns"), la fenêtre de
     // clips doit en plus montrer le contexte de ce Play — ses Playtypes/PnR Organisation/
-    // défenses d'écran les plus fréquents, avec leur rentabilité — jamais sur les autres cartes
-    // (Playtypes, Screen defense…), où ce contexte n'aurait pas de sens (on serait déjà filtré
-    // sur un seul Playtype/une seule couverture). playCtx marque donc UNIQUEMENT les clics
-    // venant de la carte "plays" ci-dessous ; clipModal transporte ce marqueur jusqu'à
-    // ClipExportModal, qui calcule ce contexte seulement quand il est présent.
-    const clipPlay = enableClipExport ? (name) => setClipModal({ name, side: sideKey, playCtx: true }) : undefined;
+    // défenses d'écran les plus fréquents, avec leur rentabilité. Ce contexte s'affiche en
+    // réalité sur TOUTES les fenêtres de clips de cet écran (voir playContextCats plus bas,
+    // toujours transmis) — y compris en cliquant une couverture ou un playtype précis, où il
+    // montre alors le contexte de CETTE combinaison de filtres précise (demandé par
+    // l'utilisateur : ex. les 2 playtypes les plus fréquents sur "Top Pick 1 Man Back" + "Switch").
+    const clipPlay = enableClipExport ? (name) => setClipModal({ name, side: sideKey }) : undefined;
     const onItemClick = enableClipExport ? (name, within) => setClipModal({ name, side: sideKey, within }) : undefined;
     const onPpppClick = isOff ? ppppClickOff : ppppClickDef;
     const onOpenClick = isOff ? openClickOff : openClickDef;
@@ -6094,17 +6104,34 @@ function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true
         />
       )}
 
-      {enableClipExport && clipModal && (
-        <ClipExportModal
-          playName={(clipModal.extraTags && clipModal.extraTags.length ? `${clipModal.name} + (${clipModal.extraTags.join(" / ")})` : clipModal.name) + (clipModal.within ? ` — ${clipModal.within}` : "")}
-          sideLabel={clipModal.side === "off" ? "Offense" : "Defense"}
-          plays={dedupeWholePossessionPlays((clipModal.side === "off" ? off : def).filter(p => tagIsSet(p.tags, clipModal.name) && (!clipModal.within || tagIsSet(p.tags, clipModal.within)) && (!clipModal.extraTags || clipModal.extraTags.length === 0 || clipModal.extraTags.some(t => tagIsSet(p.tags, t)))), clipModal.name)}
-          onClose={() => setClipModal(null)}
-          grouping={clipGrouping}
-          category={clipModal.side === "off" ? "offense" : "defense"}
-          playContextCats={clipModal.playCtx ? cats : undefined}
-        />
-      )}
+      {enableClipExport && clipModal && (() => {
+        // Demandé par l'utilisateur : triple filtre (ex. PnR Organisation + Screen defense +
+        // Playtype) — "within" peut désormais être soit un seul tag (comme avant, ex. le Spacing
+        // des cartes "X — screen defense faced"), soit un tableau de plusieurs tags déjà actifs,
+        // empilés au fil des clics dans le panneau "Play context" (voir onDrillTag ci-dessous).
+        const withinList = Array.isArray(clipModal.within) ? clipModal.within : (clipModal.within ? [clipModal.within] : []);
+        return (
+          <ClipExportModal
+            playName={(clipModal.extraTags && clipModal.extraTags.length ? `${clipModal.name} + (${clipModal.extraTags.join(" / ")})` : clipModal.name) + (withinList.length ? ` — ${withinList.join(" / ")}` : "")}
+            sideLabel={clipModal.side === "off" ? "Offense" : "Defense"}
+            plays={dedupeWholePossessionPlays((clipModal.side === "off" ? off : def).filter(p => tagIsSet(p.tags, clipModal.name) && withinList.every(t => tagIsSet(p.tags, t)) && (!clipModal.extraTags || clipModal.extraTags.length === 0 || clipModal.extraTags.some(t => tagIsSet(p.tags, t)))), clipModal.name)}
+            onClose={() => setClipModal(null)}
+            grouping={clipGrouping}
+            category={clipModal.side === "off" ? "offense" : "defense"}
+            // Demandé par l'utilisateur : le contexte (Playtypes/PnR Organisation/Screen
+            // defense/Spacing les plus fréquents) doit apparaître dans TOUTES les fenêtres de
+            // clips de cet écran, pas seulement en cliquant sur un Play — calculé sur les plays
+            // RÉELLEMENT affichés (déjà filtrés ci-dessus), donc automatiquement spécifique à la
+            // combinaison de filtres déjà active.
+            playContextCats={cats}
+            // Cliquer une ligne du panneau de contexte ouvre une NOUVELLE fenêtre de clips qui
+            // empile ce tag en plus de tous les filtres déjà actifs (le tag actif + son éventuel
+            // "within") — permet d'aller aussi loin qu'on veut (Organisation → Couverture →
+            // Playtype → …), pas seulement deux niveaux.
+            onDrillTag={(name) => setClipModal({ name, side: clipModal.side, within: [clipModal.name, ...withinList] })}
+          />
+        );
+      })()}
     </>
   );
 }
