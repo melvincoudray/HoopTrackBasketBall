@@ -1953,6 +1953,142 @@ function SecondaryTagPickerModal({ name, side, category, cats, onConfirm, onClos
 // Team et Scouting. Rien n'est envoyé nulle part, et tout disparaît au rechargement de la page.
 const CLIP_VIDEO_CACHE = new Map();
 
+// Demandé par l'utilisateur : pouvoir lancer le téléchargement du montage complet (clips
+// individuels d'un joueur, voir downloadFullVideo plus bas) en arrière-plan — naviguer ailleurs
+// sur le site pendant que ça tourne, et enchaîner plusieurs téléchargements à la suite plutôt que
+// de devoir attendre chaque fois la fenêtre ouverte. File d'attente SÉQUENTIELLE (un seul moteur
+// ffmpeg pour tout le site, voir FFMPEG_INSTANCE plus bas — plusieurs à la fois risquerait de
+// saturer mémoire/CPU du navigateur) plutôt qu'en parallèle, comme choisi par l'utilisateur.
+// Visible depuis n'importe quel onglet via <BackgroundJobsTray/> (rendu une fois dans App()),
+// sur le même principe que la cloche de notifications déjà existante (usePushNotifications).
+let FULL_VIDEO_JOBS = [];
+const fullVideoJobListeners = new Set();
+function notifyFullVideoJobs() { fullVideoJobListeners.forEach(fn => fn(FULL_VIDEO_JOBS)); }
+function useFullVideoJobs() {
+  const [jobs, setJobs] = useState(FULL_VIDEO_JOBS);
+  useEffect(() => {
+    fullVideoJobListeners.add(setJobs);
+    return () => fullVideoJobListeners.delete(setJobs);
+  }, []);
+  return jobs;
+}
+function updateFullVideoJob(id, patch) {
+  FULL_VIDEO_JOBS = FULL_VIDEO_JOBS.map(j => (j.id === id ? { ...j, ...patch } : j));
+  notifyFullVideoJobs();
+}
+function removeFullVideoJob(id) {
+  const job = FULL_VIDEO_JOBS.find(j => j.id === id);
+  if (job && job.url) URL.revokeObjectURL(job.url);
+  FULL_VIDEO_JOBS = FULL_VIDEO_JOBS.filter(j => j.id !== id);
+  notifyFullVideoJobs();
+}
+// BUG ÉVITÉ : le nettoyage existant "fenêtre de clips fermée en pleine génération" (voir
+// resetFfmpeg dans le useEffect de ClipExportModal, plus bas) coupe le moteur ffmpeg partagé —
+// sans ce drapeau, fermer une AUTRE fenêtre de clips pendant qu'un téléchargement tourne en
+// arrière-plan interromprait ce téléchargement par erreur, puisque les deux partagent le même
+// moteur (un seul pour tout le site).
+let BACKGROUND_FFMPEG_JOB_ACTIVE = false;
+let fullVideoQueueRunning = false;
+async function runFullVideoQueue() {
+  if (fullVideoQueueRunning) return;
+  fullVideoQueueRunning = true;
+  try {
+    while (true) {
+      const job = FULL_VIDEO_JOBS.find(j => j.status === "waiting");
+      if (!job) break;
+      updateFullVideoJob(job.id, { status: "running" });
+      BACKGROUND_FFMPEG_JOB_ACTIVE = true;
+      try {
+        const blob = await buildFullVideo(job.spec, (progress) => updateFullVideoJob(job.id, { progress }));
+        const url = URL.createObjectURL(blob);
+        updateFullVideoJob(job.id, { status: "done", progress: "", url });
+      } catch (err) {
+        updateFullVideoJob(job.id, { status: "error", progress: "", error: err.message || "Error while preparing the full video." });
+      }
+      BACKGROUND_FFMPEG_JOB_ACTIVE = false;
+    }
+  } finally {
+    fullVideoQueueRunning = false;
+  }
+}
+function enqueueFullVideoJob(label, spec) {
+  const id = "job_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+  FULL_VIDEO_JOBS = [...FULL_VIDEO_JOBS, { id, label, spec, status: "waiting", progress: "", url: null, error: "" }];
+  notifyFullVideoJobs();
+  runFullVideoQueue();
+  return id;
+}
+
+// Demandé par l'utilisateur : indépendante de React — ne lit/écrit que des données figées au
+// moment du clic sur "Download in background" (fichiers vidéo, notes, bornes de chaque clip),
+// jamais un état de composant qui peut avoir disparu si la fenêtre d'où est parti le
+// téléchargement a été refermée entre-temps. Logique identique à downloadFullVideo() (ci-dessous,
+// pour le téléchargement classique au premier plan), seuls les noms de fichiers temporaires
+// changent ("bgfull_" au lieu de "full_") pour ne jamais entrer en collision si les deux tournent
+// au même moment sur le moteur ffmpeg partagé.
+async function buildFullVideo(spec, onProgress) {
+  const ffmpeg = await getFfmpeg();
+  onProgress("Loading the overlay font…");
+  await ffmpeg.writeFile("overlay_font.ttf", Uint8Array.from(atob(OVERLAY_FONT_B64), ch => ch.charCodeAt(0)));
+
+  const concatLines = [];
+  for (let i = 0; i < spec.clips.length; i++) {
+    const c = spec.clips[i];
+    onProgress(`Preparing clip ${i + 1}/${spec.clips.length}…`);
+    if (!c.file) throw new Error(`Re-add the video for "${c.label}" above before downloading the full video.`);
+    const videoMount = await mountVideoForFfmpeg(ffmpeg, c.file, "bgfull" + i);
+    const dur = Math.max(0.1, c.end - c.start);
+    const outName = `bgfull_${i}.mp4`;
+    const note = (c.note || "").trim();
+    // Échappement requis par le filtre "drawtext" de ffmpeg (texte entre guillemets simples).
+    const escaped = note.replace(/\\/g, "\\\\").replace(/:/g, "\\:").replace(/'/g, "\\'");
+    const vf = "scale=1280:720:force_original_aspect_ratio=decrease,pad=1280:720:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30"
+      + (note ? `,drawtext=fontfile=overlay_font.ttf:text='${escaped}':x=24:y=24:fontsize=28:fontcolor=black:box=1:boxcolor=white@0.6:boxborderw=8` : "");
+    await ffmpeg.exec(["-ss", String(c.start), "-i", videoMount.path, "-t", String(dur), "-vf", vf, "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", "-ar", "44100", "-ac", "2", outName]);
+    await unmountVideoForFfmpeg(ffmpeg, videoMount.dir);
+    concatLines.push(`file '${outName}'`);
+  }
+  onProgress("Assembling the full video…");
+  await ffmpeg.writeFile("bgfull_concat.txt", concatLines.join("\n"));
+  try { await ffmpeg.deleteFile("bgfull_output.mp4"); } catch (e) {}
+  await ffmpeg.exec(["-f", "concat", "-safe", "0", "-i", "bgfull_concat.txt", "-c", "copy", "bgfull_output.mp4"]);
+  const data = await ffmpeg.readFile("bgfull_output.mp4");
+  const blob = new Blob([data.buffer], { type: "video/mp4" });
+  for (let i = 0; i < spec.clips.length; i++) { try { await ffmpeg.deleteFile(`bgfull_${i}.mp4`); } catch (e) {} }
+  try { await ffmpeg.deleteFile("bgfull_concat.txt"); } catch (e) {}
+  try { await ffmpeg.deleteFile("bgfull_output.mp4"); } catch (e) {}
+  return blob;
+}
+
+// Demandé par l'utilisateur : voir où en sont les téléchargements de montage complet lancés en
+// arrière-plan, depuis n'importe quel onglet du site (comme la cloche de notifications dans
+// TopBar) — pas seulement depuis la fenêtre de clips qui a lancé le téléchargement, qui peut déjà
+// avoir été refermée.
+function BackgroundJobsTray() {
+  const jobs = useFullVideoJobs();
+  if (!jobs.length) return null;
+  return (
+    <div style={{ position: "fixed", right: 16, bottom: 16, zIndex: 999, display: "flex", flexDirection: "column", gap: 8, maxWidth: 320 }}>
+      {jobs.map(job => (
+        <div key={job.id} style={{ background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, padding: "10px 12px", boxShadow: "0 4px 16px rgba(0,0,0,0.35)" }}>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 12.5, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{job.label}</span>
+            {job.status !== "running" && job.status !== "waiting" && (
+              <button onClick={() => removeFullVideoJob(job.id)} style={{ background: "none", border: "none", color: "#8A91A0", cursor: "pointer", fontSize: 14, padding: 0, lineHeight: 1 }}>✕</button>
+            )}
+          </div>
+          {job.status === "waiting" && <div style={{ fontSize: 11.5, color: "#8A91A0", marginTop: 4 }}>Waiting…</div>}
+          {job.status === "running" && <div style={{ fontSize: 11.5, color: TEAL, marginTop: 4 }}>{job.progress || "Processing…"}</div>}
+          {job.status === "error" && <div style={{ fontSize: 11.5, color: RED, marginTop: 4 }}>{job.error}</div>}
+          {job.status === "done" && (
+            <a href={job.url} download={`${job.label}.mp4`} style={{ fontSize: 11.5, color: TEAL, marginTop: 4, display: "inline-block", textDecoration: "none" }}>⬇ Download</a>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // Demandé par l'utilisateur : en ouvrant les clips d'un Play précis (Team > Team Play ou
 // Scouting > Observation), voir tout de suite son contexte — ses 2 Playtypes, 2 PnR
 // Organisation et 2 défenses d'écran les plus fréquents, avec leur rentabilité (PPP), leur
@@ -2156,6 +2292,25 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
     setBusy(false);
   }
 
+  // Demandé par l'utilisateur : la même chose que downloadFullVideo() ci-dessus, mais en
+  // arrière-plan — on peut fermer cette fenêtre et naviguer ailleurs sur le site, et enchaîner
+  // plusieurs téléchargements à la suite (file d'attente, voir enqueueFullVideoJob plus haut).
+  // On prend un instantané de displayedClips/clipNotes/fileOf ICI, au moment du clic — plus rien
+  // ensuite ne dépend de cette fenêtre ni de son état React.
+  function downloadFullVideoInBackground() {
+    if (!displayedClips.length) return;
+    const spec = {
+      clips: displayedClips.map(c => ({
+        label: c.label,
+        file: fileOf(c.groupKey),
+        start: c.item.start,
+        end: c.item.end,
+        note: clipNotes[c.key] || "",
+      })),
+    };
+    enqueueFullVideoJob(playName || noun, spec);
+  }
+
   // Liste affichée : dans l'ordre mémorisé (clipOrder) quand il y en a — les clips pas encore
   // classés (nouveaux, ou pas de notesScope) restent dans leur ordre de génération, à la suite.
   const displayedClips = useMemo(() => {
@@ -2194,8 +2349,11 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
     if (resultUrlRef.current) URL.revokeObjectURL(resultUrlRef.current);
     clipUrlsRef.current.forEach(u => URL.revokeObjectURL(u));
     // Fenêtre fermée en pleine génération : on arrête le moteur, sinon il continuerait en
-    // arrière-plan et bloquerait la prochaine tentative.
-    if (busyRef.current) { runIdRef.current++; resetFfmpeg(); }
+    // arrière-plan et bloquerait la prochaine tentative. Sauf si un téléchargement en
+    // arrière-plan (voir BACKGROUND_FFMPEG_JOB_ACTIVE plus haut) utilise ce même moteur partagé
+    // en ce moment précis — le couper interromprait ce téléchargement par erreur alors qu'il n'a
+    // rien à voir avec CETTE fenêtre qui se ferme.
+    if (busyRef.current && !BACKGROUND_FFMPEG_JOB_ACTIVE) { runIdRef.current++; resetFfmpeg(); }
   }, []);
 
   // Demandé par l'utilisateur (génération bloquée pendant plusieurs minutes, relance sans effet) :
@@ -2428,6 +2586,11 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
                   )}
                   <button onClick={downloadFullVideo} disabled={busy} style={{ background: "none", border: `1px solid ${TEAL}`, borderRadius: 8, color: TEAL, cursor: busy ? "default" : "pointer", fontSize: 12, padding: "6px 12px", fontFamily: "inherit" }}>
                     Download the full video (with notes)
+                  </button>
+                  {/* Demandé par l'utilisateur : pouvoir continuer à utiliser le site pendant que
+                      ce téléchargement tourne, et en lancer plusieurs à la suite. */}
+                  <button onClick={downloadFullVideoInBackground} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 8, color: "#8B93A1", cursor: "pointer", fontSize: 12, padding: "6px 12px", fontFamily: "inherit" }}>
+                    Download in background
                   </button>
                 </div>
               )}
@@ -7980,6 +8143,9 @@ export default function App() {
         isCoach={session.role === "coach"}
         push={push}
       />
+      {/* Demandé par l'utilisateur : visible depuis n'importe quel onglet, pas seulement depuis
+          la fenêtre de clips qui a lancé le téléchargement en arrière-plan. */}
+      <BackgroundJobsTray />
       <div className="screen-only" style={{ maxWidth: 1180, margin: "0 auto", padding: "28px 20px 96px" }}>
         {tab === "home" && (
           <HomeTab
