@@ -1999,10 +1999,24 @@ async function runFullVideoQueue() {
       updateFullVideoJob(job.id, { status: "running" });
       BACKGROUND_FFMPEG_JOB_ACTIVE = true;
       try {
-        const blob = await buildFullVideo(job.spec, (progress) => updateFullVideoJob(job.id, { progress }));
+        // "kind" distingue le téléchargement complet (clips individuels d'un joueur) du montage
+        // classique (Precise/Fast cut) — même file d'attente, un seul moteur ffmpeg à la fois de
+        // toute façon, donc un simple aiguillage suffit.
+        const blob = job.kind === "montage"
+          ? await buildMontage(job.spec, (progress) => updateFullVideoJob(job.id, { progress }))
+          : await buildFullVideo(job.spec, (progress) => updateFullVideoJob(job.id, { progress }));
         const url = URL.createObjectURL(blob);
         updateFullVideoJob(job.id, { status: "done", progress: "", url });
       } catch (err) {
+        // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : après une erreur, "le site n'a plus les
+        // vidéos en mémoire", obligeant à tout rafraîchir) : en réalité les vidéos restaient bien
+        // en mémoire (CLIP_VIDEO_CACHE) — c'est le moteur ffmpeg partagé qui restait bloqué dans
+        // un état planté après un échec (ex. wasm qui crashe sur une vidéo), et comme rien ne le
+        // redémarrait, TOUTE tentative suivante échouait aussitôt, quelle que soit la vidéo
+        // fournie — d'où l'impression trompeuse d'avoir "perdu" les vidéos. resetFfmpeg() (déjà
+        // utilisé pour "Cancel and start over" ci-dessus) force un moteur neuf pour la prochaine
+        // tentative, sans toucher aux vidéos déjà en mémoire — plus besoin de les réimporter.
+        resetFfmpeg();
         updateFullVideoJob(job.id, { status: "error", progress: "", error: err.message || "Error while preparing the full video." });
       }
       BACKGROUND_FFMPEG_JOB_ACTIVE = false;
@@ -2013,7 +2027,17 @@ async function runFullVideoQueue() {
 }
 function enqueueFullVideoJob(label, spec) {
   const id = "job_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
-  FULL_VIDEO_JOBS = [...FULL_VIDEO_JOBS, { id, label, spec, status: "waiting", progress: "", url: null, error: "" }];
+  FULL_VIDEO_JOBS = [...FULL_VIDEO_JOBS, { id, label, kind: "fullVideo", spec, status: "waiting", progress: "", url: null, error: "" }];
+  notifyFullVideoJobs();
+  runFullVideoQueue();
+  return id;
+}
+// Demandé par l'utilisateur : même file d'attente que enqueueFullVideoJob ci-dessus, mais pour le
+// montage classique (Precise cut / Fast cut) — voir downloadMontageInBackground dans
+// ClipExportModal plus bas.
+function enqueueMontageJob(label, spec) {
+  const id = "job_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8);
+  FULL_VIDEO_JOBS = [...FULL_VIDEO_JOBS, { id, label, kind: "montage", spec, status: "waiting", progress: "", url: null, error: "" }];
   notifyFullVideoJobs();
   runFullVideoQueue();
   return id;
@@ -2057,6 +2081,56 @@ async function buildFullVideo(spec, onProgress) {
   for (let i = 0; i < spec.clips.length; i++) { try { await ffmpeg.deleteFile(`bgfull_${i}.mp4`); } catch (e) {} }
   try { await ffmpeg.deleteFile("bgfull_concat.txt"); } catch (e) {}
   try { await ffmpeg.deleteFile("bgfull_output.mp4"); } catch (e) {}
+  return blob;
+}
+
+// Demandé par l'utilisateur : même principe que buildFullVideo ci-dessus, mais pour le montage
+// classique ("Precise cut" / "Fast cut" — voir generate()/cutMode plus bas) lancé en arrière-plan.
+// "spec.groups" est un instantané des lots sélectionnés (fichier, libellé, bornes de chaque clip)
+// pris au moment du clic — indépendant de React, comme buildFullVideo.
+async function buildMontage(spec, onProgress) {
+  const ffmpeg = await getFfmpeg();
+  const concatLines = [];
+  let clipIdx = 0;
+  for (let gi = 0; gi < spec.groups.length; gi++) {
+    const g = spec.groups[gi];
+    onProgress(`Reading video ${gi + 1}/${spec.groups.length} (${g.label})…`);
+    if (!g.file) throw new Error(`Re-add the video for "${g.label}" above before generating this montage.`);
+    const videoMount = await mountVideoForFfmpeg(ffmpeg, g.file, "bgmontage" + gi);
+    for (let ci = 0; ci < g.clips.length; ci++) {
+      const { start, end } = g.clips[ci];
+      const dur = Math.max(0.1, end - start);
+      const outName = `bgmontage_clip_${clipIdx}.mp4`;
+      onProgress(`Cutting clip ${clipIdx + 1} (${g.label})…`);
+      const cutArgs = spec.cutMode === "fast"
+        ? ["-ss", String(start), "-i", videoMount.path, "-t", String(dur), "-c", "copy", "-avoid_negative_ts", "make_zero", outName]
+        : ["-ss", String(start), "-i", videoMount.path, "-t", String(dur), "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", "-avoid_negative_ts", "make_zero", outName];
+      await ffmpeg.exec(cutArgs);
+      concatLines.push(`file '${outName}'`);
+      clipIdx++;
+    }
+    await unmountVideoForFfmpeg(ffmpeg, videoMount.dir);
+  }
+  onProgress("Assembling the montage…");
+  await ffmpeg.writeFile("bgmontage_concat.txt", concatLines.join("\n"));
+  // Même repli copie→ré-encodage que generate() (voir plus bas) si les vidéos sources n'ont pas
+  // toutes le même format.
+  let assembled = false;
+  try {
+    const code = await ffmpeg.exec(["-f", "concat", "-safe", "0", "-i", "bgmontage_concat.txt", "-c", "copy", "bgmontage_output.mp4"]);
+    if (code === 0) { await ffmpeg.readFile("bgmontage_output.mp4"); assembled = true; }
+  } catch (e) {}
+  if (!assembled) {
+    if (spec.cutMode !== "fast") throw new Error("Could not assemble the clips.");
+    onProgress("These videos have different formats — re-encoding the montage, this can take a few minutes…");
+    try { await ffmpeg.deleteFile("bgmontage_output.mp4"); } catch (e) {}
+    await ffmpeg.exec(["-f", "concat", "-safe", "0", "-i", "bgmontage_concat.txt", "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20", "-c:a", "aac", "bgmontage_output.mp4"]);
+  }
+  const data = await ffmpeg.readFile("bgmontage_output.mp4");
+  const blob = new Blob([data.buffer], { type: "video/mp4" });
+  for (let i = 0; i < clipIdx; i++) { try { await ffmpeg.deleteFile(`bgmontage_clip_${i}.mp4`); } catch (e) {} }
+  try { await ffmpeg.deleteFile("bgmontage_concat.txt"); } catch (e) {}
+  try { await ffmpeg.deleteFile("bgmontage_output.mp4"); } catch (e) {}
   return blob;
 }
 
@@ -2286,6 +2360,10 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
       try { await ffmpeg.deleteFile("full_concat.txt"); } catch (e) {}
       try { await ffmpeg.deleteFile("full_output.mp4"); } catch (e) {}
     } catch (err) {
+      // Voir le commentaire équivalent dans runFullVideoQueue plus haut : un échec laissait le
+      // moteur ffmpeg partagé bloqué, obligeant à rafraîchir tout le site pour en avoir un neuf —
+      // alors que les vidéos elles-mêmes n'étaient jamais perdues.
+      resetFfmpeg();
       setError(err.message || "Error while preparing the full video.");
       setProgress("");
     }
@@ -2472,10 +2550,31 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
       }
     } catch (err) {
       if (runId !== runIdRef.current) return; // annulée : cancel() a déjà tout remis à zéro
+      // Voir le commentaire équivalent dans runFullVideoQueue plus haut : un échec laissait le
+      // moteur ffmpeg partagé bloqué, obligeant à rafraîchir tout le site pour en avoir un neuf —
+      // alors que les vidéos elles-mêmes n'étaient jamais perdues.
+      resetFfmpeg();
       setError(err.message || "Error while generating the clips.");
       setProgress("");
     }
     setBusy(false);
+  }
+
+  // Demandé par l'utilisateur : même chose que downloadFullVideoInBackground() plus haut, mais
+  // pour le montage classique ("Precise cut" / "Fast cut") — lancer la génération en arrière-plan
+  // (même file d'attente, voir enqueueMontageJob plus haut) plutôt que de devoir garder cette
+  // fenêtre ouverte jusqu'à la fin. Instantané des lots sélectionnés pris ICI, au clic.
+  function downloadMontageInBackground() {
+    if (!canGenerate) return;
+    const spec = {
+      cutMode,
+      groups: selectedGroups.map(({ g, n }) => ({
+        label: `${noun} ${n} — ${g.label}`,
+        file: fileOf(g.key),
+        clips: g.clips.map(c => ({ start: c.start, end: c.end })),
+      })),
+    };
+    enqueueMontageJob(`${playName} — ${sideLabel}`, spec);
   }
 
   const missingPlural = missingTimestampGroups.length !== 1;
@@ -2643,9 +2742,20 @@ function ClipExportModal({ playName, sideLabel, plays, onClose, grouping, catego
             <a href={resultUrl} download={`${playName.replace(/\s+/g, "_")}_${sideLabel}.mp4`} style={{ ...btnPrimary, textAlign: "center", textDecoration: "none", display: "block", boxSizing: "border-box" }}>Save the clip to my device</a>
           </div>
         ) : (
-          <button disabled={!canGenerate || busy} onClick={generate} style={{ ...btnPrimary, width: "100%", opacity: (!canGenerate || busy) ? 0.5 : 1, cursor: (!canGenerate || busy) ? "default" : "pointer" }}>
-            {busy ? (progress || "Processing…") : generateLabel}
-          </button>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            <button disabled={!canGenerate || busy} onClick={generate} style={{ ...btnPrimary, width: "100%", opacity: (!canGenerate || busy) ? 0.5 : 1, cursor: (!canGenerate || busy) ? "default" : "pointer" }}>
+              {busy ? (progress || "Processing…") : generateLabel}
+            </button>
+            {/* Demandé par l'utilisateur : même principe que "Download in background" pour les
+                clips individuels — pouvoir continuer à utiliser le site pendant que ce montage se
+                génère, et en lancer plusieurs à la suite (même file d'attente, voir
+                enqueueMontageJob plus haut). */}
+            {!busy && (
+              <button disabled={!canGenerate} onClick={downloadMontageInBackground} style={{ background: "none", border: `1px solid ${LINE}`, borderRadius: 8, color: canGenerate ? "#8B93A1" : "#4B515C", cursor: canGenerate ? "pointer" : "default", fontSize: 12, padding: "6px 12px", fontFamily: "inherit" }}>
+                Generate in background
+              </button>
+            )}
+          </div>
         )}
       </div>
     </div>
@@ -4777,6 +4887,10 @@ function MontageTab({ isCoach }) {
       resultRef.current = url; setResultUrl(url); setProgress("");
     } catch (e) {
       if (runId !== runIdRef.current) return; // annulé : cancelExport() a déjà tout remis à zéro
+      // Voir le commentaire équivalent dans runFullVideoQueue (téléchargement en arrière-plan) :
+      // un échec laissait le moteur ffmpeg partagé bloqué, obligeant à rafraîchir tout le site
+      // pour en avoir un neuf — alors que les vidéos elles-mêmes n'étaient jamais perdues.
+      resetFfmpeg();
       setError(e.message || "Export failed."); setProgress("");
     }
     try {
@@ -6015,7 +6129,7 @@ function tagBreakdown(source) {
 // liée au temps de tir adverse analysé) ; côté Team Play ("My team"), ça n'intéresse pas le coach
 // et ne faisait que créer de la confusion (une valeur "0" mal comprise). Masqué uniquement aux
 // endroits Team Play ci-dessous — inchangé partout en Scouting.
-function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true, categories, enableClipExport = false, clipGrouping, topContent, forPrint = false, enableHandFilter = false, context, showShotTime = true }) {
+function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true, categories, enableClipExport = false, clipGrouping, topContent, forPrint = false, enableHandFilter = false, enableDefenseTypeFilter = false, context, showShotTime = true }) {
   // Demandé par l'utilisateur : un seul toggle Attaque/Défense à l'écran plutôt que les deux
   // blocs empilés d'un coup (mêmes graphiques en double, l'un sous l'autre) — pour garder la
   // cohabitation de tous les blocs lisible. En PDF (forPrint), pas de bouton cliquable
@@ -6028,8 +6142,29 @@ function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true
   const [handFilter, setHandFilter] = useState("all");
   const HAND_TAG_FOR = { right: "Right Hand", left: "Left Hand", both: "Both Hands" };
   const applyHandFilter = (plays) => (!enableHandFilter || handFilter === "all") ? plays : plays.filter(p => tagIsSet(p.tags, HAND_TAG_FOR[handFilter]));
-  const off = useMemo(() => applyHandFilter(offAll), [offAll, handFilter, enableHandFilter]);
-  const def = useMemo(() => applyHandFilter(defAll), [defAll, handFilter, enableHandFilter]);
+  // Demandé par l'utilisateur : filtre par Defense Type (Man to man / Zone / Match-up zone /
+  // Press / Box and one), pour ne voir que les clips/stats face à certaines défenses — caché
+  // derrière un petit popover (pas des boutons toujours visibles comme le filtre Main), activé
+  // seulement sur "My Team" (prop dédiée). Par défaut TOUTES les défenses sont sélectionnées
+  // (donc aucun filtrage) : le petit bloc de comparaison "Defense type" existant plus bas n'est
+  // vraiment logique que dans cet état-là (demandé explicitement par l'utilisateur de le garder
+  // tel quel). Les valeurs viennent de cats["Defense type"] (dynamique, en phase avec Settings).
+  const DEFENSE_TYPE_LIST = useMemo(() => categoryTags("Defense type", cats), [cats]);
+  const [defTypeFilter, setDefTypeFilter] = useState(null); // null = toutes sélectionnées (pas de filtre) ; sinon tableau des valeurs cochées
+  const [defTypePopoverOpen, setDefTypePopoverOpen] = useState(false);
+  const defTypeSelected = defTypeFilter || DEFENSE_TYPE_LIST;
+  // Un clip sans AUCUN tag "Defense type" est considéré comme du Man to Man implicite (le plus
+  // fréquent par défaut) — demandé explicitement par l'utilisateur.
+  const hasAnyDefenseTypeTag = (tags) => DEFENSE_TYPE_LIST.some(v => tagIsSet(tags, v));
+  const applyDefenseTypeFilter = (plays) => {
+    if (!enableDefenseTypeFilter || !defTypeFilter || defTypeFilter.length >= DEFENSE_TYPE_LIST.length) return plays;
+    return plays.filter(p => {
+      if (defTypeFilter.some(v => tagIsSet(p.tags, v))) return true;
+      return !hasAnyDefenseTypeTag(p.tags) && defTypeFilter.includes("Man to man");
+    });
+  };
+  const off = useMemo(() => applyDefenseTypeFilter(applyHandFilter(offAll)), [offAll, handFilter, enableHandFilter, defTypeFilter, enableDefenseTypeFilter, DEFENSE_TYPE_LIST]);
+  const def = useMemo(() => applyDefenseTypeFilter(applyHandFilter(defAll)), [defAll, handFilter, enableHandFilter, defTypeFilter, enableDefenseTypeFilter, DEFENSE_TYPE_LIST]);
   const [clipModal, setClipModal] = useState(null); // { name, side: "off"|"def", extraTags? } | null
   // Demandé par l'utilisateur : cliquer sur PPPP ou Open doit d'abord demander QUELS tags de
   // "Results & misc." (paniers marqués, fautes…) ou "Shot selection" (Open/Contested) combiner
@@ -6224,6 +6359,44 @@ function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true
               ))}
             </div>
           )}
+          {enableDefenseTypeFilter && (
+            // Demandé par l'utilisateur : contrairement au filtre Main ci-dessus (toujours visible),
+            // celui-ci doit rester caché — un simple bouton qui ouvre une mini-fenêtre (popover) au clic.
+            <div style={{ position: "relative", display: "inline-block", marginBottom: 14 }}>
+              <button type="button" onClick={() => setDefTypePopoverOpen(o => !o)} style={{
+                display: "flex", alignItems: "center", gap: 6, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 8,
+                padding: "6px 10px", cursor: "pointer", fontFamily: "inherit", fontSize: 12, fontWeight: 600,
+                color: defTypeFilter ? TEAL : "#8B93A1",
+              }}>
+                Defense type{defTypeFilter ? ` (${defTypeSelected.length}/${DEFENSE_TYPE_LIST.length})` : ""} <ChevronDown size={13} />
+              </button>
+              {defTypePopoverOpen && (
+                <>
+                  {/* Fond invisible pleine page, juste pour détecter un clic à l'extérieur et refermer */}
+                  <div onClick={() => setDefTypePopoverOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 400, background: "transparent" }} />
+                  <div style={{ position: "absolute", top: "calc(100% + 6px)", left: 0, zIndex: 401, background: PANEL2, border: `1px solid ${LINE}`, borderRadius: 10, padding: 10, minWidth: 190, boxShadow: "0 8px 24px rgba(0,0,0,0.4)" }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+                      <span style={{ fontSize: 10.5, color: "#5C6470", textTransform: "uppercase", letterSpacing: "0.06em" }}>Defense type</span>
+                      <button type="button" onClick={() => setDefTypeFilter(null)} style={{ background: "none", border: "none", color: TEAL, fontSize: 11, fontWeight: 700, cursor: "pointer", fontFamily: "inherit" }}>All</button>
+                    </div>
+                    {DEFENSE_TYPE_LIST.map(v => {
+                      const checked = defTypeSelected.includes(v);
+                      return (
+                        <label key={v} style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 2px", cursor: "pointer", fontSize: 13 }}>
+                          <input type="checkbox" checked={checked} onChange={() => {
+                            const base = defTypeFilter || DEFENSE_TYPE_LIST;
+                            const next = checked ? base.filter(x => x !== v) : [...base, v];
+                            setDefTypeFilter(next.length >= DEFENSE_TYPE_LIST.length ? null : next);
+                          }} />
+                          <span>{v}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
           <div style={{ display: "flex", gap: 4, background: PANEL, border: `1px solid ${LINE}`, borderRadius: 12, padding: 4, marginBottom: 20 }}>
             <button type="button" onClick={() => setSide("off")} style={{ flex: 1, background: side === "off" ? AMBER : "transparent", color: side === "off" ? INK : "#AEB5BF", border: "none", borderRadius: 9, padding: 9, cursor: "pointer", fontSize: 13, fontWeight: side === "off" ? 800 : 700, fontFamily: "inherit" }}>Offense</button>
             <button type="button" onClick={() => setSide("def")} style={{ flex: 1, background: side === "def" ? AMBER : "transparent", color: side === "def" ? INK : "#AEB5BF", border: "none", borderRadius: 9, padding: 9, cursor: "pointer", fontSize: 13, fontWeight: side === "def" ? 800 : 700, fontFamily: "inherit" }}>Defense</button>
@@ -6233,7 +6406,7 @@ function OffenseDefenseBreakdown({ off: offAll, def: defAll, detailTables = true
               message à la place des cartes, mais les boutons Hand/Offense/Defense ci-dessus
               restent toujours visibles pour pouvoir revenir sur "All" sans quitter la page. */}
           {(side === "off" ? off : def).length === 0 ? (
-            <EmptyState text="No action coded with this hand filter." />
+            <EmptyState text="No action coded with this filter (hand / defense type)." />
           ) : (
             <>
               <SectionTitle eyebrow="Source: coding file" title={side === "off" ? "Offense — how the ball is played" : "Defense — what we defend against"} />
@@ -18355,7 +18528,15 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
   currentY = Math.max(ys[0], ys[1]);
 
   // 4 — forces / faiblesses (stats + playtypes)
-  let ySW0 = sectionStart("Strengths and weaknesses", "Strengths = rank 1-5 or top 3 playtypes · weaknesses = bottom 5 or 3 worst playtypes (among observed teams)");
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : du texte illisible en fin de page) : cette
+  // section pouvait dépasser 400pt, mais ne vérifiait JAMAIS si ça débordait — ni avant de
+  // démarrer (minRoom par défaut, 170, beaucoup trop petit), ni pendant le dessin des deux
+  // colonnes. Contrairement à "General stats"/"Stats comparison" plus haut, les deux colonnes ici
+  // (forces à gauche, faiblesses à droite) ne sont PAS interchangeables, donc une pagination au
+  // milieu de la section casserait leur alignement ligne à ligne. On calcule donc, ci-dessous
+  // (swNeed), la vraie place nécessaire pour CETTE équipe et on la passe en minRoom : soit la
+  // section tient entièrement sur la place restante, soit elle repart sur une page neuve entière
+  // — jamais de dessin à moitié coupé par le bas de page.
   const swColEnds = [];
   const rows = SCOUT_SW_KEYS.map(k => {
     const sc = SCOUT_STAT_SCHEMA.find(s => s.key === k); const v = t.stats[k]; const r = rankOf(k, teamName);
@@ -18364,6 +18545,16 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
   const strong = rows.filter(x => x.r.rank <= 5).sort((a, b) => a.r.rank - b.r.rank);
   const weak = rows.filter(x => x.r.rank > x.r.total - 5).sort((a, b) => b.r.rank - a.r.rank);
   const swo = ptSW("off"), swd = ptSW("def");
+  // Demandé par l'utilisateur ("réduire un maximum le nombre de pages") : la partie "stats" de
+  // chaque colonne garde toujours la même hauteur (280pt, calée sur 12 lignes — voir le
+  // Math.max() plus bas, qui aligne les deux colonnes même si l'une a moins de stats que
+  // l'autre), donc pas de gain possible là. En revanche, la partie "playtypes" varie vraiment
+  // selon le nombre réel de playtypes forts/faibles (0 à 3 chacun) : plutôt qu'un minRoom fixe
+  // au pire des cas (3+3 des deux côtés), on calcule la vraie hauteur nécessaire pour CETTE
+  // équipe, pour ne forcer une page neuve que quand c'est réellement nécessaire.
+  const swPtH = (po, pd) => (14 + (po.length ? po.length * 21 : 20) + 4) + (14 + (pd.length ? pd.length * 21 : 20) + 4);
+  const swNeed = 280 + Math.max(swPtH(swo.strong, swd.strong), swPtH(swo.weak, swd.weak)) + 10;
+  let ySW0 = sectionStart("Strengths and weaknesses", "Strengths = rank 1-5 or top 3 playtypes · weaknesses = bottom 5 or 3 worst playtypes (among observed teams)", swNeed);
   [[strong, "STRENGTHS", REP.GRN, REP.LGRN, swo.strong, swd.strong], [weak, "WEAKNESSES", REP.RED, REP.LRED, swo.weak, swd.weak]].forEach(([list, ttl, c1, c2, po, pd], ci) => {
     const x = M + ci * (colW + 24); let y = ySW0;
     text(ttl, x, y, { size: 10, bold: true, color: c1 }); y += 8;
@@ -18604,7 +18795,15 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
     currentY = y;
   }
 
-  let yPI = sectionStart("Player impact: on court vs bench", "Team stats with the player on court vs on the bench · per 100 possessions · green = better side");
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : du texte illisible en fin de page) : jusqu'à
+  // 14 joueurs de 26pt chacun étaient dessinés SANS jamais vérifier la place restante — toutes
+  // les lignes partagent le même en-tête de colonnes (dessiné une seule fois en haut de
+  // section), donc pas de pagination ligne à ligne possible ici : on calcule la vraie place
+  // nécessaire pour le nombre RÉEL de joueurs de cette équipe (demandé : "réduire un maximum le
+  // nombre de pages" — pas de minRoom au pire des cas si l'équipe a moins de joueurs à afficher).
+  const piList = LS ? LS.impact.filter(p => p.min >= 10).slice(0, 14) : [];
+  const piNeed = LS ? 16 + Math.max(1, piList.length) * 26 + 10 : 40;
+  let yPI = sectionStart("Player impact: on court vs bench", "Team stats with the player on court vs on the bench · per 100 possessions · green = better side", piNeed);
   if (!LS) {
     text("LiveStats unavailable: " + lsErr, M, yPI + 8, { size: 10, color: REP.MUTE, maxW: W - 2 * M });
     currentY = yPI + 24;
@@ -18613,7 +18812,6 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
     const x0 = M + 118, cwid = (W - M - x0) / cols.length;
     cols.forEach(([h], i) => { text(h, x0 + i * cwid + cwid / 2, yPI, { size: 8, bold: true, align: "center" }); text("on", x0 + i * cwid + cwid * 0.28, yPI + 10, { size: 6.5, color: REP.MUTE, align: "center" }); text("bench", x0 + i * cwid + cwid * 0.72, yPI + 10, { size: 6.5, color: REP.MUTE, align: "center" }); });
     text("Player", M + 6, yPI + 10, { size: 7, color: REP.MUTE }); text("Min", M + 100, yPI + 10, { size: 7, color: REP.MUTE, align: "right" });
-    const piList = LS.impact.filter(p => p.min >= 10).slice(0, 14);
     piList.forEach((p, r) => {
       const y = yPI + 16 + r * 26;
       rect(M, y, W - 2 * M, 23, REP.BG, 4);
@@ -18639,7 +18837,12 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
     const L5 = LS.lineups.filter(l => l.min >= 5);
     let y = yLU;
     [["MOST USED", [...L5].sort((a, b) => b.min - a.min).slice(0, 5), REP.GREY], ["MOST EFFICIENT", [...L5].sort((a, b) => b.net10 - a.net10).slice(0, 5), REP.GRN], ["LEAST EFFICIENT", [...L5].sort((a, b) => a.net10 - b.net10).slice(0, 5), REP.RED]].forEach(([ttl, list, c]) => {
-      if (y + 50 > H - 40) { newPage("Lineups (cont.)", "5-man lineups from LiveStats (minutes, points for/against, net points per 10 minutes) · at least 5 minutes played together"); y = 92; }
+      // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : du texte illisible en fin de page) : ce
+      // seuil (50pt) ne couvrait que le titre du groupe, pas ses jusqu'à 5 lignes de 34pt
+      // (~178pt) — un groupe pouvait démarrer alors qu'il restait un peu de place, puis déborder
+      // en plein milieu de sa propre liste. Le seuil couvre maintenant le groupe en entier.
+      const need = 8 + (list.length ? list.length * 34 : 24) + 10;
+      if (y + need > H - 40) { newPage("Lineups (cont.)", "5-man lineups from LiveStats (minutes, points for/against, net points per 10 minutes) · at least 5 minutes played together"); y = 92; }
       text(ttl, M, y, { size: 8, bold: true, color: c }); y += 8;
       if (!list.length) { text("Not enough minutes together yet.", M + 4, y + 12, { size: 8.5, color: REP.MUTE }); y += 24; }
       list.forEach(l => {
@@ -18793,7 +18996,15 @@ async function exportScoutingReportPdf({ teamName, teams, ourStats, ourName = "O
   }
 
   // 15-16 — joueurs (FFBB) : stats individuelles + points générés, puis fiches scoring
-  let yFF0 = sectionStart("Individual stats and points created", "Regular season averages from the FFBB (Sync roster) · points created = points + points off assists (LiveStats)", 260);
+  // BUG RÉEL CORRIGÉ (signalé par l'utilisateur : du texte illisible en fin de page) : minRoom
+  // (260) bien trop petit pour le pire des cas réel — jusqu'à 12 joueurs PUIS le graphique
+  // "Points created" (jusqu'à 10 lignes de plus) juste en dessous, sans aucune vérification de
+  // place restante entre les deux. Calculé maintenant sur le nombre RÉEL de joueurs FFBB de
+  // cette équipe (demandé : "réduire un maximum le nombre de pages") plutôt qu'un pire des cas
+  // fixe à 12 joueurs, qui forcerait une page neuve même pour un effectif plus court.
+  const ffStatsRows = Math.min(12, FF.length), ffPcRows = Math.min(10, FF.length);
+  const ffNeed = 6 + ffStatsRows * 19 + 26 + 8 + ffPcRows * 19 + 30;
+  let yFF0 = sectionStart("Individual stats and points created", "Regular season averages from the FFBB (Sync roster) · points created = points + points off assists (LiveStats)", ffNeed);
   if (!FF.length) {
     text("No FFBB player stats for this team yet (Scouting Report › Individual › Sync roster).", M, yFF0 + 8, { size: 10, color: REP.MUTE });
     currentY = yFF0 + 24;
@@ -25004,7 +25215,7 @@ function TeamTab({ roster, allPlays, matchesIndex, matchFilter, isCoach, team, v
         )
       )}
 
-      {subtab === "collectif" && (isCoach || v.teamPlay) && <OffenseDefenseBreakdown off={teamOff} def={teamDef} detailTables={false} enableClipExport context="team" showShotTime={false} />}
+      {subtab === "collectif" && (isCoach || v.teamPlay) && <OffenseDefenseBreakdown off={teamOff} def={teamDef} detailTables={false} enableClipExport enableDefenseTypeFilter context="team" showShotTime={false} />}
 
       {subtab === "avance" && (isCoach || v.advanced) && (
         <>
